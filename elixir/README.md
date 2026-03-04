@@ -15,12 +15,11 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 
 1. Polls Linear for candidate work
 2. Creates an isolated workspace per issue
-3. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
-   workspace
-4. Sends a workflow prompt to Codex
-5. Keeps Codex working on the issue until the work is done
+3. Launches Claude Code as a CLI subprocess inside the workspace
+4. Sends a workflow prompt to Claude Code
+5. Keeps Claude Code working on the issue until the work is done
 
-During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
+During Claude Code sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
 skills can make raw Linear GraphQL calls.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
@@ -28,13 +27,12 @@ Symphony stops the active agent for that issue and cleans up matching workspaces
 
 ## How to use it
 
-1. Make sure your codebase is set up to work well with agents: see
-   [Harness engineering](https://openai.com/index/harness-engineering/).
+1. Make sure your codebase is set up to work well with agents.
 2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
    set it as the `LINEAR_API_KEY` environment variable.
 3. Copy this directory's `WORKFLOW.md` to your repo.
 4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
-   - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
+   - The `linear` skill expects Symphony's `linear_graphql` tool for raw Linear GraphQL
      operations such as comment editing or upload flows.
 5. Customize the copied `WORKFLOW.md` file for your project.
    - To get your project's slug, right-click the project and copy its URL. The slug is part of the
@@ -81,7 +79,7 @@ Optional flags:
 - `--port` also starts the HTTP observability service (default: disabled)
 
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
-Codex session prompt.
+Claude Code session prompt.
 
 Minimal example:
 
@@ -98,8 +96,12 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
-codex:
-  command: codex app-server
+claude:
+  command: claude
+  permission_mode: default
+  dangerously_skip_permissions: true
+  max_turns: 50
+  output_format: stream-json
 ---
 
 You are working on a Linear issue {{ issue.identifier }}.
@@ -110,15 +112,20 @@ Title: {{ issue.title }} Body: {{ issue.description }}
 Notes:
 
 - If a value is missing, defaults are used.
-- Safer Codex defaults are used when policy fields are omitted:
-  - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
-  - `codex.thread_sandbox` defaults to `workspace-write`
-  - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
-- Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
-- Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
-- Supported `codex.turn_sandbox_policy.type` values: `dangerFullAccess`, `readOnly`,
-  `externalSandbox`, `workspaceWrite`.
-- `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
+- `claude.permission_mode` controls Claude Code's permission system. Supported values: `default`,
+  `plan`, `bypassPermissions`. Default: `default`.
+- `claude.dangerously_skip_permissions` when `true`, passes `--dangerously-skip-permissions` to
+  Claude Code, bypassing all permission checks. Recommended for unattended operation when combined
+  with `claude.allowed_tools` for tightening. Default: `true`.
+- `claude.max_turns` caps how many back-to-back turns Claude Code will run per invocation.
+  Default: `50`.
+- `claude.output_format` controls output parsing. Must be `stream-json` for Symphony to parse
+  usage events. Default: `stream-json`.
+- `claude.model` optionally overrides the Claude model used. When unset, Claude Code uses its default.
+- `claude.allowed_tools` optionally restricts which tools Claude Code may use (list of tool names).
+- `claude.turn_timeout_ms` maximum wall-clock time per turn in milliseconds.
+- `claude.stall_timeout_ms` maximum time without output before a turn is considered stalled.
+- `agent.max_turns` caps how many back-to-back Claude Code turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
@@ -129,7 +136,7 @@ Notes:
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
-  while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
+  while `claude.command` stays a shell command string and any `$VAR` expansion there happens in the
   launched shell.
 
 ```yaml
@@ -140,8 +147,10 @@ workspace:
 hooks:
   after_create: |
     git clone --depth 1 "$SOURCE_REPO_URL" .
-codex:
-  command: "$CODEX_BIN app-server --model gpt-5.3-codex"
+claude:
+  command: "$CLAUDE_BIN"
+  model: "claude-opus-4-6"
+  dangerously_skip_permissions: true
 ```
 
 - If `WORKFLOW.md` is missing or has invalid YAML, startup and scheduling are halted until fixed.
@@ -153,7 +162,7 @@ codex:
 - `lib/`: application code and Mix tasks
 - `test/`: ExUnit coverage for runtime behavior
 - `WORKFLOW.md`: in-repo workflow contract used by local runs
-- `../.codex/`: repository-local Codex skills and setup helpers
+- `../.claude/`: repository-local Claude Code configuration and setup helpers
 
 ## Testing
 
@@ -171,7 +180,7 @@ actively running subagents, which is very useful during development.
 
 ### What's the easiest way to set this up for my own codebase?
 
-Launch `codex` in your repo, give it the URL to the Symphony repo, and ask it to set things up for
+Launch `claude` in your repo, give it the URL to the Symphony repo, and ask it to set things up for
 you.
 
 ## License

@@ -53,14 +53,20 @@ defmodule SymphonyElixir.Claude.StreamParser do
 
   defp normalize_event(payload) do
     type = Map.get(payload, "type") || Map.get(payload, :type)
-    Map.put(payload, :event_type, categorize_type(type))
+    Map.put(payload, :event_type, categorize_type(type, payload))
   end
 
-  defp categorize_type("assistant"), do: :assistant
-  defp categorize_type("tool"), do: :tool_use
-  defp categorize_type("result"), do: :result
-  defp categorize_type("system"), do: :system
-  defp categorize_type(_), do: :unknown
+  # A "system" event carrying a session_id signals the start of a new session.
+  # The orchestrator uses :session_started to increment the turn counter.
+  defp categorize_type("system", payload) do
+    session_id = Map.get(payload, "session_id") || Map.get(payload, :session_id)
+    if is_binary(session_id), do: :session_started, else: :system
+  end
+
+  defp categorize_type("assistant", _payload), do: :assistant
+  defp categorize_type("tool", _payload), do: :tool_use
+  defp categorize_type("result", _payload), do: :result
+  defp categorize_type(_, _payload), do: :unknown
 
   defp integer_field(map, keys) when is_list(keys) do
     Enum.find_value(keys, fn key ->

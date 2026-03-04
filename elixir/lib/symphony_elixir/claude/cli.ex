@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Claude.CLI do
   alias SymphonyElixir.Claude.StreamParser
   alias SymphonyElixir.Config
 
-  @port_line_bytes 10_485_760
+  @port_line_bytes 1_048_576
   @max_log_bytes 1_000
 
   @type run_result :: %{
@@ -37,11 +37,19 @@ defmodule SymphonyElixir.Claude.CLI do
   defp execute(args, workspace, opts) do
     on_event = Keyword.get(opts, :on_event, fn _event -> :ok end)
     turn_timeout_ms = Keyword.get(opts, :turn_timeout_ms, Config.claude_turn_timeout_ms())
+    stall_timeout_ms = Keyword.get(opts, :stall_timeout_ms, Config.claude_stall_timeout_ms())
 
     with :ok <- validate_workspace(workspace) do
       command = Config.claude_command()
       {cmd, cmd_args} = parse_command(command, args)
 
+      # Erlang ports cannot read stdout and stderr as separate streams, so we
+      # merge them with :stderr_to_stdout. The spec says stderr is diagnostics
+      # only, not part of the protocol. Non-JSON stderr lines hit the
+      # {:error, {:json_parse_error, ...}} branch in handle_line/3 and are
+      # quietly logged at debug level, so they don't corrupt state. If Claude
+      # Code ever emits JSON-shaped diagnostics on stderr this could be a
+      # problem, but in practice its stderr is plain text.
       port =
         Port.open(
           {:spawn_executable, cmd},
@@ -55,10 +63,12 @@ defmodule SymphonyElixir.Claude.CLI do
           ]
         )
 
-      deadline = System.monotonic_time(:millisecond) + turn_timeout_ms
+      now = System.monotonic_time(:millisecond)
+      deadline = now + turn_timeout_ms
+      stall_deadline = now + stall_timeout_ms
 
       try do
-        stream_loop(port, deadline, on_event, %{
+        stream_loop(port, deadline, stall_deadline, stall_timeout_ms, on_event, %{
           session_id: nil,
           usage: nil,
           buffer: ""
@@ -71,36 +81,50 @@ defmodule SymphonyElixir.Claude.CLI do
     end
   end
 
-  defp stream_loop(port, deadline, on_event, state) do
-    remaining_ms = max(deadline - System.monotonic_time(:millisecond), 0)
+  defp stream_loop(port, deadline, stall_deadline, stall_timeout_ms, on_event, state) do
+    now = System.monotonic_time(:millisecond)
+    remaining_ms = max(min(deadline - now, stall_deadline - now), 0)
 
-    if remaining_ms <= 0 do
-      safe_port_close(port)
-      {:error, :turn_timeout}
-    else
-      receive do
-        {^port, {:data, {:eol, line}}} ->
-          state = handle_line(line, on_event, state)
-          stream_loop(port, deadline, on_event, state)
+    cond do
+      now >= deadline ->
+        safe_port_close(port)
+        {:error, :turn_timeout}
 
-        {^port, {:data, {:noeol, chunk}}} ->
-          stream_loop(port, deadline, on_event, %{state | buffer: state.buffer <> chunk})
+      now >= stall_deadline ->
+        safe_port_close(port)
+        {:error, :stall_timeout}
 
-        {^port, {:exit_status, 0}} ->
-          {:ok,
-           %{
-             session_id: state.session_id,
-             exit_code: 0,
-             usage: state.usage
-           }}
+      true ->
+        receive do
+          {^port, {:data, {:eol, line}}} ->
+            state = handle_line(line, on_event, state)
+            new_stall_deadline = System.monotonic_time(:millisecond) + stall_timeout_ms
+            stream_loop(port, deadline, new_stall_deadline, stall_timeout_ms, on_event, state)
 
-        {^port, {:exit_status, code}} ->
-          {:error, {:subprocess_exit, code}}
-      after
-        remaining_ms ->
-          safe_port_close(port)
-          {:error, :turn_timeout}
-      end
+          {^port, {:data, {:noeol, chunk}}} ->
+            new_stall_deadline = System.monotonic_time(:millisecond) + stall_timeout_ms
+            stream_loop(port, deadline, new_stall_deadline, stall_timeout_ms, on_event, %{state | buffer: state.buffer <> chunk})
+
+          {^port, {:exit_status, 0}} ->
+            {:ok,
+             %{
+               session_id: state.session_id,
+               exit_code: 0,
+               usage: state.usage
+             }}
+
+          {^port, {:exit_status, code}} ->
+            {:error, {:subprocess_exit, code}}
+        after
+          remaining_ms ->
+            safe_port_close(port)
+
+            if System.monotonic_time(:millisecond) >= deadline do
+              {:error, :turn_timeout}
+            else
+              {:error, :stall_timeout}
+            end
+        end
     end
   end
 
@@ -145,7 +169,7 @@ defmodule SymphonyElixir.Claude.CLI do
   end
 
   defp build_resume_args(session_id, prompt, workspace) do
-    [
+    base = [
       "--resume",
       session_id,
       "-p",
@@ -154,9 +178,14 @@ defmodule SymphonyElixir.Claude.CLI do
       Config.claude_output_format(),
       "--max-turns",
       to_string(Config.claude_max_turns()),
+      "--permission-mode",
+      Config.claude_permission_mode(),
       "--cwd",
       Path.expand(workspace)
     ]
+
+    base
+    |> maybe_add_flag(Config.claude_dangerously_skip_permissions?(), "--dangerously-skip-permissions")
   end
 
   defp maybe_add_flag(args, true, flag), do: args ++ [flag]

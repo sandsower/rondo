@@ -1,6 +1,6 @@
 # Symphony Elixir
 
-This directory contains the Elixir agent orchestration service that polls Linear, creates per-issue workspaces, and runs Codex in app-server mode.
+This directory contains the Elixir agent orchestration service that polls Linear, creates per-issue workspaces, and runs Claude Code as a CLI subprocess.
 
 ## Environment
 
@@ -19,7 +19,7 @@ This directory contains the Elixir agent orchestration service that polls Linear
     change where practical so the spec stays current.
 - Prefer adding config access through `SymphonyElixir.Config` instead of ad-hoc env reads.
 - Workspace safety is critical:
-  - Never run Codex turn cwd in source repo.
+  - Never run Claude Code with cwd in the source repo.
   - Workspaces must stay under configured workspace root.
 - Orchestrator behavior is stateful and concurrency-sensitive; preserve retry, reconciliation, and cleanup semantics.
 - Follow `docs/logging.md` for logging conventions and required issue/session context fields.
