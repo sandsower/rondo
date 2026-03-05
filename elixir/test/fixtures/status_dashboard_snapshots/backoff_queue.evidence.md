@@ -11,7 +11,7 @@
 │
 │   ID       STAGE          PID      AGE / TURN   TOKENS     SESSION        EVENT                                  
 │   ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
-│ ● MT-638   retrying       4242     20m 25s / 7      14,200 thre...567890  agent message streaming: waiting on ...
+│ ● MT-638   retrying       threa... 20m 25s / 7      14,200 thre...567890  agent message streaming: waiting on ...
 │
 ├─ Backoff queue
 │

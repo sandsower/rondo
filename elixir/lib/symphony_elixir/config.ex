@@ -56,6 +56,10 @@ defmodule SymphonyElixir.Config do
                                  terminal_states: [
                                    type: {:list, :string},
                                    default: @default_terminal_states
+                                 ],
+                                 label_filter: [
+                                   type: {:list, :string},
+                                   default: []
                                  ]
                                ]
                              ],
@@ -203,6 +207,11 @@ defmodule SymphonyElixir.Config do
   @spec linear_terminal_states() :: [String.t()]
   def linear_terminal_states do
     get_in(validated_workflow_options(), [:tracker, :terminal_states])
+  end
+
+  @spec tracker_label_filter() :: [String.t()]
+  def tracker_label_filter do
+    get_in(validated_workflow_options(), [:tracker, :label_filter])
   end
 
   @spec poll_interval_ms() :: pos_integer()
@@ -430,6 +439,7 @@ defmodule SymphonyElixir.Config do
     |> put_if_present(:project_slug, scalar_string_value(Map.get(section, "project_slug")))
     |> put_if_present(:active_states, csv_value(Map.get(section, "active_states")))
     |> put_if_present(:terminal_states, csv_value(Map.get(section, "terminal_states")))
+    |> put_if_present(:label_filter, label_filter_value(Map.get(section, "label_filter")))
   end
 
   defp extract_polling_options(section) do
@@ -544,6 +554,19 @@ defmodule SymphonyElixir.Config do
   end
 
   defp hook_command_value(_value), do: :omit
+
+  defp label_filter_value(values) when is_list(values) do
+    filtered =
+      values
+      |> Enum.filter(&is_binary/1)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+
+    if filtered == [], do: :omit, else: filtered
+  end
+
+  defp label_filter_value(value) when is_binary(value), do: csv_value(value)
+  defp label_filter_value(_), do: :omit
 
   defp csv_value(values) when is_list(values) do
     values

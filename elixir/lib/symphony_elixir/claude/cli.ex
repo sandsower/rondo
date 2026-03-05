@@ -148,18 +148,17 @@ defmodule SymphonyElixir.Claude.CLI do
     end
   end
 
-  defp build_first_turn_args(prompt, workspace) do
+  defp build_first_turn_args(prompt, _workspace) do
     base = [
       "-p",
       prompt,
+      "--verbose",
       "--output-format",
       Config.claude_output_format(),
       "--max-turns",
       to_string(Config.claude_max_turns()),
       "--permission-mode",
-      Config.claude_permission_mode(),
-      "--cwd",
-      Path.expand(workspace)
+      Config.claude_permission_mode()
     ]
 
     base
@@ -168,20 +167,19 @@ defmodule SymphonyElixir.Claude.CLI do
     |> maybe_add_allowed_tools(Config.claude_allowed_tools())
   end
 
-  defp build_resume_args(session_id, prompt, workspace) do
+  defp build_resume_args(session_id, prompt, _workspace) do
     base = [
       "--resume",
       session_id,
       "-p",
       prompt,
+      "--verbose",
       "--output-format",
       Config.claude_output_format(),
       "--max-turns",
       to_string(Config.claude_max_turns()),
       "--permission-mode",
-      Config.claude_permission_mode(),
-      "--cwd",
-      Path.expand(workspace)
+      Config.claude_permission_mode()
     ]
 
     base

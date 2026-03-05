@@ -54,6 +54,51 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
+  @query_with_labels """
+  query SymphonyLinearPollWithLabels($projectSlug: String!, $stateNames: [String!]!, $labelNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
+    issues(filter: {project: {slugId: {eq: $projectSlug}}, state: {name: {in: $stateNames}}, labels: {name: {in: $labelNames}}}, first: $first, after: $after) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        priority
+        state {
+          name
+        }
+        branchName
+        url
+        assignee {
+          id
+        }
+        labels {
+          nodes {
+            name
+          }
+        }
+        inverseRelations(first: $relationFirst) {
+          nodes {
+            type
+            issue {
+              id
+              identifier
+              state {
+                name
+              }
+            }
+          }
+        }
+        createdAt
+        updatedAt
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+  """
+
   @query_by_ids """
   query SymphonyLinearIssuesById($ids: [ID!]!, $first: Int!, $relationFirst: Int!) {
     issues(filter: {id: {in: $ids}}, first: $first) {
@@ -103,8 +148,8 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
-  @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_candidate_issues do
+  @spec fetch_candidate_issues(keyword()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_candidate_issues(opts \\ []) do
     project_slug = Config.linear_project_slug()
 
     cond do
@@ -116,7 +161,8 @@ defmodule SymphonyElixir.Linear.Client do
 
       true ->
         with {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_by_states(project_slug, Config.linear_active_states(), assignee_filter)
+          label_filter = Config.tracker_label_filter()
+          do_fetch_by_states(project_slug, Config.linear_active_states(), assignee_filter, label_filter, opts)
         end
     end
   end
@@ -138,7 +184,9 @@ defmodule SymphonyElixir.Linear.Client do
           {:error, :missing_linear_project_slug}
 
         true ->
-          do_fetch_by_states(project_slug, normalized_states, nil)
+          # Intentionally passes nil for label_filter: state-based lookups (e.g. terminal
+          # cleanup) should see all issues regardless of configured label filter.
+          do_fetch_by_states(project_slug, normalized_states, nil, nil)
       end
     end
   end
@@ -218,25 +266,20 @@ defmodule SymphonyElixir.Linear.Client do
     |> finalize_paginated_issues()
   end
 
-  defp do_fetch_by_states(project_slug, state_names, assignee_filter) do
-    do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [])
+  defp do_fetch_by_states(project_slug, state_names, assignee_filter, label_filter, opts \\ []) do
+    do_fetch_by_states_page(project_slug, state_names, assignee_filter, label_filter, nil, [], opts)
   end
 
-  defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, after_cursor, acc_issues) do
-    with {:ok, body} <-
-           graphql(@query, %{
-             projectSlug: project_slug,
-             stateNames: state_names,
-             first: @issue_page_size,
-             relationFirst: @issue_page_size,
-             after: after_cursor
-           }),
+  defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, label_filter, after_cursor, acc_issues, opts) do
+    {query, variables} = build_poll_query(project_slug, state_names, label_filter, after_cursor)
+
+    with {:ok, body} <- graphql(query, variables, opts),
          {:ok, issues, page_info} <- decode_linear_page_response(body, assignee_filter) do
       updated_acc = prepend_page_issues(issues, acc_issues)
 
       case next_page_cursor(page_info) do
         {:ok, next_cursor} ->
-          do_fetch_by_states_page(project_slug, state_names, assignee_filter, next_cursor, updated_acc)
+          do_fetch_by_states_page(project_slug, state_names, assignee_filter, label_filter, next_cursor, updated_acc, opts)
 
         :done ->
           {:ok, finalize_paginated_issues(updated_acc)}
@@ -245,6 +288,30 @@ defmodule SymphonyElixir.Linear.Client do
           {:error, reason}
       end
     end
+  end
+
+  defp build_poll_query(project_slug, state_names, label_names, after_cursor)
+       when is_list(label_names) and label_names != [] do
+    {@query_with_labels,
+     %{
+       projectSlug: project_slug,
+       stateNames: state_names,
+       labelNames: label_names,
+       first: @issue_page_size,
+       relationFirst: @issue_page_size,
+       after: after_cursor
+     }}
+  end
+
+  defp build_poll_query(project_slug, state_names, _label_names, after_cursor) do
+    {@query,
+     %{
+       projectSlug: project_slug,
+       stateNames: state_names,
+       first: @issue_page_size,
+       relationFirst: @issue_page_size,
+       after: after_cursor
+     }}
   end
 
   defp prepend_page_issues(issues, acc_issues) when is_list(issues) and is_list(acc_issues) do
