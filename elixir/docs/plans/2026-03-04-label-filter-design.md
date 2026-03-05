@@ -11,3 +11,7 @@
 - `linear/client.ex` -- add query variant with label filter, select at call time
 - `test_support.exs` -- add `tracker_label_filter` config override
 - Tests for config parsing and client filtering
+
+## Status
+
+Implemented.
