@@ -1,7 +1,10 @@
 ---
 tracker:
   kind: linear
+  api_key: "$LINEAR_API_KEY"
   project_slug: "symphony-0c79b11b75ea"
+  label_filter:
+    - AI-ready
   active_states:
     - Todo
     - In Progress
