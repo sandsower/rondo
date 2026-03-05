@@ -805,6 +805,72 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.tracker_label_filter() == []
   end
 
+  test "linear client sends label filter in GraphQL query when configured" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_label_filter: ["symphony"],
+      tracker_api_token: "test-token",
+      tracker_project_slug: "test-project"
+    )
+
+    test_pid = self()
+
+    request_fun = fn payload, _headers ->
+      send(test_pid, {:graphql_payload, payload})
+
+      {:ok,
+       %{
+         status: 200,
+         body: %{
+           "data" => %{
+             "issues" => %{
+               "nodes" => [],
+               "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+             }
+           }
+         }
+       }}
+    end
+
+    assert {:ok, []} = Client.fetch_candidate_issues(request_fun: request_fun)
+
+    assert_received {:graphql_payload, payload}
+    assert payload["variables"][:labelNames] == ["symphony"]
+    assert payload["query"] =~ "labelNames"
+  end
+
+  test "linear client omits label filter from GraphQL query when not configured" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_label_filter: nil,
+      tracker_api_token: "test-token",
+      tracker_project_slug: "test-project"
+    )
+
+    test_pid = self()
+
+    request_fun = fn payload, _headers ->
+      send(test_pid, {:graphql_payload, payload})
+
+      {:ok,
+       %{
+         status: 200,
+         body: %{
+           "data" => %{
+             "issues" => %{
+               "nodes" => [],
+               "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+             }
+           }
+         }
+       }}
+    end
+
+    assert {:ok, []} = Client.fetch_candidate_issues(request_fun: request_fun)
+
+    assert_received {:graphql_payload, payload}
+    refute Map.has_key?(payload["variables"], :labelNames)
+    refute payload["query"] =~ "labelNames"
+  end
+
   test "workflow prompt is used when building base prompt" do
     workflow_prompt = "Workflow prompt body used as claude instruction."
 

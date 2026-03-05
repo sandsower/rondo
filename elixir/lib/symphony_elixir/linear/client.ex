@@ -148,8 +148,8 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
-  @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_candidate_issues do
+  @spec fetch_candidate_issues(keyword()) :: {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_candidate_issues(opts \\ []) do
     project_slug = Config.linear_project_slug()
 
     cond do
@@ -162,7 +162,7 @@ defmodule SymphonyElixir.Linear.Client do
       true ->
         with {:ok, assignee_filter} <- routing_assignee_filter() do
           label_filter = Config.tracker_label_filter()
-          do_fetch_by_states(project_slug, Config.linear_active_states(), assignee_filter, label_filter)
+          do_fetch_by_states(project_slug, Config.linear_active_states(), assignee_filter, label_filter, opts)
         end
     end
   end
@@ -264,20 +264,20 @@ defmodule SymphonyElixir.Linear.Client do
     |> finalize_paginated_issues()
   end
 
-  defp do_fetch_by_states(project_slug, state_names, assignee_filter, label_filter) do
-    do_fetch_by_states_page(project_slug, state_names, assignee_filter, label_filter, nil, [])
+  defp do_fetch_by_states(project_slug, state_names, assignee_filter, label_filter, opts \\ []) do
+    do_fetch_by_states_page(project_slug, state_names, assignee_filter, label_filter, nil, [], opts)
   end
 
-  defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, label_filter, after_cursor, acc_issues) do
+  defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, label_filter, after_cursor, acc_issues, opts) do
     {query, variables} = build_poll_query(project_slug, state_names, label_filter, after_cursor)
 
-    with {:ok, body} <- graphql(query, variables),
+    with {:ok, body} <- graphql(query, variables, opts),
          {:ok, issues, page_info} <- decode_linear_page_response(body, assignee_filter) do
       updated_acc = prepend_page_issues(issues, acc_issues)
 
       case next_page_cursor(page_info) do
         {:ok, next_cursor} ->
-          do_fetch_by_states_page(project_slug, state_names, assignee_filter, label_filter, next_cursor, updated_acc)
+          do_fetch_by_states_page(project_slug, state_names, assignee_filter, label_filter, next_cursor, updated_acc, opts)
 
         :done ->
           {:ok, finalize_paginated_issues(updated_acc)}
