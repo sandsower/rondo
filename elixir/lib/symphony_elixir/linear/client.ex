@@ -184,6 +184,8 @@ defmodule SymphonyElixir.Linear.Client do
           {:error, :missing_linear_project_slug}
 
         true ->
+          # Intentionally passes nil for label_filter: state-based lookups (e.g. terminal
+          # cleanup) should see all issues regardless of configured label filter.
           do_fetch_by_states(project_slug, normalized_states, nil, nil)
       end
     end
