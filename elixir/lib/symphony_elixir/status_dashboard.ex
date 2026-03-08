@@ -356,7 +356,6 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize("out #{format_count(claude_output_tokens)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
              colorize("total #{format_count(claude_total_tokens)}", @ansi_yellow),
-           colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
            project_link_lines,
            project_refresh_line,
            colorize("├─ Running", @ansi_bold),
