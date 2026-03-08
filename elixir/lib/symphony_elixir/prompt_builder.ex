@@ -51,7 +51,13 @@ defmodule SymphonyElixir.PromptBuilder do
   defp to_solid_value(%Time{} = value), do: Time.to_iso8601(value)
   defp to_solid_value(%_{} = value), do: value |> Map.from_struct() |> to_solid_map()
   defp to_solid_value(value) when is_map(value), do: to_solid_map(value)
-  defp to_solid_value(value) when is_list(value), do: Enum.map(value, &to_solid_value/1)
+  defp to_solid_value(value) when is_list(value) do
+    if Enum.all?(value, &is_binary/1) do
+      Enum.join(value, ", ")
+    else
+      Enum.map(value, &to_solid_value/1)
+    end
+  end
   defp to_solid_value(value), do: value
 
   defp default_prompt(prompt) when is_binary(prompt) do

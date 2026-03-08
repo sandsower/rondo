@@ -31,8 +31,19 @@ defmodule SymphonyElixir.Claude.StreamParser do
   """
   @spec extract_usage(map()) :: map() | nil
   def extract_usage(event) do
-    usage = Map.get(event, "usage") || Map.get(event, :usage)
+    # Try top-level usage first (present on "result" events), then fall back
+    # to nested message.usage (present on "assistant" events in real CLI output).
+    usage =
+      Map.get(event, "usage") ||
+        Map.get(event, :usage) ||
+        nested_message_usage(event)
+
     normalize_usage(usage)
+  end
+
+  defp nested_message_usage(event) do
+    msg = Map.get(event, "message") || Map.get(event, :message)
+    if is_map(msg), do: Map.get(msg, "usage") || Map.get(msg, :usage)
   end
 
   defp normalize_usage(%{} = usage) do
@@ -56,16 +67,22 @@ defmodule SymphonyElixir.Claude.StreamParser do
     Map.put(payload, :event_type, categorize_type(type, payload))
   end
 
-  # A "system" event carrying a session_id signals the start of a new session.
-  # The orchestrator uses :session_started to increment the turn counter.
+  # Only the "init" system event signals the actual start of a session.
+  # Hook events also carry session_id but shouldn't count as session starts.
   defp categorize_type("system", payload) do
-    session_id = Map.get(payload, "session_id") || Map.get(payload, :session_id)
-    if is_binary(session_id), do: :session_started, else: :system
+    subtype = Map.get(payload, "subtype") || Map.get(payload, :subtype)
+
+    if subtype == "init" do
+      :session_started
+    else
+      :system
+    end
   end
 
   defp categorize_type("assistant", _payload), do: :assistant
   defp categorize_type("tool", _payload), do: :tool_use
   defp categorize_type("result", _payload), do: :result
+  defp categorize_type("rate_limit_event", _payload), do: :rate_limit
   defp categorize_type(_, _payload), do: :unknown
 
   defp integer_field(map, keys) when is_list(keys) do

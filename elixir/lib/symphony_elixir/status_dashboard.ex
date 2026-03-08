@@ -16,7 +16,7 @@ defmodule SymphonyElixir.StatusDashboard do
   @sparkline_blocks ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
   @running_id_width 8
   @running_stage_width 14
-  @running_pid_width 8
+  @running_phase_width 8
   @running_age_width 12
   @running_tokens_width 10
   @running_session_width 14
@@ -586,7 +586,7 @@ defmodule SymphonyElixir.StatusDashboard do
     state = running_entry.state || "unknown"
     state_display = format_cell(to_string(state), @running_stage_width)
     session = running_entry.session_id |> compact_session_id() |> format_cell(@running_session_width)
-    pid = format_cell(running_entry.session_id || "n/a", @running_pid_width)
+    phase = infer_phase(running_entry) |> format_cell(@running_phase_width)
     total_tokens = running_entry.claude_total_tokens || 0
     runtime_seconds = running_entry.runtime_seconds || 0
     turn_count = Map.get(running_entry, :turn_count, 0)
@@ -613,7 +613,7 @@ defmodule SymphonyElixir.StatusDashboard do
       " ",
       colorize(state_display, status_color),
       " ",
-      colorize(pid, @ansi_yellow),
+      colorize(phase, @ansi_yellow),
       " ",
       colorize(age, @ansi_magenta),
       " ",
@@ -735,7 +735,7 @@ defmodule SymphonyElixir.StatusDashboard do
       [
         format_cell("ID", @running_id_width),
         format_cell("STAGE", @running_stage_width),
-        format_cell("PID", @running_pid_width),
+        format_cell("PHASE", @running_phase_width),
         format_cell("AGE / TURN", @running_age_width),
         format_cell("TOKENS", @running_tokens_width),
         format_cell("SESSION", @running_session_width),
@@ -750,7 +750,7 @@ defmodule SymphonyElixir.StatusDashboard do
     separator_width =
       @running_id_width +
         @running_stage_width +
-        @running_pid_width +
+        @running_phase_width +
         @running_age_width +
         @running_tokens_width +
         @running_session_width +
@@ -771,7 +771,7 @@ defmodule SymphonyElixir.StatusDashboard do
   defp fixed_running_width do
     @running_id_width +
       @running_stage_width +
-      @running_pid_width +
+      @running_phase_width +
       @running_age_width +
       @running_tokens_width +
       @running_session_width
@@ -820,6 +820,14 @@ defmodule SymphonyElixir.StatusDashboard do
       value
     else
       String.slice(value, 0, width - 3) <> "..."
+    end
+  end
+
+  defp infer_phase(running_entry) do
+    cond do
+      running_entry.session_id != nil -> "claude"
+      running_entry.last_claude_event != nil -> "claude"
+      true -> "hooks"
     end
   end
 

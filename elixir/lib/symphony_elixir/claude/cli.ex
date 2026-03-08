@@ -59,7 +59,8 @@ defmodule SymphonyElixir.Claude.CLI do
             :stderr_to_stdout,
             {:line, @port_line_bytes},
             {:cd, Path.expand(workspace)},
-            {:args, cmd_args}
+            {:args, cmd_args},
+            {:env, [{~c"CLAUDECODE", false}]}
           ]
         )
 

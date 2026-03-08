@@ -9,9 +9,9 @@
 │ Next refresh: n/a
 ├─ Running
 │
-│   ID       STAGE          PID      AGE / TURN   TOKENS     SESSION        EVENT                                  
+│   ID       STAGE          PHASE    AGE / TURN   TOKENS     SESSION        EVENT                                  
 │   ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
-│ ● MT-777   running        threa... 1m 15s / 7        3,200 thre...567890  thread token usage updated (in 90, o...
+│ ● MT-777   running        claude   1m 15s / 7        3,200 thre...567890  thread token usage updated (in 90, o...
 │
 ├─ Backoff queue
 │
