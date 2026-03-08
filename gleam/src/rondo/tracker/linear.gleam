@@ -1,3 +1,4 @@
+import gleam/dynamic/decode
 import gleam/http
 import gleam/http/request
 import gleam/httpc
@@ -7,7 +8,7 @@ import gleam/list
 import gleam/result
 import gleam/string
 import rondo/config.{type Config}
-import rondo/issue.{type Issue}
+import rondo/issue.{type Issue, Blocker, Issue}
 import rondo/tracker.{type TrackerResult, ApiError}
 
 pub fn fetch_candidate_issues(config: Config) -> TrackerResult(List(Issue)) {
@@ -165,10 +166,83 @@ pub fn build_poll_variables(config: Config) -> String {
   json.object(base) |> json.to_string()
 }
 
-fn decode_issues(_data: String) -> List(Issue) {
-  // Placeholder — full JSON decoding of Linear response into Issue list
-  // will be implemented when wiring up end-to-end.
-  []
+pub fn decode_issues(data: String) -> List(Issue) {
+  let nullable_string =
+    decode.one_of(decode.string, or: [decode.success("")])
+
+  let blocker_decoder = {
+    use id <- decode.field("id", decode.string)
+    use identifier <- decode.field("identifier", decode.string)
+    use state <- decode.subfield(["state", "name"], decode.string)
+    decode.success(Blocker(id: id, identifier: identifier, state: state))
+  }
+
+  let relation_decoder = {
+    use rel_type <- decode.field("type", decode.string)
+    use related <- decode.field("relatedIssue", blocker_decoder)
+    decode.success(#(rel_type, related))
+  }
+
+  let assignee_decoder =
+    decode.one_of(
+      {
+        use id <- decode.field("id", decode.string)
+        decode.success(id)
+      },
+      or: [decode.success("")],
+    )
+
+  let issue_decoder = {
+    use id <- decode.field("id", decode.string)
+    use identifier <- decode.field("identifier", decode.string)
+    use title <- decode.field("title", decode.string)
+    use description <- decode.field("description", nullable_string)
+    use priority <- decode.field("priority", decode.int)
+    use state <- decode.subfield(["state", "name"], decode.string)
+    use branch_name <- decode.field("branchName", nullable_string)
+    use url <- decode.field("url", decode.string)
+    use assignee_id <- decode.field("assignee", assignee_decoder)
+    use labels <- decode.subfield(
+      ["labels", "nodes"],
+      decode.list({
+        use name <- decode.field("name", decode.string)
+        decode.success(name)
+      }),
+    )
+    use relations <- decode.subfield(
+      ["relations", "nodes"],
+      decode.list(relation_decoder),
+    )
+    let blocked_by =
+      relations
+      |> list.filter_map(fn(r) {
+        case r {
+          #("blocks", blocker) -> Ok(blocker)
+          _ -> Error(Nil)
+        }
+      })
+    decode.success(Issue(
+      id: id,
+      identifier: identifier,
+      title: title,
+      description: description,
+      priority: priority,
+      state: state,
+      branch_name: branch_name,
+      url: url,
+      assignee_id: assignee_id,
+      labels: labels,
+      blocked_by: blocked_by,
+    ))
+  }
+
+  let top_decoder =
+    decode.at(["data", "issues", "nodes"], decode.list(issue_decoder))
+
+  case json.parse(data, top_decoder) {
+    Ok(issues) -> issues
+    Error(_) -> []
+  }
 }
 
 fn extract_host(url: String) -> String {
