@@ -1,4 +1,5 @@
 import gleam/string
+import rondo/ffi/port
 import rondo/issue.{type Issue}
 import simplifile
 
@@ -41,4 +42,28 @@ pub fn interpolate_hook(
   |> string.replace("{{ issue.identifier }}", issue_identifier)
   |> string.replace("{{workspace.path}}", workspace_path)
   |> string.replace("{{issue.identifier}}", issue_identifier)
+}
+
+pub fn run_hook(
+  command: String,
+  working_dir: String,
+  timeout_ms: Int,
+) -> Result(Nil, WorkspaceError) {
+  case string.trim(command) {
+    "" -> Ok(Nil)
+    cmd ->
+      case port.run_shell(cmd, working_dir, timeout_ms) {
+        Ok(0) -> Ok(Nil)
+        Ok(code) ->
+          Error(HookFailed(
+            detail: "Hook exited with code " <> string.inspect(code),
+          ))
+        Error(_) ->
+          Error(HookFailed(
+            detail: "Hook timed out after "
+              <> string.inspect(timeout_ms)
+              <> "ms",
+          ))
+      }
+  }
 }
