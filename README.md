@@ -3,6 +3,8 @@
 Rondo turns project work into isolated, autonomous implementation runs, allowing teams to manage
 work instead of supervising coding agents.
 
+<img width="1920" height="1200" alt="2026-03-08-19:11:44-screenshot" src="https://github.com/user-attachments/assets/fdcfc501-f625-4921-b639-d4db806dda5f" />
+
 > [!NOTE]
 > This is a fork of [openai/symphony](https://github.com/openai/symphony). The original project
 > used OpenAI's Codex as its agent backend. This fork replaces Codex with
