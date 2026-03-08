@@ -1,12 +1,12 @@
 # Claude Code Token Accounting
 
-This document explains how Claude Code reports token usage through stream-json output and how Symphony should account for it.
+This document explains how Claude Code reports token usage through stream-json output and how Rondo should account for it.
 
 ## Short Version
 
 - Claude Code emits usage events in its `--output-format stream-json` output stream.
 - Each usage event contains `input_tokens`, `output_tokens`, and `total_tokens`.
-- Symphony extracts these from the stream-json events and maintains per-session cumulative totals in `claude_totals`.
+- Rondo extracts these from the stream-json events and maintains per-session cumulative totals in `claude_totals`.
 
 ## Primary Source Semantics
 
@@ -28,11 +28,11 @@ Claude Code emits usage data as part of its stream-json output. Each usage event
 - `output_tokens`: cumulative output tokens for the session
 - `total_tokens`: cumulative total tokens for the session
 
-Symphony parses these events from the subprocess stdout as they arrive.
+Rondo parses these events from the subprocess stdout as they arrive.
 
 ### Session completion
 
-When a Claude Code invocation completes (process exits), the final usage event represents the total token spend for that session. For continuations via `claude --resume <session_id>`, token counts reset per invocation -- Symphony must accumulate across invocations.
+When a Claude Code invocation completes (process exits), the final usage event represents the total token spend for that session. For continuations via `claude --resume <session_id>`, token counts reset per invocation -- Rondo must accumulate across invocations.
 
 ## What The Metrics Mean
 
@@ -54,9 +54,9 @@ Use these when you want:
 
 The model's context window limit is not reported inline with usage events. It should be treated as a configuration constant based on the model in use, not derived from token spend.
 
-For Symphony, context window size should be displayed or logged separately from spend.
+For Rondo, context window size should be displayed or logged separately from spend.
 
-## Recommended Accounting Strategy For Symphony
+## Recommended Accounting Strategy For Rondo
 
 Track usage per active Claude Code session.
 
@@ -83,7 +83,7 @@ For each session, keep:
 
 If you treat per-invocation totals as global totals across continuations, you will undercount. If you treat incremental events as deltas and sum them, you will overcount.
 
-## What Symphony Should And Should Not Do
+## What Rondo Should And Should Not Do
 
 ### Do
 
@@ -98,7 +98,7 @@ If you treat per-invocation totals as global totals across continuations, you wi
 - Do not sum intermediate usage events -- use the latest one as a cumulative snapshot.
 - Do not reset accounting when a continuation resumes the same logical session.
 
-## Practical Interpretation For Symphony Logs
+## Practical Interpretation For Rondo Logs
 
 When reading stream-json output from Claude Code:
 
@@ -107,12 +107,12 @@ When reading stream-json output from Claude Code:
 - Process exit
   - final usage event before exit is the authoritative total for that invocation
 
-## Recommended Symphony Documentation Contract
+## Recommended Rondo Documentation Contract
 
-If Symphony documents token reporting externally, the contract should be:
+If Rondo documents token reporting externally, the contract should be:
 
 - Live token totals come from Claude Code session-scoped cumulative usage events.
-- Token counts are per-invocation; Symphony accumulates across continuations.
+- Token counts are per-invocation; Rondo accumulates across continuations.
 - Reporting is session-based, and multiple invocations can occur for one logical session via `--resume`.
 
 ## Implementation Checklist

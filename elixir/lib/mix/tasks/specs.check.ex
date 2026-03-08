@@ -1,7 +1,7 @@
 defmodule Mix.Tasks.Specs.Check do
   use Mix.Task
 
-  alias SymphonyElixir.SpecsCheck
+  alias Rondo.SpecsCheck
 
   @moduledoc """
   Enforces adjacent `@spec` declarations for public APIs in `lib/`.

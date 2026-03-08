@@ -1,6 +1,6 @@
 # Label-based filtering for Linear issue selection
 
-**Goal:** Allow Symphony to filter candidate issues by Linear labels, enabling safe coexistence with human issues in shared projects.
+**Goal:** Allow Rondo to filter candidate issues by Linear labels, enabling safe coexistence with human issues in shared projects.
 
 **Config:** `tracker.label_filter` -- a list of label names. When set, only issues with at least one matching label are fetched. When nil/empty, current behavior (all issues in matching states).
 

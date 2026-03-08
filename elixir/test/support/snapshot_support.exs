@@ -1,10 +1,10 @@
-defmodule SymphonyElixir.TestSupport.Snapshot do
+defmodule Rondo.TestSupport.Snapshot do
   import ExUnit.Assertions
 
   @snapshot_root Path.expand("../fixtures", __DIR__)
   @ansi_regex ~r/\e\[[0-9;]*m/
 
-  @update_snapshot_hint "Run `UPDATE_SNAPSHOTS=1 mix test test/symphony_elixir/status_dashboard_snapshot_test.exs` to create or update fixtures."
+  @update_snapshot_hint "Run `UPDATE_SNAPSHOTS=1 mix test test/rondo/status_dashboard_snapshot_test.exs` to create or update fixtures."
 
   def assert_dashboard_snapshot!(name, raw_ansi_content)
       when is_binary(name) and is_binary(raw_ansi_content) do

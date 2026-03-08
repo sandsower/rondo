@@ -1,9 +1,9 @@
-defmodule SymphonyElixir.MixProject do
+defmodule Rondo.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :symphony_elixir,
+      app: :rondo,
       version: "0.1.0",
       elixir: "~> 1.19",
       start_permanent: Mix.env() == :prod,
@@ -12,18 +12,18 @@ defmodule SymphonyElixir.MixProject do
           threshold: 100
         ],
         ignore_modules: [
-          SymphonyElixir.Config,
-          SymphonyElixir.Linear.Client,
-          SymphonyElixir.SpecsCheck,
-          SymphonyElixir.Orchestrator,
-          SymphonyElixir.Orchestrator.State,
-          SymphonyElixir.AgentRunner,
-          SymphonyElixir.CLI,
-          SymphonyElixir.Claude.CLI,
-          SymphonyElixir.Claude.StreamParser,
-          SymphonyElixir.StatusDashboard,
-          SymphonyElixir.LogFile,
-          SymphonyElixir.Workspace
+          Rondo.Config,
+          Rondo.Linear.Client,
+          Rondo.SpecsCheck,
+          Rondo.Orchestrator,
+          Rondo.Orchestrator.State,
+          Rondo.AgentRunner,
+          Rondo.CLI,
+          Rondo.Claude.CLI,
+          Rondo.Claude.StreamParser,
+          Rondo.StatusDashboard,
+          Rondo.LogFile,
+          Rondo.Workspace
         ]
       ],
       test_ignore_filters: [
@@ -42,7 +42,7 @@ defmodule SymphonyElixir.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      mod: {SymphonyElixir.Application, []},
+      mod: {Rondo.Application, []},
       extra_applications: [:logger]
     ]
   end
@@ -71,9 +71,9 @@ defmodule SymphonyElixir.MixProject do
   defp escript do
     [
       app: nil,
-      main_module: SymphonyElixir.CLI,
-      name: "symphony",
-      path: "bin/symphony"
+      main_module: Rondo.CLI,
+      name: "rondo",
+      path: "bin/rondo"
     ]
   end
 end

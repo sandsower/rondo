@@ -1,6 +1,6 @@
 # Logging Best Practices
 
-This guide defines logging conventions for Symphony so Claude Code can diagnose failures quickly.
+This guide defines logging conventions for Rondo so Claude Code can diagnose failures quickly.
 
 ## Goals
 

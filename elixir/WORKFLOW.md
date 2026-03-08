@@ -19,7 +19,7 @@ tracker:
 polling:
   interval_ms: 5000
 workspace:
-  root: ~/code/symphony-workspaces
+  root: ~/code/rondo-workspaces
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/openai/symphony .
@@ -153,7 +153,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 4.  Start work by writing/updating a hierarchical plan in the workpad comment.
 5.  Ensure the workpad includes a compact environment stamp at the top as a code fence line:
     - Format: `<host>:<abs-workdir>@<short-sha>`
-    - Example: `devbox-01:/home/dev-user/code/symphony-workspaces/MT-32@7bdde33bc`
+    - Example: `devbox-01:/home/dev-user/code/rondo-workspaces/MT-32@7bdde33bc`
     - Do not include metadata already inferable from Linear issue fields (`issue ID`, `status`, `branch`, `PR link`).
 6.  Add explicit acceptance criteria and TODOs in checklist form in the same comment.
     - If changes are user-facing, include a UI walkthrough acceptance criterion that describes the end-to-end user path to validate.
@@ -219,7 +219,7 @@ Use this only when completion is blocked by missing required tools or missing au
 6.  Re-check all acceptance criteria and close any gaps.
 7.  Before every `git push` attempt, run the required validation for your scope and confirm it passes; if it fails, address issues and rerun until green, then commit and push changes.
 8.  Attach PR URL to the issue (prefer attachment; use the workpad comment only if attachment is unavailable).
-    - Ensure the GitHub PR has label `symphony` (add it if missing).
+    - Ensure the GitHub PR has label `rondo` (add it if missing).
 9.  Merge latest `origin/main` into branch, resolve conflicts, and rerun checks.
 10. Update the workpad comment with final checklist status and validation notes.
     - Mark completed plan/acceptance/validation checklist items as checked.
@@ -269,7 +269,7 @@ Use this only when completion is blocked by missing required tools or missing au
 - Validation/tests are green for the latest commit.
 - PR feedback sweep is complete and no actionable comments remain.
 - PR checks are green, branch is pushed, and PR is linked on the issue.
-- Required PR metadata is present (`symphony` label).
+- Required PR metadata is present (`rondo` label).
 - If app-touching, runtime validation/media requirements from `App runtime validation (required)` are complete.
 
 ## Guardrails

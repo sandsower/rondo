@@ -1,9 +1,8 @@
-\e[1m╭─ SYMPHONY STATUS\e[0m
+\e[1m╭─ RONDO STATUS\e[0m
 \e[1m│ Agents: \e[0m\e[32m1\e[0m\e[90m/\e[0m\e[90m10\e[0m
 \e[1m│ Throughput: \e[0m\e[36m42 tps\e[0m
 \e[1m│ Runtime: \e[0m\e[35m1m 15s\e[0m
 \e[1m│ Tokens: \e[0m\e[33min 90\e[0m\e[90m | \e[0m\e[33mout 12\e[0m\e[90m | \e[0m\e[33mtotal 102\e[0m
-\e[1m│ Rate Limits: \e[0m\e[33mpriority-tier\e[0m\e[90m | \e[0m\e[36mprimary 100/100 reset 1s\e[0m\e[90m | \e[0m\e[36msecondary 500/500 reset 1s\e[0m\e[90m | \e[0m\e[32mcredits unlimited\e[0m
 \e[1m│ Project: \e[0m\e[36mhttps://linear.app/project/project/issues\e[0m
 \e[1m│ Next refresh: \e[0m\e[90mn/a\e[0m
 \e[1m├─ Running\e[0m

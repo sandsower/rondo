@@ -1,4 +1,4 @@
-defmodule SymphonyElixir.TestSupport do
+defmodule Rondo.TestSupport do
   @workflow_prompt "You are an agent for this repository."
 
   defmacro __using__(_opts) do
@@ -6,43 +6,43 @@ defmodule SymphonyElixir.TestSupport do
       use ExUnit.Case
       import ExUnit.CaptureLog
 
-      alias SymphonyElixir.AgentRunner
-      alias SymphonyElixir.CLI
-      alias SymphonyElixir.Claude.CLI, as: ClaudeCLI
-      alias SymphonyElixir.Config
-      alias SymphonyElixir.HttpServer
-      alias SymphonyElixir.Linear.Client
-      alias SymphonyElixir.Linear.Issue
-      alias SymphonyElixir.Orchestrator
-      alias SymphonyElixir.PromptBuilder
-      alias SymphonyElixir.StatusDashboard
-      alias SymphonyElixir.Tracker
-      alias SymphonyElixir.Workflow
-      alias SymphonyElixir.WorkflowStore
-      alias SymphonyElixir.Workspace
+      alias Rondo.AgentRunner
+      alias Rondo.Claude.CLI, as: ClaudeCLI
+      alias Rondo.CLI
+      alias Rondo.Config
+      alias Rondo.HttpServer
+      alias Rondo.Linear.Client
+      alias Rondo.Linear.Issue
+      alias Rondo.Orchestrator
+      alias Rondo.PromptBuilder
+      alias Rondo.StatusDashboard
+      alias Rondo.Tracker
+      alias Rondo.Workflow
+      alias Rondo.WorkflowStore
+      alias Rondo.Workspace
 
-      import SymphonyElixir.TestSupport,
+      import Rondo.TestSupport,
         only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
 
       setup do
         workflow_root =
           Path.join(
             System.tmp_dir!(),
-            "symphony-elixir-workflow-#{System.unique_integer([:positive])}"
+            "rondo-elixir-workflow-#{System.unique_integer([:positive])}"
           )
 
         File.mkdir_p!(workflow_root)
         workflow_file = Path.join(workflow_root, "WORKFLOW.md")
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
-        if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+        if Process.whereis(Rondo.WorkflowStore), do: Rondo.WorkflowStore.force_reload()
         stop_default_http_server()
 
         on_exit(fn ->
           Workflow.clear_workflow_file_path()
-          Application.delete_env(:symphony_elixir, :server_port_override)
-          Application.delete_env(:symphony_elixir, :memory_tracker_issues)
-          Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+          Application.delete_env(:rondo, :server_port_override)
+          Application.delete_env(:rondo, :memory_tracker_issues)
+          Application.delete_env(:rondo, :memory_tracker_recipient)
           File.rm_rf(workflow_root)
         end)
 
@@ -55,8 +55,8 @@ defmodule SymphonyElixir.TestSupport do
     workflow = workflow_content(overrides)
     File.write!(path, workflow)
 
-    if Process.whereis(SymphonyElixir.WorkflowStore) do
-      SymphonyElixir.WorkflowStore.force_reload()
+    if Process.whereis(Rondo.WorkflowStore) do
+      Rondo.WorkflowStore.force_reload()
     end
 
     :ok
@@ -66,9 +66,9 @@ defmodule SymphonyElixir.TestSupport do
   def restore_env(key, value), do: System.put_env(key, value)
 
   def stop_default_http_server do
-    case Process.whereis(SymphonyElixir.HttpServer) do
+    case Process.whereis(Rondo.HttpServer) do
       pid when is_pid(pid) ->
-        Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.HttpServer)
+        Supervisor.terminate_child(Rondo.Supervisor, Rondo.HttpServer)
         Process.exit(pid, :normal)
         :ok
 
@@ -90,7 +90,7 @@ defmodule SymphonyElixir.TestSupport do
           tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"],
           tracker_label_filter: nil,
           poll_interval_ms: 30_000,
-          workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
+          workspace_root: Path.join(System.tmp_dir!(), "rondo_workspaces"),
           max_concurrent_agents: 10,
           max_turns: 20,
           max_retry_backoff_ms: 300_000,

@@ -1,40 +1,35 @@
-# Symphony
+# Rondo
 
-Symphony turns project work into isolated, autonomous implementation runs, allowing teams to manage
+Rondo turns project work into isolated, autonomous implementation runs, allowing teams to manage
 work instead of supervising coding agents.
 
-[![Symphony demo video preview](.github/media/symphony-demo-poster.jpg)](.github/media/symphony-demo.mp4)
-
-_In this [demo video](.github/media/symphony-demo.mp4), Symphony monitors a Linear board for work and spawns agents to handle the tasks. The agents complete the tasks and provide proof of work: CI status, PR review feedback, complexity analysis, and walkthrough videos. When accepted, the agents land the PR safely. Engineers do not need to supervise Codex; they can manage the work at a higher level._
+> [!NOTE]
+> This is a fork of [openai/symphony](https://github.com/openai/symphony). The original project
+> used OpenAI's Codex as its agent backend. This fork replaces Codex with
+> [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as a CLI subprocess, along with
+> substantial changes to the stream parser, process supervision, and dashboard. The spec
+> (`SPEC.md`) and Elixir implementation have been rewritten accordingly.
 
 > [!WARNING]
-> Symphony is a low-key engineering preview for testing in trusted environments.
+> Rondo is an engineering preview for testing in trusted environments.
 
-## Running Symphony
+## What it does
 
-### Requirements
+Rondo polls Linear for issues, creates an isolated workspace for each one, and launches a
+Claude Code session to do the work. When the agent finishes, it moves the ticket forward
+(opens a PR, requests review, etc.). Multiple agents run concurrently.
 
-Symphony works best in codebases that have adopted
-[harness engineering](https://openai.com/index/harness-engineering/). Symphony is the next step --
-moving from managing coding agents to managing work that needs to get done.
+See [elixir/README.md](elixir/README.md) for setup and usage.
 
-### Option 1. Make your own
+## What changed from upstream
 
-Tell your favorite coding agent to build Symphony in a programming language of your choice:
-
-> Implement Symphony according to the following spec:
-> https://github.com/openai/symphony/blob/main/SPEC.md
-
-### Option 2. Use our experimental reference implementation
-
-Check out [elixir/README.md](elixir/README.md) for instructions on how to set up your environment
-and run the Elixir-based Symphony implementation. You can also ask your favorite coding agent to
-help with the setup:
-
-> Set up Symphony for my repository based on
-> https://github.com/openai/symphony/blob/main/elixir/README.md
-
----
+- **Agent backend:** Codex app-server replaced with Claude Code CLI (`claude -p --output-format stream-json`)
+- **Stream parser:** Rewritten for Claude Code's stream-json event format (system, assistant, result, rate_limit events)
+- **Process model:** No JSON-RPC handshake; each agent is a subprocess managed via Erlang ports with PTY wrapping for unbuffered output
+- **Continuations:** `claude --resume <session_id>` instead of Codex thread turns
+- **Permissions:** `--dangerously-skip-permissions` + `--allowedTools` instead of per-request approval cycles
+- **Config:** `claude.*` fields replace `codex.*` throughout WORKFLOW.md and the codebase
+- **Dashboard:** Real-time token tracking, phase display (hooks/claude), orphan process cleanup on shutdown
 
 ## License
 

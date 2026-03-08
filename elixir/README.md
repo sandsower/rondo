@@ -1,15 +1,15 @@
-# Symphony Elixir
+# Rondo
 
-This directory contains the current Elixir/OTP implementation of Symphony, based on
+This directory contains the current Elixir/OTP implementation of Rondo, based on
 [`SPEC.md`](../SPEC.md) at the repository root.
 
 > [!WARNING]
-> Symphony Elixir is prototype software intended for evaluation only and is presented as-is.
+> Rondo is prototype software intended for evaluation only and is presented as-is.
 > We recommend implementing your own hardened version based on `SPEC.md`.
 
 ## Screenshot
 
-![Symphony Elixir screenshot](../.github/media/elixir-screenshot.png)
+![Rondo screenshot](../.github/media/elixir-screenshot.png)
 
 ## How it works
 
@@ -19,11 +19,11 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 4. Sends a workflow prompt to Claude Code
 5. Keeps Claude Code working on the issue until the work is done
 
-During Claude Code sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
+During Claude Code sessions, Rondo also serves a client-side `linear_graphql` tool so that repo
 skills can make raw Linear GraphQL calls.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
-Symphony stops the active agent for that issue and cleans up matching workspaces.
+Rondo stops the active agent for that issue and cleans up matching workspaces.
 
 ## How to use it
 
@@ -32,7 +32,7 @@ Symphony stops the active agent for that issue and cleans up matching workspaces
    set it as the `LINEAR_API_KEY` environment variable.
 3. Copy this directory's `WORKFLOW.md` to your repo.
 4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
-   - The `linear` skill expects Symphony's `linear_graphql` tool for raw Linear GraphQL
+   - The `linear` skill expects Rondo's `linear_graphql` tool for raw Linear GraphQL
      operations such as comment editing or upload flows.
 5. Customize the copied `WORKFLOW.md` file for your project.
    - To get your project's slug, right-click the project and copy its URL. The slug is part of the
@@ -54,28 +54,28 @@ mise exec -- elixir --version
 ## Run
 
 ```bash
-git clone https://github.com/openai/symphony
+git clone https://github.com/sandsower/symphony.git
 cd symphony/elixir
 mise trust
 mise install
 mise exec -- mix setup
 mise exec -- mix build
-mise exec -- ./bin/symphony ./WORKFLOW.md
+mise exec -- ./bin/rondo ./WORKFLOW.md
 ```
 
 ## Configuration
 
-Pass a custom workflow file path to `./bin/symphony` when starting the service:
+Pass a custom workflow file path to `./bin/rondo` when starting the service:
 
 ```bash
-./bin/symphony /path/to/custom/WORKFLOW.md
+./bin/rondo /path/to/custom/WORKFLOW.md
 ```
 
-If no path is passed, Symphony defaults to `./WORKFLOW.md`.
+If no path is passed, Rondo defaults to `./WORKFLOW.md`.
 
 Optional flags:
 
-- `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
+- `--logs-root` tells Rondo to write logs under a different directory (default: `./log`)
 - `--port` also starts the HTTP observability service (default: disabled)
 
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
@@ -119,15 +119,15 @@ Notes:
   with `claude.allowed_tools` for tightening. Default: `true`.
 - `claude.max_turns` caps how many back-to-back turns Claude Code will run per invocation.
   Default: `50`.
-- `claude.output_format` controls output parsing. Must be `stream-json` for Symphony to parse
+- `claude.output_format` controls output parsing. Must be `stream-json` for Rondo to parse
   usage events. Default: `stream-json`.
 - `claude.model` optionally overrides the Claude model used. When unset, Claude Code uses its default.
 - `claude.allowed_tools` optionally restricts which tools Claude Code may use (list of tool names).
 - `claude.turn_timeout_ms` maximum wall-clock time per turn in milliseconds.
 - `claude.stall_timeout_ms` maximum time without output before a turn is considered stalled.
-- `agent.max_turns` caps how many back-to-back Claude Code turns Symphony will run in a single agent
+- `agent.max_turns` caps how many back-to-back Claude Code turns Rondo will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
-- If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
+- If the Markdown body is blank, Rondo uses a default prompt template that includes the issue
   identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
   `git clone ... .` there, along with any other setup commands you need.
@@ -143,7 +143,7 @@ Notes:
 tracker:
   api_key: $LINEAR_API_KEY
 workspace:
-  root: $SYMPHONY_WORKSPACE_ROOT
+  root: $RONDO_WORKSPACE_ROOT
 hooks:
   after_create: |
     git clone --depth 1 "$SOURCE_REPO_URL" .
@@ -180,7 +180,7 @@ actively running subagents, which is very useful during development.
 
 ### What's the easiest way to set this up for my own codebase?
 
-Launch `claude` in your repo, give it the URL to the Symphony repo, and ask it to set things up for
+Launch `claude` in your repo, give it the URL to the Rondo repo, and ask it to set things up for
 you.
 
 ## License
