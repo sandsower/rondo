@@ -53,3 +53,13 @@ pub fn decode_malformed_json_returns_empty_test() {
 pub fn decode_unexpected_shape_returns_empty_test() {
   linear.decode_issues("{\"data\":{}}") |> should.equal([])
 }
+
+pub fn decode_state_id_from_team_states_test() {
+  let json = "{\"data\":{\"issue\":{\"team\":{\"states\":{\"nodes\":[{\"id\":\"state-1\",\"name\":\"Todo\"},{\"id\":\"state-2\",\"name\":\"In Progress\"},{\"id\":\"state-3\",\"name\":\"Done\"}]}}}}}"
+  linear.decode_state_id(json, "In Progress") |> should.equal(Ok("state-2"))
+}
+
+pub fn decode_state_id_not_found_test() {
+  let json = "{\"data\":{\"issue\":{\"team\":{\"states\":{\"nodes\":[{\"id\":\"state-1\",\"name\":\"Todo\"}]}}}}}"
+  linear.decode_state_id(json, "Cancelled") |> should.be_error()
+}

@@ -92,11 +92,7 @@ fn resolve_state_id(
     |> json.to_string()
   case graphql(config, query, variables) {
     Error(e) -> Error(e)
-    Ok(_data) -> {
-      Error(ApiError(
-        detail: "state resolution not yet implemented for " <> state_name,
-      ))
-    }
+    Ok(data) -> decode_state_id(data, state_name)
   }
 }
 
@@ -164,6 +160,36 @@ pub fn build_poll_variables(config: Config) -> String {
       [#("labels", json.array(config.label_filter, json.string)), ..base]
   }
   json.object(base) |> json.to_string()
+}
+
+pub fn decode_state_id(
+  data: String,
+  state_name: String,
+) -> TrackerResult(String) {
+  let state_node_decoder = {
+    use id <- decode.field("id", decode.string)
+    use name <- decode.field("name", decode.string)
+    decode.success(#(id, name))
+  }
+
+  let top_decoder =
+    decode.at(
+      ["data", "issue", "team", "states", "nodes"],
+      decode.list(state_node_decoder),
+    )
+
+  case json.parse(data, top_decoder) {
+    Error(_) ->
+      Error(ApiError(detail: "Failed to decode team states response"))
+    Ok(nodes) ->
+      case list.find(nodes, fn(n) { n.1 == state_name }) {
+        Ok(#(id, _)) -> Ok(id)
+        Error(_) ->
+          Error(ApiError(
+            detail: "State not found: " <> state_name,
+          ))
+      }
+  }
 }
 
 pub fn decode_issues(data: String) -> List(Issue) {
