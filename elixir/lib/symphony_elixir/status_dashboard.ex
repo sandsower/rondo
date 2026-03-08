@@ -460,12 +460,17 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp render_to_terminal(content) do
-    IO.write([
-      IO.ANSI.home(),
-      IO.ANSI.clear(),
-      normalize_status_lines(content),
-      "\n"
-    ])
+    try do
+      IO.write([
+        IO.ANSI.home(),
+        IO.ANSI.clear(),
+        normalize_status_lines(content),
+        "\n"
+      ])
+    rescue
+      # When backgrounded, writing to stdout raises ErlangError due to SIGTTOU
+      ErlangError -> :ok
+    end
   end
 
   defp update_token_samples(samples, now_ms, total_tokens) do
