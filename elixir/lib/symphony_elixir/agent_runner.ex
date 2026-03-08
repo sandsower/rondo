@@ -16,6 +16,7 @@ defmodule SymphonyElixir.AgentRunner do
       {:ok, workspace} ->
         try do
           with :ok <- Workspace.run_before_run_hook(workspace, issue),
+               :ok <- send_phase_update(claude_update_recipient, issue, :claude_starting),
                :ok <- run_claude_turns(workspace, issue, claude_update_recipient, opts) do
             :ok
           else
@@ -57,6 +58,20 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp send_claude_update(_recipient, _issue, _event), do: :ok
+
+  defp send_phase_update(recipient, %Issue{id: issue_id}, phase)
+       when is_pid(recipient) and is_atom(phase) do
+    send(recipient, {:claude_worker_update, issue_id, %{
+      event: phase,
+      timestamp: DateTime.utc_now(),
+      session_id: nil,
+      usage: nil,
+      raw: %{}
+    }})
+    :ok
+  end
+
+  defp send_phase_update(_recipient, _issue, _phase), do: :ok
 
   defp run_claude_turns(workspace, issue, claude_update_recipient, opts) do
     max_turns = Keyword.get(opts, :max_turns, Config.agent_max_turns())

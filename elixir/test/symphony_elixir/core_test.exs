@@ -884,11 +884,9 @@ defmodule SymphonyElixir.CoreTest do
                       %{
                         event: _event_type,
                         timestamp: %DateTime{},
-                        session_id: session_id
+                        session_id: "session-live"
                       }},
                      500
-
-      assert session_id == "session-live"
     after
       File.rm_rf(test_root)
     end

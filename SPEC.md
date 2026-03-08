@@ -91,7 +91,7 @@ Important boundary:
 6. `Agent Runner`
    - Creates workspace.
    - Builds prompt from issue + workflow template.
-   - Launches the coding agent app-server client.
+   - Launches the Claude Code CLI subprocess.
    - Streams agent updates back to the orchestrator.
 
 7. `Status Surface` (optional)
@@ -130,7 +130,7 @@ Symphony is easiest to port when kept in these layers:
 - Issue tracker API (Linear for `tracker.kind: linear` in this specification version).
 - Local filesystem for workspaces and logs.
 - Optional workspace population tooling (for example Git CLI, if used).
-- Coding-agent executable that supports JSON-RPC-like app-server mode over stdio.
+- Claude Code CLI (`claude`) that supports `-p` (print mode) with `--output-format stream-json`.
 - Host environment authentication for the issue tracker and coding agent.
 
 ## 4. Core Domain Model
@@ -219,16 +219,14 @@ State tracked while a coding-agent subprocess is running.
 
 Fields:
 
-- `session_id` (string, `<thread_id>-<turn_id>`)
-- `thread_id` (string)
-- `turn_id` (string)
-- `codex_app_server_pid` (string or null)
-- `last_codex_event` (string/enum or null)
-- `last_codex_timestamp` (timestamp or null)
-- `last_codex_message` (summarized payload)
-- `codex_input_tokens` (integer)
-- `codex_output_tokens` (integer)
-- `codex_total_tokens` (integer)
+- `session_id` (string, from Claude Code output)
+- `claude_pid` (string or null)
+- `last_claude_event` (string/enum or null)
+- `last_claude_timestamp` (timestamp or null)
+- `last_claude_message` (summarized payload)
+- `claude_input_tokens` (integer)
+- `claude_output_tokens` (integer)
+- `claude_total_tokens` (integer)
 - `last_reported_input_tokens` (integer)
 - `last_reported_output_tokens` (integer)
 - `last_reported_total_tokens` (integer)
@@ -260,8 +258,8 @@ Fields:
 - `claimed` (set of issue IDs reserved/running/retrying)
 - `retry_attempts` (map `issue_id -> RetryEntry`)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
-- `codex_totals` (aggregate tokens + runtime seconds)
-- `codex_rate_limits` (latest rate-limit snapshot from agent events)
+- `claude_totals` (aggregate tokens + runtime seconds)
+- `claude_rate_limits` (latest rate-limit snapshot from agent events)
 
 ### 4.2 Stable Identifiers and Normalization Rules
 
@@ -275,7 +273,7 @@ Fields:
 - `Normalized Issue State`
   - Compare states after `trim` + `lowercase`.
 - `Session ID`
-  - Compose from coding-agent `thread_id` and `turn_id` as `<thread_id>-<turn_id>`.
+  - Obtained from Claude Code's `stream-json` output.
 
 ## 5. Workflow Specification (Repository Contract)
 
@@ -323,7 +321,7 @@ Top-level keys:
 - `workspace`
 - `hooks`
 - `agent`
-- `codex`
+- `claude`
 
 Unknown keys should be ignored for forward compatibility.
 
@@ -413,34 +411,39 @@ Fields:
   - State keys are normalized (`trim` + `lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
 
-#### 5.3.6 `codex` (object)
+#### 5.3.6 `claude` (object)
 
 Fields:
 
-For Codex-owned config values such as `approval_policy`, `thread_sandbox`, and
-`turn_sandbox_policy`, supported values are defined by the targeted Codex app-server version.
-Implementors should treat them as pass-through Codex config values rather than relying on a
-hand-maintained enum in this spec. To inspect the installed Codex schema, run
-`codex app-server generate-json-schema --out <dir>` and inspect the relevant definitions referenced
-by `v2/ThreadStartParams.json` and `v2/TurnStartParams.json`. Implementations may validate these
-fields locally if they want stricter startup checks.
-
 - `command` (string shell command)
-  - Default: `codex app-server`
-  - The runtime launches this command via `bash -lc` in the workspace directory.
-  - The launched process must speak a compatible app-server protocol over stdio.
-- `approval_policy` (Codex `AskForApproval` value)
-  - Default: implementation-defined.
-- `thread_sandbox` (Codex `SandboxMode` value)
-  - Default: implementation-defined.
-- `turn_sandbox_policy` (Codex `SandboxPolicy` value)
-  - Default: implementation-defined.
+  - Default: `claude`
+  - The runtime launches this as the base command for Claude Code CLI invocations.
+- `permission_mode` (string)
+  - Default: `bypassPermissions`
+  - Values: `default`, `plan`, `acceptEdits`, `bypassPermissions`
+  - Passed as `--permission-mode` to the CLI.
+- `dangerously_skip_permissions` (boolean)
+  - Default: `true`
+  - When `true`, passes `--dangerously-skip-permissions` to the CLI for fully autonomous
+    unattended use.
+- `max_turns` (integer)
+  - Default: `50`
+  - Passed as `--max-turns` to the CLI.
+- `output_format` (string)
+  - Default: `stream-json`
+  - Passed as `--output-format` to the CLI.
+- `model` (string or null)
+  - Default: `null`
+  - When set, passed as `--model` to the CLI.
+- `allowed_tools` (list of strings or null)
+  - Default: `null`
+  - When set, each entry is passed as `--allowedTools` to the CLI.
 - `turn_timeout_ms` (integer)
   - Default: `3600000` (1 hour)
-- `read_timeout_ms` (integer)
-  - Default: `5000`
+  - Overall subprocess timeout.
 - `stall_timeout_ms` (integer)
   - Default: `300000` (5 minutes)
+  - No stdout activity timeout.
   - If `<= 0`, stall detection is disabled.
 
 ### 5.4 Prompt Template Contract
@@ -509,7 +512,7 @@ Dynamic reload is required:
 - The software should watch `WORKFLOW.md` for changes.
 - On change, it should re-read and re-apply workflow config and prompt template without restart.
 - The software should attempt to adjust live behavior to the new config (for example polling
-  cadence, concurrency limits, active/terminal states, codex settings, workspace paths/hooks, and
+  cadence, concurrency limits, active/terminal states, claude settings, workspace paths/hooks, and
   prompt content for future runs).
 - Reloaded config applies to future dispatch, retry scheduling, reconciliation decisions, hook
   execution, and agent launches.
@@ -545,7 +548,7 @@ Validation checks:
 - `tracker.kind` is present and supported.
 - `tracker.api_key` is present after `$` resolution.
 - `tracker.project_slug` is present when required by the selected tracker kind.
-- `codex.command` is present and non-empty.
+- `claude.command` is present and non-empty.
 
 ### 6.4 Config Fields Summary (Cheat Sheet)
 
@@ -568,13 +571,15 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
-- `codex.command`: shell command string, default `codex app-server`
-- `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
-- `codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
-- `codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined
-- `codex.turn_timeout_ms`: integer, default `3600000`
-- `codex.read_timeout_ms`: integer, default `5000`
-- `codex.stall_timeout_ms`: integer, default `300000`
+- `claude.command`: shell command string, default `claude`
+- `claude.permission_mode`: string, default `bypassPermissions`
+- `claude.dangerously_skip_permissions`: boolean, default `true`
+- `claude.max_turns`: integer, default `50`
+- `claude.output_format`: string, default `stream-json`
+- `claude.model`: string or null, default `null`
+- `claude.allowed_tools`: list of strings or null, default `null`
+- `claude.turn_timeout_ms`: integer, default `3600000`
+- `claude.stall_timeout_ms`: integer, default `300000`
 - `server.port` (extension): integer, optional; enables the optional HTTP server, `0` may be used
   for ephemeral local bind, and CLI `--port` overrides it
 
@@ -610,11 +615,11 @@ Important nuance:
 - A successful worker exit does not mean the issue is done forever.
 - The worker may continue through multiple back-to-back coding-agent turns before it exits.
 - After each normal turn completion, the worker re-checks the tracker issue state.
-- If the issue is still in an active state, the worker should start another turn on the same live
-  coding-agent thread in the same workspace, up to `agent.max_turns`.
+- If the issue is still in an active state, the worker should start another turn using
+  `claude --resume <session_id>` in the same workspace, up to `agent.max_turns`.
 - The first turn should use the full rendered task prompt.
-- Continuation turns should send only continuation guidance to the existing thread, not resend the
-  original task prompt that is already present in thread history.
+- Continuation turns should send only continuation guidance via `--resume`, not resend the
+  original task prompt that is already present in session history.
 - Once the worker exits normally, the orchestrator still schedules a short continuation retry
   (about 1 second) so it can re-check whether the issue remains active and needs another worker
   session.
@@ -656,7 +661,7 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Update aggregate runtime totals.
   - Schedule exponential-backoff retry.
 
-- `Codex Update Event`
+- `Claude Update Event`
   - Update live session fields, token counters, and rate limits.
 
 - `Retry Timer Fired`
@@ -766,9 +771,9 @@ Reconciliation runs every tick and has two parts.
 Part A: Stall detection
 
 - For each running issue, compute `elapsed_ms` since:
-  - `last_codex_timestamp` if any event has been seen, else
+  - `last_claude_timestamp` if any event has been seen, else
   - `started_at`
-- If `elapsed_ms > codex.stall_timeout_ms`, terminate the worker and queue a retry.
+- If `elapsed_ms > claude.stall_timeout_ms`, terminate the worker and queue a retry.
 - If `stall_timeout_ms <= 0`, skip stall detection entirely.
 
 Part B: Tracker state refresh
@@ -889,108 +894,94 @@ Invariant 3: Workspace key is sanitized.
 
 ## 10. Agent Runner Protocol (Coding Agent Integration)
 
-This section defines the language-neutral contract for integrating a coding agent app-server.
+This section defines the language-neutral contract for integrating Claude Code as the coding agent.
 
 Compatibility profile:
 
-- The normative contract is message ordering, required behaviors, and the logical fields that must
-  be extracted (for example session IDs, completion state, approval handling, and usage/rate-limit
-  telemetry).
-- Exact JSON field names may vary slightly across compatible app-server versions.
+- The normative contract is subprocess lifecycle, required behaviors, and the logical fields that
+  must be extracted (for example session IDs, completion state, and usage/rate-limit telemetry).
+- Claude Code's `stream-json` output format emits newline-delimited JSON events on stdout.
 - Implementations should tolerate equivalent payload shapes when they carry the same logical
-  meaning, especially for nested IDs, approval requests, user-input-required signals, and
-  token/rate-limit metadata.
+  meaning, especially for usage and rate-limit metadata.
 
 ### 10.1 Launch Contract
 
 Subprocess launch parameters:
 
-- Command: `codex.command`
-- Invocation: `bash -lc <codex.command>`
+- Base command: `claude.command` (default: `claude`)
+- First turn invocation:
+  ```
+  <claude.command> -p "<rendered prompt>" \
+    --output-format <claude.output_format> \
+    --max-turns <claude.max_turns> \
+    --permission-mode <claude.permission_mode> \
+    [--dangerously-skip-permissions] \
+    [--model <claude.model>] \
+    [--allowedTools <tool> ...] \
+    --cwd <workspace_path>
+  ```
+- Continuation invocation:
+  ```
+  <claude.command> --resume <session_id> \
+    -p "<continuation guidance>" \
+    --output-format <claude.output_format> \
+    --max-turns <claude.max_turns> \
+    --cwd <workspace_path>
+  ```
 - Working directory: workspace path
-- Stdout/stderr: separate streams
-- Framing: line-delimited protocol messages on stdout (JSON-RPC-like JSON per line)
+- Stdout: newline-delimited JSON events (`stream-json` format)
+- Stderr: diagnostics only (not part of the protocol stream)
 
 Notes:
 
-- The default command is `codex app-server`.
-- Approval policy, cwd, and prompt are expressed in the protocol messages in Section 10.2.
+- The default command is `claude`.
+- `--dangerously-skip-permissions` is included when `claude.dangerously_skip_permissions` is `true`.
+- `--model` is included only when `claude.model` is set.
+- `--allowedTools` entries are included only when `claude.allowed_tools` is set.
+- Permissions are set at launch time via CLI flags; there is no per-request approval cycle.
 
 Recommended additional process settings:
 
 - Max line size: 10 MB (for safe buffering)
 
-### 10.2 Session Startup Handshake
+### 10.2 Session Startup
 
-Reference: https://developers.openai.com/codex/app-server/
+Claude Code requires no handshake. The subprocess is launched directly with the prompt and
+configuration as CLI arguments.
 
-The client must send these protocol messages in order:
+Startup sequence:
 
-Illustrative startup transcript (equivalent payload shapes are acceptable if they preserve the same
-semantics):
-
-```json
-{"id":1,"method":"initialize","params":{"clientInfo":{"name":"symphony","version":"1.0"},"capabilities":{}}}
-{"method":"initialized","params":{}}
-{"id":2,"method":"thread/start","params":{"approvalPolicy":"<implementation-defined>","sandbox":"<implementation-defined>","cwd":"/abs/workspace"}}
-{"id":3,"method":"turn/start","params":{"threadId":"<thread-id>","input":[{"type":"text","text":"<rendered prompt-or-continuation-guidance>"}],"cwd":"/abs/workspace","title":"ABC-123: Example","approvalPolicy":"<implementation-defined>","sandboxPolicy":{"type":"<implementation-defined>"}}}
-```
-
-1. `initialize` request
-   - Params include:
-     - `clientInfo` object (for example `{name, version}`)
-     - `capabilities` object (may be empty)
-   - If the targeted Codex app-server requires capability negotiation for dynamic tools, include the
-     necessary capability flag(s) here.
-   - Wait for response (`read_timeout_ms`)
-2. `initialized` notification
-3. `thread/start` request
-   - Params include:
-     - `approvalPolicy` = implementation-defined session approval policy value
-     - `sandbox` = implementation-defined session sandbox value
-     - `cwd` = absolute workspace path
-     - If optional client-side tools are implemented, include their advertised tool specs using the
-       protocol mechanism supported by the targeted Codex app-server version.
-4. `turn/start` request
-   - Params include:
-     - `threadId`
-     - `input` = single text item containing rendered prompt for the first turn, or continuation
-       guidance for later turns on the same thread
-     - `cwd`
-     - `title` = `<issue.identifier>: <issue.title>`
-     - `approvalPolicy` = implementation-defined turn approval policy value
-     - `sandboxPolicy` = implementation-defined object-form sandbox policy payload when required by
-       the targeted app-server version
+1. Build the CLI argument list from `claude.*` config and the rendered prompt.
+2. Spawn the subprocess with the workspace path as `cwd`.
+3. Begin reading `stream-json` events from stdout immediately.
 
 Session identifiers:
 
-- Read `thread_id` from `thread/start` result `result.thread.id`
-- Read `turn_id` from each `turn/start` result `result.turn.id`
-- Emit `session_id = "<thread_id>-<turn_id>"`
-- Reuse the same `thread_id` for all continuation turns inside one worker run
+- The session ID is obtained from the `stream-json` output (present in `session_id` fields of
+  emitted events or the final result).
+- For continuation turns, pass the session ID to `--resume`.
+- Each `--resume` invocation is a new subprocess that continues an existing session.
 
 ### 10.3 Streaming Turn Processing
 
-The client reads line-delimited messages until the turn terminates.
+The client reads newline-delimited JSON events from stdout until the subprocess exits.
 
 Completion conditions:
 
-- `turn/completed` -> success
-- `turn/failed` -> failure
-- `turn/cancelled` -> failure
-- turn timeout (`turn_timeout_ms`) -> failure
-- subprocess exit -> failure
+- Process exit with code `0` -> success
+- Process exit with non-zero code -> failure
+- Subprocess timeout (`claude.turn_timeout_ms` exceeded) -> kill process, failure
+- Stall timeout (no stdout activity for `claude.stall_timeout_ms`) -> kill process, failure
 
 Continuation processing:
 
-- If the worker decides to continue after a successful turn, it should issue another `turn/start`
-  on the same live `threadId`.
-- The app-server subprocess should remain alive across those continuation turns and be stopped only
-  when the worker run is ending.
+- If the worker decides to continue after a successful turn, it launches a new subprocess using
+  `claude --resume <session_id>` with continuation guidance as the prompt.
+- Each continuation is a separate subprocess invocation.
 
 Line handling requirements:
 
-- Read protocol messages from stdout only.
+- Read `stream-json` events from stdout only.
 - Buffer partial stdout lines until newline arrives.
 - Attempt JSON parse on complete stdout lines.
 - Stderr is not part of the protocol stream:
@@ -999,69 +990,66 @@ Line handling requirements:
 
 ### 10.4 Emitted Runtime Events (Upstream to Orchestrator)
 
-The app-server client emits structured events to the orchestrator callback. Each event should
-include:
+The Claude Code subprocess client emits structured events to the orchestrator callback. Each event
+should include:
 
 - `event` (enum/string)
 - `timestamp` (UTC timestamp)
-- `codex_app_server_pid` (if available)
+- `claude_pid` (if available)
 - optional `usage` map (token counts)
 - payload fields as needed
 
-Important emitted events may include:
+Claude Code's `stream-json` output emits events including:
 
-- `session_started`
-- `startup_failed`
-- `turn_completed`
-- `turn_failed`
-- `turn_cancelled`
-- `turn_ended_with_error`
-- `turn_input_required`
-- `approval_auto_approved`
-- `unsupported_tool_call`
-- `notification`
-- `other_message`
-- `malformed`
+- `assistant` messages (text output, tool use)
+- `tool` results (tool execution outcomes)
+- `result` (final output with session metadata)
+- `system` events (initialization, configuration)
 
-### 10.5 Approval, Tool Calls, and User Input Policy
+The orchestrator client should map these to internal event types such as:
 
-Approval, sandbox, and user-input behavior is implementation-defined.
+- `session_started` (first event received from subprocess)
+- `turn_completed` (process exit code 0)
+- `turn_failed` (process exit non-zero)
+- `notification` (assistant text messages)
+- `tool_use` (tool execution events)
+- `malformed` (unparseable stdout lines)
 
-Policy requirements:
+### 10.5 Permission Policy
 
-- Each implementation should document its chosen approval, sandbox, and operator-confirmation
-  posture.
-- Approval requests and user-input-required events must not leave a run stalled indefinitely. An
-  implementation should either satisfy them, surface them to an operator, auto-resolve them, or
-  fail the run according to its documented policy.
+Claude Code uses CLI flags for permission control instead of per-request approval cycles.
 
-Example high-trust behavior:
+Policy configuration:
 
-- Auto-approve command execution approvals for the session.
-- Auto-approve file-change approvals for the session.
-- Treat user-input-required turns as hard failure.
+- `--permission-mode <mode>` sets the permission level for the session.
+  - `default`: normal interactive mode (prompts for approval).
+  - `plan`: agent can read but must get approval to write.
+  - `acceptEdits`: auto-approves file edits.
+  - `bypassPermissions`: auto-approves all actions.
+- `--dangerously-skip-permissions` skips all permission checks entirely.
+- Permissions are set at launch time; there is no in-session approval request/response cycle.
 
-Unsupported dynamic tool calls:
+User input handling:
 
-- Supported dynamic tool calls that are explicitly implemented and advertised by the runtime should
-  be handled according to their extension contract.
-- If the agent requests a dynamic tool call (`item/tool/call`) that is not supported, return a tool
-  failure response and continue the session.
-- This prevents the session from stalling on unsupported tool execution paths.
+- Claude Code may stall waiting for user input in interactive scenarios.
+- In unattended mode (`--dangerously-skip-permissions`), this should not occur.
+- If the subprocess stalls, the stall timeout (`claude.stall_timeout_ms`) will terminate it.
 
-Optional client-side tool extension:
+Optional tool extensions:
 
-- An implementation may expose a limited set of client-side tools to the app-server session.
-- Current optional standardized tool: `linear_graphql`.
-- If implemented, supported tools should be advertised to the app-server session during startup
-  using the protocol mechanism supported by the targeted Codex app-server version.
-- Unsupported tool names should still return a failure result and continue the session.
+- Claude Code can access external services via MCP (Model Context Protocol) servers configured in
+  its environment.
+- For Linear access, an MCP server can be configured to provide `linear_graphql` or equivalent
+  tooling directly to Claude Code, rather than requiring Symphony to proxy tool calls.
+- Claude Code's `--allowedTools` flag can restrict which tools are available to the agent.
 
 `linear_graphql` extension contract:
 
 - Purpose: execute a raw GraphQL query or mutation against Linear using Symphony's configured
   tracker auth for the current session.
 - Availability: only meaningful when `tracker.kind == "linear"` and valid Linear auth is configured.
+- This can be provided via an MCP server configured in Claude Code's environment, or via any other
+  tool mechanism available to the agent.
 - Preferred input shape:
 
   ```json
@@ -1090,51 +1078,34 @@ Optional client-side tool extension:
 - Return the GraphQL response or error payload as structured tool output that the model can inspect
   in-session.
 
-Illustrative responses (equivalent payload shapes are acceptable if they preserve the same outcome):
-
-```json
-{"id":"<approval-id>","result":{"approved":true}}
-{"id":"<tool-call-id>","result":{"success":false,"error":"unsupported_tool_call"}}
-```
-
-Hard failure on user input requirement:
-
-- If the agent requests user input, fail the run attempt immediately.
-- The client detects this via:
-  - explicit method (`item/tool/requestUserInput`), or
-  - turn methods/flags indicating input is required.
-
 ### 10.6 Timeouts and Error Mapping
 
 Timeouts:
 
-- `codex.read_timeout_ms`: request/response timeout during startup and sync requests
-- `codex.turn_timeout_ms`: total turn stream timeout
-- `codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
+- `claude.turn_timeout_ms`: overall subprocess timeout
+- `claude.stall_timeout_ms`: enforced by orchestrator based on stdout inactivity
 
 Error mapping (recommended normalized categories):
 
-- `codex_not_found`
+- `claude_not_found` (CLI executable not found)
 - `invalid_workspace_cwd`
-- `response_timeout`
+- `invalid_permission_mode`
 - `turn_timeout`
-- `port_exit`
-- `response_error`
+- `subprocess_exit` (non-zero exit code)
 - `turn_failed`
-- `turn_cancelled`
-- `turn_input_required`
+- `stalled_session`
 
 ### 10.7 Agent Runner Contract
 
-The `Agent Runner` wraps workspace + prompt + app-server client.
+The `Agent Runner` wraps workspace + prompt + Claude Code subprocess.
 
 Behavior:
 
 1. Create/reuse workspace for issue.
 2. Build prompt from workflow template.
-3. Start app-server session.
-4. Forward app-server events to orchestrator.
-5. On any error, fail the worker attempt (the orchestrator will retry).
+3. Launch `claude -p` subprocess with appropriate flags.
+4. Stream `stream-json` events to orchestrator.
+5. On process exit, check exit code for success/failure.
 
 Note:
 
@@ -1291,7 +1262,7 @@ should return:
 - `running` (list of running session rows)
 - each running row should include `turn_count`
 - `retrying` (list of retry queue rows)
-- `codex_totals`
+- `claude_totals`
   - `input_tokens`
   - `output_tokens`
   - `total_tokens`
@@ -1315,17 +1286,12 @@ correctness.
 
 Token accounting rules:
 
-- Agent events may include token counts in multiple payload shapes.
-- Prefer absolute thread totals when available, such as:
-  - `thread/tokenUsage/updated` payloads
-  - `total_token_usage` within token-count wrapper events
-- Ignore delta-style payloads such as `last_token_usage` for dashboard/API totals.
-- Extract input/output/total token counts leniently from common field names within the selected
-  payload.
-- For absolute totals, track deltas relative to last reported totals to avoid double-counting.
-- Do not treat generic `usage` maps as cumulative totals unless the event type defines them that
-  way.
-- Accumulate aggregate totals in orchestrator state.
+- Claude Code's `stream-json` output includes usage data in events and the final result.
+- Extract `input_tokens`, `output_tokens`, and `total_tokens` from usage fields in the output.
+- The `result` event at session end typically contains cumulative usage for the session.
+- For running sessions, accumulate usage from intermediate events.
+- Track deltas relative to last reported totals to avoid double-counting.
+- Accumulate aggregate totals in orchestrator state (`claude_totals`).
 
 Runtime accounting:
 
@@ -1429,7 +1395,7 @@ Minimum endpoints:
           "error": "no available orchestrator slots"
         }
       ],
-      "codex_totals": {
+      "claude_totals": {
         "input_tokens": 5000,
         "output_tokens": 2400,
         "total_tokens": 7400,
@@ -1472,10 +1438,10 @@ Minimum endpoints:
       },
       "retry": null,
       "logs": {
-        "codex_session_logs": [
+        "claude_session_logs": [
           {
             "label": "latest",
-            "path": "/var/log/symphony/codex/MT-649/latest.log",
+            "path": "/var/log/symphony/claude/MT-649/latest.log",
             "url": null
           }
         ]
@@ -1537,12 +1503,12 @@ API design notes:
    - Hook timeout/failure
 
 3. `Agent Session Failures`
-   - Startup handshake failure
-   - Turn failed/cancelled
+   - CLI not found
+   - Invalid permission mode
+   - Turn failed (non-zero exit code)
    - Turn timeout
-   - User input requested (hard fail)
    - Subprocess exit
-   - Stalled session (no activity)
+   - Stalled session (no stdout activity)
 
 4. `Tracker Failures`
    - API transport errors
@@ -1649,7 +1615,7 @@ Implications:
 
 ### 15.5 Harness Hardening Guidance
 
-Running Codex agents against repositories, issue trackers, and other inputs that may contain
+Running Claude Code agents against repositories, issue trackers, and other inputs that may contain
 sensitive data or externally-controlled content can be dangerous. A permissive deployment can lead
 to data leaks, destructive mutations, or full machine compromise if the agent is induced to execute
 harmful commands or use overly-powerful integrations.
@@ -1661,16 +1627,17 @@ fully trustworthy just because they originate inside a normal workflow.
 
 Possible hardening measures include:
 
-- Tightening Codex approval and sandbox settings described elsewhere in this specification instead
-  of running with a maximally permissive configuration.
+- Using a more restrictive `--permission-mode` (such as `plan` or `acceptEdits`) instead of
+  `bypassPermissions`, or omitting `--dangerously-skip-permissions`.
 - Adding external isolation layers such as OS/container/VM sandboxing, network restrictions, or
-  separate credentials beyond the built-in Codex policy controls.
+  separate credentials beyond Claude Code's built-in permission controls.
 - Filtering which Linear issues, projects, teams, labels, or other tracker sources are eligible for
   dispatch so untrusted or out-of-scope tasks do not automatically reach the agent.
 - Narrowing the optional `linear_graphql` tool so it can only read or mutate data inside the
   intended project scope, rather than exposing general workspace-wide tracker access.
-- Reducing the set of client-side tools, credentials, filesystem paths, and network destinations
-  available to the agent to the minimum needed for the workflow.
+- Using `--allowedTools` to restrict which tools Claude Code can use, and limiting MCP server
+  configurations, credentials, filesystem paths, and network destinations available to the agent
+  to the minimum needed for the workflow.
 
 The correct controls are deployment-specific, but implementations should document them clearly and
 treat harness hardening as part of the core safety model rather than an optional afterthought.
@@ -1692,8 +1659,8 @@ function start_service():
     claimed: set(),
     retry_attempts: {},
     completed: set(),
-    codex_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-    codex_rate_limits: null
+    claude_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+    claude_rate_limits: null
   }
 
   validation = validate_dispatch_config()
@@ -1785,13 +1752,13 @@ function dispatch_issue(issue, state, attempt):
     identifier: issue.identifier,
     issue,
     session_id: null,
-    codex_app_server_pid: null,
-    last_codex_message: null,
-    last_codex_event: null,
-    last_codex_timestamp: null,
-    codex_input_tokens: 0,
-    codex_output_tokens: 0,
-    codex_total_tokens: 0,
+    claude_pid: null,
+    last_claude_message: null,
+    last_claude_event: null,
+    last_claude_timestamp: null,
+    claude_input_tokens: 0,
+    claude_output_tokens: 0,
+    claude_total_tokens: 0,
     last_reported_input_tokens: 0,
     last_reported_output_tokens: 0,
     last_reported_total_tokens: 0,
@@ -1815,36 +1782,38 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
   if run_hook("before_run", workspace.path) failed:
     fail_worker("before_run hook error")
 
-  session = app_server.start_session(workspace=workspace.path)
-  if session failed:
-    run_hook_best_effort("after_run", workspace.path)
-    fail_worker("agent session startup error")
-
   max_turns = config.agent.max_turns
   turn_number = 1
+  session_id = null
 
   while true:
     prompt = build_turn_prompt(workflow_template, issue, attempt, turn_number, max_turns)
     if prompt failed:
-      app_server.stop_session(session)
       run_hook_best_effort("after_run", workspace.path)
       fail_worker("prompt error")
 
-    turn_result = app_server.run_turn(
-      session=session,
-      prompt=prompt,
-      issue=issue,
-      on_message=(msg) -> send(orchestrator_channel, {codex_update, issue.id, msg})
-    )
+    if session_id is null:
+      turn_result = claude_cli.run(
+        prompt=prompt,
+        workspace=workspace.path,
+        on_event=(event) -> send(orchestrator_channel, {claude_update, issue.id, event})
+      )
+    else:
+      turn_result = claude_cli.resume(
+        session_id=session_id,
+        prompt=prompt,
+        workspace=workspace.path,
+        on_event=(event) -> send(orchestrator_channel, {claude_update, issue.id, event})
+      )
+
+    session_id = turn_result.session_id or session_id
 
     if turn_result failed:
-      app_server.stop_session(session)
       run_hook_best_effort("after_run", workspace.path)
       fail_worker("agent turn error")
 
     refreshed_issue = tracker.fetch_issue_states_by_ids([issue.id])
     if refreshed_issue failed:
-      app_server.stop_session(session)
       run_hook_best_effort("after_run", workspace.path)
       fail_worker("issue state refresh error")
 
@@ -1858,7 +1827,6 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
 
     turn_number = turn_number + 1
 
-  app_server.stop_session(session)
   run_hook_best_effort("after_run", workspace.path)
 
   exit_normal()
@@ -1946,7 +1914,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `tracker.api_key` works (including `$VAR` indirection)
 - `$VAR` resolution works for tracker API key and path values
 - `~` path expansion works
-- `codex.command` is preserved as a shell command string
+- `claude.command` is preserved as a shell command string
 - Per-state concurrency override map normalizes state names and ignores invalid values
 - Prompt template renders `issue` and `attempt`
 - Prompt rendering fails on unknown variables (strict mode)
@@ -1998,34 +1966,26 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   limits
 - If a snapshot API is implemented, timeout/unavailable cases are surfaced
 
-### 17.5 Coding-Agent App-Server Client
+### 17.5 Claude Code CLI Client
 
-- Launch command uses workspace cwd and invokes `bash -lc <codex.command>`
-- Startup handshake sends `initialize`, `initialized`, `thread/start`, `turn/start`
-- `initialize` includes client identity/capabilities payload required by the targeted Codex
-  app-server protocol
-- Policy-related startup payloads use the implementation's documented approval/sandbox settings
-- `thread/start` and `turn/start` parse nested IDs and emit `session_started`
-- Request/response read timeout is enforced
-- Turn timeout is enforced
+- Launch uses correct CLI flags (`-p`, `--output-format`, `--max-turns`, `--permission-mode`)
+- `--dangerously-skip-permissions` is included when configured
+- `--model` is included only when `claude.model` is set
+- `--allowedTools` entries are included only when `claude.allowed_tools` is set
+- `--resume <session_id>` is used for continuation turns
+- Subprocess uses workspace path as `cwd`
+- Process exit code 0 is treated as success, non-zero as failure
+- Turn timeout (`claude.turn_timeout_ms`) is enforced
+- Stall timeout (`claude.stall_timeout_ms`) is enforced on stdout inactivity
 - Partial JSON lines are buffered until newline
-- Stdout and stderr are handled separately; protocol JSON is parsed from stdout only
+- Stdout and stderr are handled separately; `stream-json` events are parsed from stdout only
 - Non-JSON stderr lines are logged but do not crash parsing
-- Command/file-change approvals are handled according to the implementation's documented policy
-- Unsupported dynamic tool calls are rejected without stalling the session
-- User input requests are handled according to the implementation's documented policy and do not
-  stall indefinitely
-- Usage and rate-limit payloads are extracted from nested payload shapes
-- Compatible payload variants for approvals, user-input-required signals, and usage/rate-limit
-  telemetry are accepted when they preserve the same logical meaning
-- If optional client-side tools are implemented, the startup handshake advertises the supported tool
-  specs required for discovery by the targeted app-server version
-- If the optional `linear_graphql` client-side tool extension is implemented:
-  - the tool is advertised to the session
+- Session ID is extracted from `stream-json` output and used for `--resume`
+- Usage and rate-limit data are extracted from `stream-json` events
+- If the optional `linear_graphql` tool extension is provided via MCP or other mechanism:
   - valid `query` / `variables` inputs execute against configured Linear auth
   - top-level GraphQL `errors` produce `success=false` while preserving the GraphQL body
   - invalid arguments, missing auth, and transport failures return structured failure payloads
-  - unsupported tool names still fail without stalling the session
 
 ### 17.6 Observability
 
@@ -2079,8 +2039,8 @@ Use the same validation profiles as Section 17:
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
-- Coding-agent app-server subprocess client with JSON line protocol
-- Codex launch command config (`codex.command`, default `codex app-server`)
+- Claude Code CLI subprocess client with `stream-json` protocol
+- Claude Code launch command config (`claude.command`, default `claude`)
 - Strict prompt rendering with `issue` and `attempt` variables
 - Exponential retry queue with continuation retries after normal exit
 - Configurable retry backoff cap (`agent.max_retry_backoff_ms`, default 5m)
@@ -2093,8 +2053,8 @@ Use the same validation profiles as Section 17:
 
 - Optional HTTP server honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
-- Optional `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
-  app-server session using configured Symphony auth.
+- Optional `linear_graphql` tool extension exposes raw Linear GraphQL access through the
+  Claude Code session using configured Symphony auth (via MCP server or other mechanism).
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.

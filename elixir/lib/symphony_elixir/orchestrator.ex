@@ -59,11 +59,27 @@ defmodule SymphonyElixir.Orchestrator do
       claude_rate_limits: nil
     }
 
+    Process.flag(:trap_exit, true)
     run_terminal_workspace_cleanup()
     :ok = schedule_tick(0)
 
     {:ok, state}
   end
+
+  @impl true
+  def terminate(_reason, %{running: running}) do
+    running
+    |> Map.values()
+    |> Enum.each(fn %{pid: pid} when is_pid(pid) ->
+      Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid)
+    end)
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
 
   @impl true
   def handle_info(:tick, state) do
@@ -1123,57 +1139,22 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp extract_token_delta(running_entry, %{event: _, timestamp: _} = update) do
-    running_entry = running_entry || %{}
+  # Claude CLI reports per-message usage on assistant events (not cumulative),
+  # so each event's tokens are added directly to the running total.
+  defp extract_token_delta(_running_entry, %{event: _, timestamp: _} = update) do
     usage = extract_token_usage(update)
 
-    {
-      compute_token_delta(
-        running_entry,
-        :input,
-        usage,
-        :claude_last_reported_input_tokens
-      ),
-      compute_token_delta(
-        running_entry,
-        :output,
-        usage,
-        :claude_last_reported_output_tokens
-      ),
-      compute_token_delta(
-        running_entry,
-        :total,
-        usage,
-        :claude_last_reported_total_tokens
-      )
-    }
-    |> Tuple.to_list()
-    |> then(fn [input, output, total] ->
-      %{
-        input_tokens: input.delta,
-        output_tokens: output.delta,
-        total_tokens: total.delta,
-        input_reported: input.reported,
-        output_reported: output.reported,
-        total_reported: total.reported
-      }
-    end)
-  end
-
-  defp compute_token_delta(running_entry, token_key, usage, reported_key) do
-    next_total = get_token_usage(usage, token_key)
-    prev_reported = Map.get(running_entry, reported_key, 0)
-
-    delta =
-      if is_integer(next_total) and next_total >= prev_reported do
-        next_total - prev_reported
-      else
-        0
-      end
+    input = get_token_usage(usage, :input) || 0
+    output = get_token_usage(usage, :output) || 0
+    total = get_token_usage(usage, :total) || 0
 
     %{
-      delta: max(delta, 0),
-      reported: if(is_integer(next_total), do: next_total, else: prev_reported)
+      input_tokens: input,
+      output_tokens: output,
+      total_tokens: total,
+      input_reported: input,
+      output_reported: output,
+      total_reported: total
     }
   end
 

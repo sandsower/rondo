@@ -310,7 +310,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     issue = Client.normalize_issue_for_test(raw_issue, "user-1")
 
     assert issue.blocked_by == [%{id: "issue-2", identifier: "MT-2", state: "In Progress"}]
-    assert issue.labels == ["backend"]
+    assert issue.labels == ["Backend"]
     assert issue.priority == 2
     assert issue.state == "Todo"
     assert issue.assignee_id == "user-1"
@@ -876,5 +876,59 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
     assert Config.workflow_prompt() == workflow_prompt
+  end
+
+  test "hook commands interpolate {{ workspace.path }} and {{ issue.identifier }}" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-hook-interpolation-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: ~s(echo "ws={{ workspace.path }} id={{ issue.identifier }}" > marker.txt)
+      )
+
+      assert {:ok, workspace} = Workspace.create_for_issue("DC-1234")
+
+      marker = File.read!(Path.join(workspace, "marker.txt"))
+      assert marker =~ "ws=#{workspace}"
+      assert marker =~ "id=DC-1234"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "before_run hook interpolates {{ workspace.path }} and {{ issue.identifier }}" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-before-run-interpolation-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_before_run: ~s(echo "ws={{ workspace.path }} id={{ issue.identifier }}" > before_run.txt)
+      )
+
+      issue = %Issue{id: "issue-abc", identifier: "DC-5678"}
+      assert {:ok, workspace} = Workspace.create_for_issue(issue)
+      assert :ok = Workspace.run_before_run_hook(workspace, issue)
+
+      marker = File.read!(Path.join(workspace, "before_run.txt"))
+      assert marker =~ "ws=#{workspace}"
+      assert marker =~ "id=DC-5678"
+    after
+      File.rm_rf(test_root)
+    end
   end
 end

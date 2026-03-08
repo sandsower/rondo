@@ -50,16 +50,23 @@ defmodule SymphonyElixir.Claude.CLI do
       # quietly logged at debug level, so they don't corrupt state. If Claude
       # Code ever emits JSON-shaped diagnostics on stderr this could be a
       # problem, but in practice its stderr is plain text.
+      #
+      # We wrap the command via /bin/sh so the child runs in a new process
+      # group. safe_port_close/1 sends SIGTERM to the entire group via
+      # `kill -- -$PID`, preventing orphan Claude processes when Symphony
+      # exits or the agent is terminated.
+      wrapper_args = ["-c", build_wrapper_script(cmd, cmd_args)]
       port =
         Port.open(
-          {:spawn_executable, cmd},
+          {:spawn_executable, "/bin/sh"},
           [
             :binary,
             :exit_status,
             :stderr_to_stdout,
             {:line, @port_line_bytes},
             {:cd, Path.expand(workspace)},
-            {:args, cmd_args}
+            {:args, wrapper_args},
+            {:env, [{~c"CLAUDECODE", false}]}
           ]
         )
 
@@ -129,7 +136,8 @@ defmodule SymphonyElixir.Claude.CLI do
   end
 
   defp handle_line(line, on_event, state) do
-    full_line = state.buffer <> line
+    # Strip trailing \r from PTY line discipline (script wrapper adds \r\n)
+    full_line = String.trim_trailing(state.buffer <> line, "\r")
     state = %{state | buffer: ""}
 
     case StreamParser.parse_line(full_line) do
@@ -224,10 +232,48 @@ defmodule SymphonyElixir.Claude.CLI do
   end
 
   defp safe_port_close(port) do
+    # Extract the OS PID before closing the port so we can kill the process group.
+    os_pid =
+      try do
+        {:os_pid, pid} = Port.info(port, :os_pid)
+        pid
+      rescue
+        _ -> nil
+      catch
+        _, _ -> nil
+      end
+
     Port.close(port)
+
+    # Kill the entire process group rooted at the wrapper shell.
+    # The wrapper runs with `exec` so the Claude process inherits the PID.
+    if is_integer(os_pid) and os_pid > 0 do
+      System.cmd("kill", ["--", "-#{os_pid}"], stderr_to_stdout: true)
+    end
   rescue
     ArgumentError -> :ok
   catch
     :error, :badarg -> :ok
+  end
+
+  defp build_wrapper_script(cmd, args) do
+    # Shell-escape each argument, then exec the command.
+    # exec replaces the shell so the process inherits the shell's PID/PGID,
+    # making `kill -- -$PID` reach the entire tree.
+    #
+    # We wrap with `script -qfec` to allocate a PTY. Without this, Node.js
+    # (which powers the Claude CLI) fully buffers stdout when writing to a pipe,
+    # and stream-json events only appear when the internal buffer fills (~64KB)
+    # or the process exits. The PTY tricks Node into line-buffering.
+    escaped_args =
+      Enum.map_join([cmd | args], " ", fn arg ->
+        "'" <> String.replace(arg, "'", "'\\''") <> "'"
+      end)
+
+    "exec script -qfec #{shell_escape(escaped_args)} /dev/null"
+  end
+
+  defp shell_escape(str) do
+    "'" <> String.replace(str, "'", "'\\''") <> "'"
   end
 end

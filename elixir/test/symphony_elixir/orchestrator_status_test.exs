@@ -378,16 +378,17 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     snapshot = GenServer.call(pid, :snapshot)
     assert %{running: [snapshot_entry]} = snapshot
-    assert snapshot_entry.claude_input_tokens == 10
-    assert snapshot_entry.claude_output_tokens == 5
-    assert snapshot_entry.claude_total_tokens == 15
+    # Per-message usage is additive: 2+10=12, 2+5=7, 4+15=19
+    assert snapshot_entry.claude_input_tokens == 12
+    assert snapshot_entry.claude_output_tokens == 7
+    assert snapshot_entry.claude_total_tokens == 19
 
     send(pid, {:DOWN, process_ref, :process, self(), :normal})
     completed_state = :sys.get_state(pid)
 
-    assert completed_state.claude_totals.input_tokens == 10
-    assert completed_state.claude_totals.output_tokens == 5
-    assert completed_state.claude_totals.total_tokens == 15
+    assert completed_state.claude_totals.input_tokens == 12
+    assert completed_state.claude_totals.output_tokens == 7
+    assert completed_state.claude_totals.total_tokens == 19
   end
 
   test "orchestrator snapshot tracks claude rate-limit payloads" do
@@ -630,9 +631,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     snapshot = GenServer.call(pid, :snapshot)
     assert %{running: [snapshot_entry]} = snapshot
-    assert snapshot_entry.claude_input_tokens == 10
-    assert snapshot_entry.claude_output_tokens == 4
-    assert snapshot_entry.claude_total_tokens == 14
+    # Per-message usage is additive: 8+10=18, 3+4=7, 11+14=25
+    assert snapshot_entry.claude_input_tokens == 18
+    assert snapshot_entry.claude_output_tokens == 7
+    assert snapshot_entry.claude_total_tokens == 25
   end
 
   test "orchestrator token accounting ignores last_token_usage without cumulative totals" do
@@ -1586,6 +1588,97 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end)
 
     {tokens, [{timestamp, tokens} | samples]}
+  end
+
+  test "orchestrator accumulates per-message usage across multiple assistant events" do
+    issue_id = "issue-multi-usage"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-MULTI",
+      title: "Multi-event usage test",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-MULTI"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :MultiUsageOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      last_claude_message: nil,
+      last_claude_timestamp: nil,
+      last_claude_event: nil,
+      claude_input_tokens: 0,
+      claude_output_tokens: 0,
+      claude_total_tokens: 0,
+      claude_last_reported_input_tokens: 0,
+      claude_last_reported_output_tokens: 0,
+      claude_last_reported_total_tokens: 0,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    now = DateTime.utc_now()
+
+    # First assistant event: 1000 input, 500 output
+    send(pid, {:claude_worker_update, issue_id, %{
+      event: :assistant,
+      usage: %{input_tokens: 1000, output_tokens: 500, total_tokens: 1500},
+      timestamp: now
+    }})
+
+    # Second assistant event: 800 input, 300 output (LOWER than first -- per-message, not cumulative)
+    send(pid, {:claude_worker_update, issue_id, %{
+      event: :assistant,
+      usage: %{input_tokens: 800, output_tokens: 300, total_tokens: 1100},
+      timestamp: now
+    }})
+
+    # Third assistant event: 1200 input, 600 output
+    send(pid, {:claude_worker_update, issue_id, %{
+      event: :assistant,
+      usage: %{input_tokens: 1200, output_tokens: 600, total_tokens: 1800},
+      timestamp: now
+    }})
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [entry]} = snapshot
+
+    # All three events should accumulate: 1000+800+1200=3000 input, 500+300+600=1400 output
+    assert entry.claude_input_tokens == 3000
+    assert entry.claude_output_tokens == 1400
+    assert entry.claude_total_tokens == 4400
+  end
+
+  test "dashboard output does not contain a Rate Limits line" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0, 115)
+    refute rendered =~ "Rate Limit"
   end
 
   defp graph_samples_for_stability_test(now_ms) do
