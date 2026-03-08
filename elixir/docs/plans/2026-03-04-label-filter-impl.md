@@ -2,7 +2,7 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Filter Linear issues by label names so Symphony only picks up issues tagged for automation.
+**Goal:** Filter Linear issues by label names so Rondo only picks up issues tagged for automation.
 
 **Architecture:** Add `tracker.label_filter` config (list of label names). When set, inject `labels: { name: { in: $labelNames } }` into the GraphQL issues query. When empty/nil, keep current behavior (fetch all matching issues).
 
@@ -15,11 +15,11 @@
 ### Task 1: Add `label_filter` to Config
 
 **Files:**
-- Modify: `lib/symphony_elixir/config.ex`
+- Modify: `lib/rondo/config.ex`
 
 **Step 1: Write the failing test**
 
-Add to `test/symphony_elixir/workspace_and_config_test.exs`:
+Add to `test/rondo/workspace_and_config_test.exs`:
 
 ```elixir
 test "config reads tracker label_filter as list of strings" do
@@ -45,7 +45,7 @@ end
 
 **Step 2: Run tests to verify they fail**
 
-Run: `mix test test/symphony_elixir/workspace_and_config_test.exs --no-color 2>&1 | tail -20`
+Run: `mix test test/rondo/workspace_and_config_test.exs --no-color 2>&1 | tail -20`
 Expected: FAIL -- `tracker_label_filter` not recognized by test_support / Config has no `tracker_label_filter/0`
 
 **Step 3: Add `tracker_label_filter` to test_support.exs**
@@ -99,13 +99,13 @@ In `config.ex`:
 
 **Step 5: Run tests to verify they pass**
 
-Run: `mix test test/symphony_elixir/workspace_and_config_test.exs --no-color 2>&1 | tail -10`
+Run: `mix test test/rondo/workspace_and_config_test.exs --no-color 2>&1 | tail -10`
 Expected: all PASS
 
 **Step 6: Commit**
 
 ```bash
-git add lib/symphony_elixir/config.ex test/support/test_support.exs test/symphony_elixir/workspace_and_config_test.exs
+git add lib/rondo/config.ex test/support/test_support.exs test/rondo/workspace_and_config_test.exs
 git commit -m "Add tracker.label_filter config option"
 ```
 
@@ -114,11 +114,11 @@ git commit -m "Add tracker.label_filter config option"
 ### Task 2: Add label-filtered GraphQL query to Linear client
 
 **Files:**
-- Modify: `lib/symphony_elixir/linear/client.ex`
+- Modify: `lib/rondo/linear/client.ex`
 
 **Step 1: Write the failing test**
 
-Add to `test/symphony_elixir/workspace_and_config_test.exs`:
+Add to `test/rondo/workspace_and_config_test.exs`:
 
 ```elixir
 test "linear client sends label filter in GraphQL query when configured" do
@@ -190,18 +190,18 @@ end
 
 **Step 2: Run tests to verify they fail**
 
-Run: `mix test test/symphony_elixir/workspace_and_config_test.exs --no-color 2>&1 | tail -20`
+Run: `mix test test/rondo/workspace_and_config_test.exs --no-color 2>&1 | tail -20`
 Expected: FAIL -- `fetch_candidate_issues/1` doesn't accept opts / query doesn't contain labelNames
 
 **Step 3: Add the label-filtered query variant and plumb opts through**
 
-In `lib/symphony_elixir/linear/client.ex`:
+In `lib/rondo/linear/client.ex`:
 
 1. Add a second query module attribute `@query_with_labels` that's the same as `@query` but with `$labelNames: [String!]!` in the variable signature and `labels: { name: { in: $labelNames } }` added to the filter:
 
    ```elixir
    @query_with_labels """
-   query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $labelNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
+   query RondoLinearPoll($projectSlug: String!, $stateNames: [String!]!, $labelNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
      issues(filter: {project: {slugId: {eq: $projectSlug}}, state: {name: {in: $stateNames}}, labels: {name: {in: $labelNames}}}, first: $first, after: $after) {
        nodes {
          <same fields as @query>
@@ -238,7 +238,7 @@ In `lib/symphony_elixir/linear/client.ex`:
 
 **Step 4: Run tests to verify they pass**
 
-Run: `mix test test/symphony_elixir/workspace_and_config_test.exs --no-color 2>&1 | tail -10`
+Run: `mix test test/rondo/workspace_and_config_test.exs --no-color 2>&1 | tail -10`
 Expected: all PASS
 
 **Step 5: Run full test suite**
@@ -249,7 +249,7 @@ Expected: 172+ tests, 0 failures (no regressions from the new opts parameter def
 **Step 6: Commit**
 
 ```bash
-git add lib/symphony_elixir/linear/client.ex test/symphony_elixir/workspace_and_config_test.exs
+git add lib/rondo/linear/client.ex test/rondo/workspace_and_config_test.exs
 git commit -m "Add label-based filtering to Linear issue queries"
 ```
 

@@ -1,5 +1,5 @@
 ```text
-╭─ SYMPHONY STATUS
+╭─ RONDO STATUS
 │ Agents: 1/10
 │ Throughput: 42 tps
 │ Runtime: 1m 15s

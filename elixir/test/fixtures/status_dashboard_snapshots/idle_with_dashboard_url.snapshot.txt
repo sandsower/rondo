@@ -1,4 +1,4 @@
-\e[1m╭─ SYMPHONY STATUS\e[0m
+\e[1m╭─ RONDO STATUS\e[0m
 \e[1m│ Agents: \e[0m\e[32m0\e[0m\e[90m/\e[0m\e[90m10\e[0m
 \e[1m│ Throughput: \e[0m\e[36m0 tps\e[0m
 \e[1m│ Runtime: \e[0m\e[35m0m 0s\e[0m
