@@ -9,7 +9,9 @@ import rondo/claude/cli.{type CliOptions}
 import rondo/claude/event.{type TokenUsage}
 import rondo/config.{type Config}
 import rondo/issue.{type Issue}
+import rondo/prompt
 import rondo/run_result.{type RunResult}
+import rondo/workspace
 
 pub type OrchestratorMessage {
   Tick
@@ -132,12 +134,52 @@ fn poll_and_dispatch(state: OrchestratorState) -> OrchestratorState {
         })
         |> list.take(int.max(0, available_slots))
 
-      let new_claimed =
-        list.fold(to_start, state.claimed, fn(acc, i) {
-          set.insert(acc, i.id)
-        })
+      list.fold(to_start, state, fn(acc, issue) {
+        case start_agent(acc, issue) {
+          Ok(new_state) -> new_state
+          Error(_) -> acc
+        }
+      })
+    }
+  }
+}
 
-      OrchestratorState(..state, claimed: new_claimed)
+fn start_agent(
+  state: OrchestratorState,
+  issue: Issue,
+) -> Result(OrchestratorState, Nil) {
+  case workspace.create(state.config.workspace_root, issue) {
+    Error(_) -> Error(Nil)
+    Ok(workspace_path) -> {
+      let built_prompt =
+        prompt.build(state.config.workflow_prompt, issue, 1)
+      let notify = process.new_subject()
+      case
+        agent.start(issue, workspace_path, built_prompt, state.cli_opts, notify)
+      {
+        Error(_) -> Error(Nil)
+        Ok(agent_subject) -> {
+          process.send(
+            agent_subject,
+            agent.Begin(issue, workspace_path, built_prompt),
+          )
+          let entry =
+            RunningEntry(
+              issue_id: issue.id,
+              identifier: issue.identifier,
+              state: "running",
+              session_id: "",
+              turn: 1,
+              usage: event.zero_usage(),
+              agent: agent_subject,
+            )
+          Ok(OrchestratorState(
+            ..state,
+            running: dict.insert(state.running, issue.id, entry),
+            claimed: set.insert(state.claimed, issue.id),
+          ))
+        }
+      }
     }
   }
 }
