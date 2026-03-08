@@ -59,11 +59,27 @@ defmodule SymphonyElixir.Orchestrator do
       claude_rate_limits: nil
     }
 
+    Process.flag(:trap_exit, true)
     run_terminal_workspace_cleanup()
     :ok = schedule_tick(0)
 
     {:ok, state}
   end
+
+  @impl true
+  def terminate(_reason, %{running: running}) do
+    running
+    |> Map.values()
+    |> Enum.each(fn %{pid: pid} when is_pid(pid) ->
+      Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid)
+    end)
+
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
 
   @impl true
   def handle_info(:tick, state) do

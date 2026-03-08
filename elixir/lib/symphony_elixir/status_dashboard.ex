@@ -831,6 +831,7 @@ defmodule SymphonyElixir.StatusDashboard do
   defp infer_phase(running_entry) do
     cond do
       running_entry.session_id != nil -> "claude"
+      running_entry.last_claude_event in [:claude_starting, :session_started, :assistant, :tool_use, :result] -> "claude"
       running_entry.last_claude_event != nil -> "claude"
       true -> "hooks"
     end
@@ -1100,6 +1101,8 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp summarize_message(message), do: humanize_claude_message(message)
+
+  defp humanize_claude_event(:claude_starting, _message, _payload), do: "claude cli starting..."
 
   defp humanize_claude_event(:session_started, _message, payload) do
     session_id = map_value(payload, ["session_id", :session_id])
