@@ -165,6 +165,7 @@ defmodule SymphonyElixir.Workspace do
 
   defp run_hook(command, workspace, issue_context, hook_name) do
     timeout_ms = Config.workspace_hooks()[:timeout_ms]
+    command = interpolate_hook_command(command, workspace, issue_context)
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace}")
 
@@ -253,6 +254,12 @@ defmodule SymphonyElixir.Workspace do
       {:error, _reason} = error -> error
       _final_path -> :ok
     end
+  end
+
+  defp interpolate_hook_command(command, workspace, issue_context) do
+    command
+    |> String.replace("{{ workspace.path }}", workspace)
+    |> String.replace("{{ issue.identifier }}", issue_context.issue_identifier)
   end
 
   defp issue_context(%{id: issue_id, identifier: identifier}) do
