@@ -54,8 +54,8 @@ mise exec -- elixir --version
 ## Run
 
 ```bash
-git clone https://github.com/sandsower/symphony.git
-cd symphony/elixir
+git clone https://github.com/sandsower/rondo.git
+cd rondo/elixir
 mise trust
 mise install
 mise exec -- mix setup
