@@ -1,6 +1,7 @@
 import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
 import gleam/int
+import gleam/io
 import gleam/list
 import gleam/otp/actor
 import gleam/set.{type Set}
@@ -120,9 +121,27 @@ fn handle_message(
 }
 
 fn poll_and_dispatch(state: OrchestratorState) -> OrchestratorState {
+  let running = dict.size(state.running)
+  let completed = set.size(state.completed)
+  io.println(
+    "[tick] running=" <> int.to_string(running)
+    <> " completed=" <> int.to_string(completed)
+    <> " fetching candidates...",
+  )
   case state.fetch_candidates() {
-    Error(_) -> state
+    Error(_) -> {
+      io.println("[tick] fetch failed")
+      state
+    }
     Ok(issues) -> {
+      let candidate_count = list.length(issues)
+      case candidate_count > 0 {
+        True ->
+          io.println(
+            "[tick] " <> int.to_string(candidate_count) <> " candidate(s) found",
+          )
+        False -> io.println("[tick] no candidates")
+      }
       let available_slots =
         state.config.max_concurrent_agents - dict.size(state.running)
       let to_start =
@@ -157,8 +176,12 @@ fn start_agent(
       case
         agent.start(issue, workspace_path, built_prompt, state.cli_opts, notify)
       {
-        Error(_) -> Error(Nil)
+        Error(_) -> {
+          io.println("[agent] failed to start agent for " <> issue.identifier)
+          Error(Nil)
+        }
         Ok(agent_subject) -> {
+          io.println("[agent] started " <> issue.identifier <> " in " <> workspace_path)
           process.send(
             agent_subject,
             agent.Begin(issue, workspace_path, built_prompt),

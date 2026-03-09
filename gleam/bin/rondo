@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+BASE="$(cd "$(dirname "$0")/../build/erlang-shipment" && pwd)"
+
+exec erl \
+  -pa "$BASE"/*/ebin \
+  -eval "rondo@@main:run(rondo)" \
+  -noshell \
+  -extra "$@"

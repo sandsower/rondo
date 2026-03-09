@@ -1,11 +1,14 @@
 import argv
 import gleam/erlang/process
+import gleam/int
 import gleam/io
 import gleam/list
 import gleam/result
 import gleam/string
 import rondo/claude/cli as claude_cli
 import rondo/config
+import rondo/dashboard
+import rondo/http as rondo_http
 import rondo/orchestrator
 import rondo/tracker/linear
 import simplifile
@@ -88,6 +91,27 @@ fn start_system(
     Ok(orch_subject) -> {
       io.println("Rondo starting...")
 
+      // Start HTTP server
+      case cfg.server_port > 0 {
+        True -> {
+          case rondo_http.start(orch_subject, cfg.server_port) {
+            Ok(_) ->
+              io.println(
+                "HTTP server on http://"
+                <> cfg.server_host <> ":" <> int.to_string(cfg.server_port),
+              )
+            Error(e) -> io.println("HTTP server failed: " <> e)
+          }
+        }
+        False -> Nil
+      }
+
+      // Start dashboard refresh loop
+      case cfg.observability_enabled {
+        True -> start_dashboard_loop(orch_subject, cfg.observability_refresh_ms)
+        False -> Nil
+      }
+
       // Start polling timer
       start_poll_timer(orch_subject, cfg.poll_interval_ms)
 
@@ -99,6 +123,34 @@ fn start_system(
       Ok(Nil)
     }
   }
+}
+
+fn start_dashboard_loop(
+  orch: process.Subject(orchestrator.OrchestratorMessage),
+  interval_ms: Int,
+) -> Nil {
+  let _ = process.start(fn() {
+    dashboard_loop(orch, interval_ms)
+  }, True)
+  Nil
+}
+
+fn dashboard_loop(
+  orch: process.Subject(orchestrator.OrchestratorMessage),
+  interval_ms: Int,
+) -> Nil {
+  process.sleep(interval_ms)
+  let snap_subject = process.new_subject()
+  process.send(orch, orchestrator.GetSnapshot(snap_subject))
+  case process.receive(snap_subject, 2000) {
+    Ok(snapshot) -> {
+      // Clear screen and render
+      io.print("\u{001b}[2J\u{001b}[H")
+      io.println(dashboard.render(snapshot))
+    }
+    Error(_) -> Nil
+  }
+  dashboard_loop(orch, interval_ms)
 }
 
 fn start_poll_timer(
