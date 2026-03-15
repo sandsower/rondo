@@ -14,6 +14,8 @@ defmodule RondoWeb.DashboardLive do
       socket
       |> assign(:payload, load_payload())
       |> assign(:now, DateTime.utc_now())
+      |> assign(:selected_issue, nil)
+      |> assign(:selected_run_index, 0)
 
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
@@ -31,14 +33,95 @@ defmodule RondoWeb.DashboardLive do
 
   @impl true
   def handle_info(:observability_updated, socket) do
-    {:noreply,
-     socket
-     |> assign(:payload, load_payload())
-     |> assign(:now, DateTime.utc_now())}
+    socket =
+      socket
+      |> assign(:payload, load_payload())
+      |> assign(:now, DateTime.utc_now())
+
+    # Only update panel data for live running issues, not archived views
+    socket =
+      case {socket.assigns.selected_issue, socket.assigns[:selected_runs]} do
+        {nil, _} ->
+          socket
+
+        {_identifier, runs} when is_list(runs) ->
+          # Viewing an archived run — don't overwrite with live data
+          socket
+
+        {identifier, _} ->
+          # Viewing a live running issue — keep it updated
+          entry = find_issue_entry(socket.assigns.payload, identifier)
+          if entry, do: assign(socket, :selected_issue_data, entry), else: socket
+      end
+
+    {:noreply, socket}
   end
 
   @impl true
   def handle_info(_msg, socket), do: {:noreply, socket}
+
+  @impl true
+  def handle_event("select_issue", %{"identifier" => identifier}, socket) do
+    entry = find_issue_entry(socket.assigns.payload, identifier)
+
+    socket =
+      socket
+      |> assign(:selected_issue, identifier)
+      |> assign(:selected_issue_data, entry)
+      |> assign(:selected_runs, nil)
+      |> assign(:selected_run_index, 0)
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("select_archived", %{"identifier" => identifier}, socket) do
+    archived = Map.get(socket.assigns.payload, :archived, [])
+    group = Enum.find(archived, &(&1.issue_identifier == identifier))
+
+    if group do
+      latest_index = length(group.runs) - 1
+      latest_run = List.last(group.runs)
+      run_with_log = load_run_event_log(latest_run)
+
+      {:noreply,
+       socket
+       |> assign(:selected_issue, identifier)
+       |> assign(:selected_issue_data, run_with_log)
+       |> assign(:selected_run_index, latest_index)
+       |> assign(:selected_runs, group.runs)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("select_run", %{"index" => index_str}, socket) do
+    index = String.to_integer(index_str)
+    runs = socket.assigns[:selected_runs] || []
+    run = Enum.at(runs, index)
+
+    if run do
+      run_with_log = load_run_event_log(run)
+
+      {:noreply,
+       socket
+       |> assign(:selected_issue_data, run_with_log)
+       |> assign(:selected_run_index, index)}
+    else
+      {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("close_panel", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:selected_issue, nil)
+     |> assign(:selected_issue_data, nil)
+     |> assign(:selected_runs, nil)
+     |> assign(:selected_run_index, 0)}
+  end
 
   @impl true
   def render(assigns) do
@@ -152,11 +235,17 @@ defmodule RondoWeb.DashboardLive do
                   </tr>
                 </thead>
                 <tbody>
-                  <tr :for={entry <- @payload.running}>
+                  <tr
+                    :for={entry <- @payload.running}
+                    class={"data-table-row #{if @selected_issue == entry.issue_identifier, do: "data-table-row-selected", else: ""}"}
+                    phx-click="select_issue"
+                    phx-value-identifier={entry.issue_identifier}
+                    style="cursor: pointer;"
+                  >
                     <td>
                       <div class="issue-stack">
                         <span class="issue-id"><%= entry.issue_identifier %></span>
-                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"} onclick="event.stopPropagation()">JSON</a>
                       </div>
                     </td>
                     <td>
@@ -172,7 +261,7 @@ defmodule RondoWeb.DashboardLive do
                             class="subtle-button"
                             data-label="Copy ID"
                             data-copy={entry.session_id}
-                            onclick="navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);"
+                            onclick="event.stopPropagation(); navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);"
                           >
                             Copy ID
                           </button>
@@ -235,7 +324,7 @@ defmodule RondoWeb.DashboardLive do
                     <td>
                       <div class="issue-stack">
                         <span class="issue-id"><%= entry.issue_identifier %></span>
-                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON</a>
                       </div>
                     </td>
                     <td><%= entry.attempt %></td>
@@ -247,9 +336,167 @@ defmodule RondoWeb.DashboardLive do
             </div>
           <% end %>
         </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Archived runs</h2>
+              <p class="section-copy">Completed agent sessions. Click to view transcripts.</p>
+            </div>
+          </div>
+
+          <%= if (@payload[:archived] || []) == [] do %>
+            <p class="empty-state">No archived runs yet.</p>
+          <% else %>
+            <div class="table-wrap">
+              <table class="data-table" style="min-width: 580px;">
+                <thead>
+                  <tr>
+                    <th>Issue</th>
+                    <th>Runs</th>
+                    <th>Last result</th>
+                    <th>Total tokens</th>
+                    <th>Last run</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    :for={group <- @payload.archived}
+                    class={"data-table-row #{if @selected_issue == group.issue_identifier, do: "data-table-row-selected", else: ""}"}
+                    phx-click="select_archived"
+                    phx-value-identifier={group.issue_identifier}
+                    style="cursor: pointer;"
+                  >
+                    <td>
+                      <span class="issue-id"><%= group.issue_identifier %></span>
+                    </td>
+                    <td class="numeric"><%= group.run_count %></td>
+                    <td>
+                      <span class={exit_reason_class(group.latest_result)}>
+                        <%= group.latest_result %>
+                      </span>
+                    </td>
+                    <td class="numeric"><%= format_int(group.total_tokens) %></td>
+                    <td class="mono muted" style="font-size: 12px;"><%= format_finished_at(group.latest_finished_at) %></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          <% end %>
+        </section>
       <% end %>
     </section>
+
+    <%= if @selected_issue do %>
+      <div class="panel-overlay" phx-click="close_panel"></div>
+      <aside class="panel-slide">
+        <div class="panel-header">
+          <div>
+            <h2 class="panel-title"><%= @selected_issue %></h2>
+            <p class="panel-subtitle">
+              <%= if @selected_issue_data && @selected_issue_data[:finished_at] do %>
+                Archived run
+              <% else %>
+                Live agent event stream
+              <% end %>
+            </p>
+          </div>
+          <button type="button" class="panel-close" phx-click="close_panel">&times;</button>
+        </div>
+
+        <%= if @selected_runs && length(@selected_runs) > 1 do %>
+          <div class="run-tabs">
+            <%= for {run, idx} <- Enum.with_index(@selected_runs) do %>
+              <button
+                type="button"
+                class={"run-tab #{if idx == @selected_run_index, do: "run-tab-active", else: ""}"}
+                phx-click="select_run"
+                phx-value-index={idx}
+              >
+                Run <%= idx + 1 %> · <%= format_event_time(run.started_at) %>
+              </button>
+            <% end %>
+          </div>
+        <% end %>
+
+        <%= if @selected_issue_data do %>
+          <div class="panel-metrics">
+            <div class="panel-metric">
+              <span class="panel-metric-label">State</span>
+              <span class={state_badge_class(@selected_issue_data[:state] || "n/a")}><%= @selected_issue_data[:state] || "n/a" %></span>
+            </div>
+            <div class="panel-metric">
+              <span class="panel-metric-label">
+                <%= if @selected_issue_data[:finished_at], do: "Duration", else: "Runtime" %>
+              </span>
+              <span class="numeric">
+                <%= if @selected_issue_data[:finished_at] do %>
+                  <%= format_duration(@selected_issue_data.started_at, @selected_issue_data.finished_at) %>
+                <% else %>
+                  <%= format_runtime_and_turns(@selected_issue_data.started_at, @selected_issue_data.turn_count, @now) %>
+                <% end %>
+              </span>
+            </div>
+            <div class="panel-metric">
+              <span class="panel-metric-label">Tokens</span>
+              <span class="numeric"><%= format_int(@selected_issue_data.tokens.total_tokens) %></span>
+            </div>
+            <div class="panel-metric">
+              <%= if @selected_issue_data[:exit_reason] do %>
+                <span class="panel-metric-label">Result</span>
+                <span class={exit_reason_class(@selected_issue_data.exit_reason)}><%= @selected_issue_data.exit_reason %></span>
+              <% else %>
+                <span class="panel-metric-label">Session</span>
+                <span class="mono" style="font-size: 11px;"><%= @selected_issue_data[:session_id] || "n/a" %></span>
+              <% end %>
+            </div>
+          </div>
+
+          <div class="panel-stream-header">
+            <span class="panel-metric-label">Event stream</span>
+            <span class="muted" style="font-size: 11px;"><%= length(@selected_issue_data.event_log) %> events</span>
+          </div>
+
+          <%= if @selected_issue_data.event_log == [] do %>
+            <p class="empty-state">Waiting for agent activity...</p>
+          <% else %>
+            <div class="event-stream" id="event-stream" phx-hook="ScrollBottom">
+              <div :for={entry <- @selected_issue_data.event_log} class="event-row">
+                <span class="event-row-time mono muted"><%= format_event_time(entry.at) %></span>
+                <span class={event_type_class(entry.event)}><%= entry.event %></span>
+                <span class="event-row-message"><%= render_event_message(entry.message) %></span>
+              </div>
+            </div>
+          <% end %>
+        <% else %>
+          <p class="empty-state">Issue not currently running.</p>
+        <% end %>
+      </aside>
+    <% end %>
     """
+  end
+
+  defp load_run_event_log(run) do
+    identifier = run[:issue_identifier]
+    filename = run[:filename]
+
+    if identifier && filename do
+      case Rondo.Orchestrator.load_archived_run(identifier, filename) do
+        {:ok, full_entry} ->
+          event_log = RondoWeb.Presenter.format_event_log_public(Map.get(full_entry, :event_log, []))
+          Map.put(run, :event_log, event_log)
+
+        _ ->
+          Map.put(run, :event_log, [])
+      end
+    else
+      Map.put(run, :event_log, [])
+    end
+  end
+
+  defp find_issue_entry(payload, identifier) do
+    running = Map.get(payload, :running, [])
+    Enum.find(running, &(&1.issue_identifier == identifier))
   end
 
   defp load_payload do
@@ -312,6 +559,15 @@ defmodule RondoWeb.DashboardLive do
 
   defp format_int(_value), do: "n/a"
 
+  defp format_event_time(nil), do: ""
+
+  defp format_event_time(iso_string) when is_binary(iso_string) do
+    case DateTime.from_iso8601(iso_string) do
+      {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M:%S")
+      _ -> iso_string
+    end
+  end
+
   defp state_badge_class(state) do
     base = "state-badge"
     normalized = state |> to_string() |> String.downcase()
@@ -320,6 +576,53 @@ defmodule RondoWeb.DashboardLive do
       String.contains?(normalized, ["progress", "running", "active"]) -> "#{base} state-badge-active"
       String.contains?(normalized, ["blocked", "error", "failed"]) -> "#{base} state-badge-danger"
       String.contains?(normalized, ["todo", "queued", "pending", "retry"]) -> "#{base} state-badge-warning"
+      true -> base
+    end
+  end
+
+  defp format_duration(started_at, finished_at) when is_binary(started_at) and is_binary(finished_at) do
+    with {:ok, s, _} <- DateTime.from_iso8601(started_at),
+         {:ok, f, _} <- DateTime.from_iso8601(finished_at) do
+      format_runtime_seconds(DateTime.diff(f, s, :second))
+    else
+      _ -> "n/a"
+    end
+  end
+
+  defp format_duration(_, _), do: "n/a"
+
+  defp format_finished_at(nil), do: ""
+
+  defp format_finished_at(iso_string) when is_binary(iso_string) do
+    case DateTime.from_iso8601(iso_string) do
+      {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M:%S")
+      _ -> iso_string
+    end
+  end
+
+  defp exit_reason_class("completed"), do: "state-badge state-badge-active"
+  defp exit_reason_class(_), do: "state-badge state-badge-danger"
+
+  defp render_event_message(nil), do: ""
+  defp render_event_message(""), do: ""
+
+  defp render_event_message(text) when is_binary(text) do
+    text
+    |> Phoenix.HTML.html_escape()
+    |> Phoenix.HTML.safe_to_string()
+    |> String.replace(~r/`([^`]+)`/, "<code>\\1</code>")
+    |> String.replace(~r/\*\*([^*]+)\*\*/, "<strong>\\1</strong>")
+    |> Phoenix.HTML.raw()
+  end
+
+  defp event_type_class(event) do
+    base = "event-row-type mono"
+    event_str = to_string(event)
+
+    cond do
+      String.contains?(event_str, ["error", "fail"]) -> "#{base} event-type-danger"
+      String.contains?(event_str, ["start", "claude_starting"]) -> "#{base} event-type-success"
+      String.contains?(event_str, ["end", "complete", "result"]) -> "#{base} event-type-muted"
       true -> base
     end
   end

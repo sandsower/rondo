@@ -14,11 +14,15 @@ defmodule Rondo.PromptBuilder do
       |> prompt_template!()
       |> parse_template!()
 
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
     template
     |> Solid.render!(
       %{
         "attempt" => Keyword.get(opts, :attempt),
-        "issue" => issue |> Map.from_struct() |> to_solid_map()
+        "issue" => issue |> Map.from_struct() |> to_solid_map(),
+        "current_time" => DateTime.to_iso8601(now),
+        "current_date" => Date.to_iso8601(DateTime.to_date(now))
       },
       @render_opts
     )

@@ -35,6 +35,7 @@ defmodule Rondo.Config do
   @default_claude_output_format "stream-json"
   @default_claude_turn_timeout_ms 3_600_000
   @default_claude_stall_timeout_ms 300_000
+  @default_debug false
   @default_observability_enabled true
   @default_observability_refresh_ms 1_000
   @default_observability_render_interval_ms 16
@@ -324,6 +325,16 @@ defmodule Rondo.Config do
       _ ->
         @default_prompt_template
     end
+  end
+
+  @spec debug?() :: boolean()
+  def debug? do
+    Application.get_env(:rondo, :debug, @default_debug)
+  end
+
+  @spec set_debug(boolean()) :: :ok
+  def set_debug(enabled) when is_boolean(enabled) do
+    Application.put_env(:rondo, :debug, enabled)
   end
 
   @spec observability_enabled?() :: boolean()

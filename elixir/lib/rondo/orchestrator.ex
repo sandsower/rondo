@@ -14,6 +14,7 @@ defmodule Rondo.Orchestrator do
   @poll_retry_delay_ms 5_000
   @slot_wait_delay_ms 5_000
   @failure_retry_base_ms 10_000
+  @event_log_max_entries 100
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @missing_issue_terminate_threshold 3
@@ -41,7 +42,8 @@ defmodule Rondo.Orchestrator do
       claimed: MapSet.new(),
       retry_attempts: %{},
       claude_totals: nil,
-      claude_rate_limits: nil
+      claude_rate_limits: nil,
+      archived_runs: []
     ]
   end
 
@@ -63,7 +65,8 @@ defmodule Rondo.Orchestrator do
       tick_timer_ref: nil,
       tick_token: nil,
       claude_totals: @empty_claude_totals,
-      claude_rate_limits: nil
+      claude_rate_limits: nil,
+      archived_runs: load_archived_runs()
     }
 
     Process.flag(:trap_exit, true)
@@ -133,7 +136,9 @@ defmodule Rondo.Orchestrator do
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
+        running_entry = refresh_running_entry_state(running_entry)
         state = record_session_completion_totals(state, running_entry)
+        state = archive_running_entry(state, running_entry, reason)
         session_id = running_entry_session_id(running_entry)
 
         state =
@@ -329,12 +334,12 @@ defmodule Rondo.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, true)
+        terminate_running_issue(state, issue.id, true, issue.state)
 
       !issue_routable_to_worker?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_running_issue(state, issue.id, false, issue.state)
 
       active_issue_state?(issue.state, active_states) ->
         refresh_running_issue_state(state, issue)
@@ -342,7 +347,7 @@ defmodule Rondo.Orchestrator do
       true ->
         Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_running_issue(state, issue.id, false, issue.state)
     end
   end
 
@@ -430,13 +435,24 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do
+  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace, final_state \\ nil) do
     case Map.get(state.running, issue_id) do
       nil ->
         release_issue_claim(state, issue_id)
 
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
+        running_entry =
+          if final_state do
+            update_in(running_entry, [:issue], fn
+              %Issue{} = issue -> %{issue | state: final_state}
+              other -> other
+            end)
+          else
+            running_entry
+          end
+
         state = record_session_completion_totals(state, running_entry)
+        state = archive_running_entry(state, running_entry, :terminated)
 
         if cleanup_workspace do
           cleanup_issue_workspace(identifier)
@@ -704,6 +720,8 @@ defmodule Rondo.Orchestrator do
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
 
+        transition_issue_to_in_progress(issue)
+
         running =
           Map.put(state.running, issue.id, %{
             pid: pid,
@@ -722,7 +740,8 @@ defmodule Rondo.Orchestrator do
             claude_last_reported_total_tokens: 0,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
-            started_at: DateTime.utc_now()
+            started_at: DateTime.utc_now(),
+            event_log: []
           })
 
         %{
@@ -1036,7 +1055,8 @@ defmodule Rondo.Orchestrator do
           last_claude_timestamp: metadata.last_claude_timestamp,
           last_claude_message: metadata.last_claude_message,
           last_claude_event: metadata.last_claude_event,
-          runtime_seconds: running_seconds(metadata.started_at, now)
+          runtime_seconds: running_seconds(metadata.started_at, now),
+          event_log: Map.get(metadata, :event_log, [])
         }
       end)
 
@@ -1056,6 +1076,7 @@ defmodule Rondo.Orchestrator do
      %{
        running: running,
        retrying: retrying,
+       archived: Map.get(state, :archived_runs, []),
        claude_totals: state.claude_totals,
        rate_limits: Map.get(state, :claude_rate_limits),
        polling: %{
@@ -1091,6 +1112,19 @@ defmodule Rondo.Orchestrator do
     last_reported_total = Map.get(running_entry, :claude_last_reported_total_tokens, 0)
     turn_count = Map.get(running_entry, :turn_count, 0)
 
+    message = extract_event_summary(event, update)
+
+    event_log =
+      if loggable_event?(event, message) do
+        log_entry = %{at: timestamp, event: event, message: message, tokens: token_delta}
+
+        running_entry
+        |> Map.get(:event_log, [])
+        |> append_to_event_log(log_entry, @event_log_max_entries)
+      else
+        Map.get(running_entry, :event_log, [])
+      end
+
     {
       Map.merge(running_entry, %{
         last_claude_timestamp: timestamp,
@@ -1103,7 +1137,8 @@ defmodule Rondo.Orchestrator do
         claude_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         claude_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         claude_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
-        turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
+        turn_count: turn_count_for_update(turn_count, running_entry.session_id, update),
+        event_log: event_log
       }),
       token_delta
     }
@@ -1139,6 +1174,326 @@ defmodule Rondo.Orchestrator do
       timestamp: update[:timestamp]
     }
   end
+
+  # Filter noisy/empty events from the log
+  defp loggable_event?(:unknown, _message), do: false
+  defp loggable_event?(:assistant, nil), do: false
+  defp loggable_event?(:assistant, ""), do: false
+  defp loggable_event?(_event, _message), do: true
+
+  defp extract_event_summary(:assistant, %{raw: raw}) when is_map(raw) do
+    raw
+    |> get_in_any(["message", "content"])
+    |> extract_content_text()
+  end
+
+  defp extract_event_summary(:tool_use, %{raw: raw}) when is_map(raw) do
+    tool_name = get_in_any(raw, ["tool", "name"]) || get_in_any(raw, ["content", "name"])
+    tool_input = get_in_any(raw, ["tool", "input"]) || get_in_any(raw, ["content", "input"])
+
+    cond do
+      tool_name && tool_input -> "#{tool_name}: #{truncate_text(inspect(tool_input), 500)}"
+      tool_name -> tool_name
+      true -> nil
+    end
+  end
+
+  defp extract_event_summary(:result, %{raw: raw}) when is_map(raw) do
+    subtype = Map.get(raw, "subtype") || Map.get(raw, :subtype) || "completed"
+    "#{subtype}"
+  end
+
+  defp extract_event_summary(:session_started, %{session_id: sid}) when is_binary(sid) do
+    "Session #{sid}"
+  end
+
+  defp extract_event_summary(:rate_limit, %{raw: raw}) when is_map(raw) do
+    retry_after = get_in_any(raw, ["retryAfter"]) || get_in_any(raw, ["retry_after"])
+    if retry_after, do: "retry after #{retry_after}s", else: "rate limited"
+  end
+
+  defp extract_event_summary(:system, %{raw: raw}) when is_map(raw) do
+    Map.get(raw, "subtype") || Map.get(raw, :subtype)
+  end
+
+  defp extract_event_summary(_event, _update), do: nil
+
+  defp get_in_any(map, [key | rest]) when is_map(map) do
+    value = Map.get(map, key) || Map.get(map, String.to_existing_atom(key))
+    case rest do
+      [] -> value
+      _ when is_map(value) -> get_in_any(value, rest)
+      _ -> value
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  defp get_in_any(_, _), do: nil
+
+  defp extract_content_text(content) when is_list(content) do
+    content
+    |> Enum.flat_map(fn
+      %{"type" => "text", "text" => text} -> [text]
+      %{"type" => "tool_use", "name" => name, "input" => input} -> [summarize_tool_use(name, input)]
+      %{"type" => "tool_use", "name" => name} -> [name]
+      %{type: "text", text: text} -> [text]
+      _ -> []
+    end)
+    |> Enum.join(" ")
+    |> truncate_text(1000)
+    |> case do
+      "" -> nil
+      text -> text
+    end
+  end
+
+  defp extract_content_text(_), do: nil
+
+  defp summarize_tool_use("Bash", %{"command" => cmd}), do: "$ #{truncate_text(cmd, 200)}"
+  defp summarize_tool_use("Read", %{"file_path" => path}), do: "Read #{path}"
+  defp summarize_tool_use("Write", %{"file_path" => path}), do: "Write #{path}"
+  defp summarize_tool_use("Edit", %{"file_path" => path}), do: "Edit #{path}"
+  defp summarize_tool_use("Glob", %{"pattern" => pat}), do: "Glob #{pat}"
+  defp summarize_tool_use("Grep", %{"pattern" => pat}), do: "Grep #{pat}"
+  defp summarize_tool_use("Agent", %{"prompt" => p}), do: "Agent: #{truncate_text(p, 150)}"
+
+  defp summarize_tool_use(name, %{"query" => q}), do: "#{name}: #{truncate_text(q, 200)}"
+  defp summarize_tool_use(name, %{"command" => c}), do: "#{name}: #{truncate_text(c, 200)}"
+  defp summarize_tool_use(name, %{"file_path" => p}), do: "#{name} #{p}"
+  defp summarize_tool_use(name, %{"url" => u}), do: "#{name} #{truncate_text(u, 200)}"
+  defp summarize_tool_use(name, input) when map_size(input) == 0, do: name
+  defp summarize_tool_use(name, input) when is_map(input) do
+    case Enum.take(input, 1) do
+      [{k, v}] when is_binary(v) -> "#{name}: #{k}=#{truncate_text(v, 150)}"
+      _ -> "#{name}: #{truncate_text(inspect(input), 200)}"
+    end
+  end
+
+  defp truncate_text(text, max) when is_binary(text) and byte_size(text) > max do
+    String.slice(text, 0, max) <> "..."
+  end
+
+  defp truncate_text(text, _max), do: text
+
+  defp append_to_event_log(log, entry, max) when length(log) >= max do
+    [entry | Enum.take(log, max - 1)]
+  end
+
+  defp append_to_event_log(log, entry, _max), do: [entry | log]
+
+  defp refresh_running_entry_state(%{issue: %Issue{id: issue_id} = issue} = running_entry) do
+    case Tracker.fetch_issue_states_by_ids([issue_id]) do
+      {:ok, [%Issue{state: current_state} | _]} ->
+        %{running_entry | issue: %{issue | state: current_state}}
+
+      _ ->
+        running_entry
+    end
+  rescue
+    _ -> running_entry
+  end
+
+  defp refresh_running_entry_state(running_entry), do: running_entry
+
+  defp archive_running_entry(state, running_entry, reason) do
+    issue = Map.get(running_entry, :issue)
+    identifier = Map.get(running_entry, :identifier)
+    finished_at = DateTime.utc_now()
+
+    archived_entry = %{
+      issue_id: issue && issue.id,
+      identifier: identifier,
+      session_id: Map.get(running_entry, :session_id),
+      state: issue && issue.state,
+      started_at: Map.get(running_entry, :started_at),
+      finished_at: finished_at,
+      exit_reason: archive_exit_reason(reason),
+      turn_count: Map.get(running_entry, :turn_count, 0),
+      tokens: %{
+        input_tokens: Map.get(running_entry, :claude_input_tokens, 0),
+        output_tokens: Map.get(running_entry, :claude_output_tokens, 0),
+        total_tokens: Map.get(running_entry, :claude_total_tokens, 0)
+      },
+      event_log: Map.get(running_entry, :event_log, [])
+    }
+
+    persist_archived_run(archived_entry)
+
+    # In-memory index: metadata only, no event_log
+    index_entry = Map.delete(archived_entry, :event_log)
+    existing = Map.get(state, :archived_runs, [])
+
+    Rondo.Debug.log("Archived run for #{identifier}, now #{length(existing) + 1} in-memory entries")
+    %{state | archived_runs: [index_entry | existing]}
+  end
+
+  defp archive_exit_reason(:normal), do: "completed"
+  defp archive_exit_reason(:terminated), do: "completed"
+  defp archive_exit_reason(reason), do: "exited: #{inspect(reason)}"
+
+  # --- Per-run file persistence ---
+  # Layout: <archive_root>/<IDENTIFIER>/<timestamp>.json
+
+  defp persist_archived_run(entry) do
+    identifier = entry[:identifier] || "unknown"
+    timestamp = format_file_timestamp(entry[:started_at])
+    dir = Path.join(archive_root(), identifier)
+    path = Path.join(dir, "#{timestamp}.json")
+
+    serializable =
+      entry
+      |> Map.update(:started_at, nil, &datetime_to_iso/1)
+      |> Map.update(:finished_at, nil, &datetime_to_iso/1)
+      |> Map.update(:event_log, [], fn log ->
+        Enum.map(log, fn e -> Map.update(e, :at, nil, &datetime_to_iso/1) end)
+      end)
+
+    case Jason.encode(serializable) do
+      {:ok, json} ->
+        File.mkdir_p!(dir)
+        File.write!(path, json)
+
+      {:error, reason} ->
+        Logger.warning("Failed to persist archived run for #{identifier}: #{inspect(reason)}")
+    end
+  rescue
+    error ->
+      Logger.warning("Failed to persist archived run: #{Exception.message(error)}")
+  end
+
+  @doc false
+  def load_archived_run(identifier, filename) do
+    path = Path.join([archive_root(), identifier, filename])
+
+    case File.read(path) do
+      {:ok, json} ->
+        case Jason.decode(json) do
+          {:ok, entry} when is_map(entry) -> {:ok, deserialize_archived_entry(entry)}
+          _ -> {:error, :invalid_json}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  rescue
+    _ -> {:error, :read_failed}
+  end
+
+  defp load_archived_runs do
+    root = archive_root()
+    case File.ls(root) do
+      {:ok, identifiers} ->
+        identifiers
+        |> Enum.flat_map(fn identifier ->
+          dir = Path.join(root, identifier)
+
+          case File.ls(dir) do
+            {:ok, files} ->
+              files
+              |> Enum.filter(&String.ends_with?(&1, ".json"))
+              |> Enum.map(fn filename ->
+                path = Path.join(dir, filename)
+
+                case File.read(path) do
+                  {:ok, json} ->
+                    case Jason.decode(json) do
+                      {:ok, entry} when is_map(entry) ->
+                        entry
+                        |> deserialize_archived_entry()
+                        |> Map.delete(:event_log)
+
+                      _ ->
+                        nil
+                    end
+
+                  _ ->
+                    nil
+                end
+              end)
+              |> Enum.reject(&is_nil/1)
+
+            _ ->
+              []
+          end
+        end)
+        |> Enum.sort_by(& &1[:started_at], :desc)
+
+      {:error, _} ->
+        []
+    end
+  rescue
+    error ->
+      Rondo.Debug.log("Failed to load archived runs: #{Exception.message(error)}")
+      []
+  end
+
+  defp debug_log(msg) do
+    line = "[#{DateTime.utc_now() |> DateTime.to_iso8601()}] #{msg}\n"
+    File.mkdir_p!("/tmp/rondo_workspaces")
+    File.write!("/tmp/rondo_workspaces/rondo_debug.log", line, [:append])
+  end
+
+  @archive_keys ~w(issue_id identifier session_id state started_at finished_at exit_reason turn_count tokens event_log)
+  @token_keys ~w(input_tokens output_tokens total_tokens)
+  @event_keys ~w(at event message tokens)
+
+  defp deserialize_archived_entry(entry) when is_map(entry) do
+    entry
+    |> Map.new(fn {k, v} when is_binary(k) -> {safe_atom(k, @archive_keys), v}; other -> other end)
+    |> Map.update(:tokens, %{}, fn t when is_map(t) ->
+      Map.new(t, fn {k, v} when is_binary(k) -> {safe_atom(k, @token_keys), v}; other -> other end)
+    end)
+    |> Map.update(:event_log, [], fn log when is_list(log) ->
+      Enum.map(log, fn e when is_map(e) ->
+        Map.new(e, fn {k, v} when is_binary(k) -> {safe_atom(k, @event_keys), v}; other -> other end)
+      end)
+    end)
+  end
+
+  defp deserialize_archived_entry(_), do: %{}
+
+  defp safe_atom(key, _allowed) when is_atom(key), do: key
+  defp safe_atom(key, allowed) when is_binary(key) do
+    if key in allowed, do: String.to_atom(key), else: String.to_atom(key)
+  end
+
+  defp datetime_to_iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
+  defp datetime_to_iso(other), do: other
+
+  defp format_file_timestamp(%DateTime{} = dt) do
+    dt
+    |> DateTime.truncate(:second)
+    |> DateTime.to_iso8601()
+    |> String.replace(~r/[:\.]/, "-")
+  end
+
+  defp format_file_timestamp(iso) when is_binary(iso) do
+    String.replace(iso, ~r/[:\.]/, "-")
+  end
+
+  defp format_file_timestamp(_), do: "unknown"
+
+  defp archive_root do
+    Path.join(Config.workspace_root(), ".rondo_archive")
+  end
+
+  defp transition_issue_to_in_progress(%Issue{id: issue_id, state: state} = issue) do
+    if normalize_state(state) == "todo" do
+      case Tracker.update_issue_state(issue_id, "In Progress") do
+        :ok ->
+          Logger.info("Transitioned #{issue_context(issue)} to In Progress")
+
+        {:error, reason} ->
+          Logger.warning("Failed to transition #{issue_context(issue)} to In Progress: #{inspect(reason)}")
+      end
+    end
+
+    :ok
+  end
+
+  defp normalize_state(state) when is_binary(state), do: state |> String.trim() |> String.downcase()
+  defp normalize_state(_state), do: ""
 
   defp schedule_tick(%State{} = state, delay_ms) when is_integer(delay_ms) and delay_ms >= 0 do
     if is_reference(state.tick_timer_ref) do
