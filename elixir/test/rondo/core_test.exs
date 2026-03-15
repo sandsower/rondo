@@ -1066,4 +1066,72 @@ defmodule Rondo.CoreTest do
       File.rm_rf(test_root)
     end
   end
+
+  test "orchestrator ignores stale tick tokens" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    {:ok, orch} = Orchestrator.start_link(name: Module.concat(__MODULE__, :StaleTick))
+    on_exit(fn -> if Process.alive?(orch), do: GenServer.stop(orch) end)
+
+    # Send a stale tick with a fake token
+    send(orch, {:tick, make_ref()})
+    # Send a bare tick
+    send(orch, :tick)
+
+    # Orchestrator should still be alive and responsive
+    Process.sleep(50)
+    assert Process.alive?(orch)
+    assert %{} = Orchestrator.snapshot(Module.concat(__MODULE__, :StaleTick), 1_000)
+  end
+
+  test "orchestrator ignores stale retry tokens" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    {:ok, orch} = Orchestrator.start_link(name: Module.concat(__MODULE__, :StaleRetry))
+    on_exit(fn -> if Process.alive?(orch), do: GenServer.stop(orch) end)
+
+    # Send a retry message with a fake token
+    send(orch, {:retry_issue, "fake-issue-id", make_ref()})
+    # Send an old-format retry (no token)
+    send(orch, {:retry_issue, "fake-issue-id"})
+
+    Process.sleep(50)
+    assert Process.alive?(orch)
+  end
+
+  test "reconcile_missing_running_issue_ids requires threshold consecutive misses before terminating" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    {:ok, orch} = Orchestrator.start_link(name: Module.concat(__MODULE__, :MissingReconcile))
+    on_exit(fn -> if Process.alive?(orch), do: GenServer.stop(orch) end)
+
+    # Inject a running entry
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: "MT-MISSING",
+      issue: %Issue{id: "issue-missing", identifier: "MT-MISSING", state: "In Progress"},
+      session_id: nil,
+      last_claude_message: nil,
+      last_claude_timestamp: nil,
+      last_claude_event: nil,
+      claude_input_tokens: 0,
+      claude_output_tokens: 0,
+      claude_total_tokens: 0,
+      claude_last_reported_input_tokens: 0,
+      claude_last_reported_output_tokens: 0,
+      claude_last_reported_total_tokens: 0,
+      turn_count: 0,
+      retry_attempt: 0,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(orch, fn state ->
+      %{state | running: %{"issue-missing" => running_entry}}
+    end)
+
+    # Verify the issue is running before reconciliation
+    # The staleness counter requires @missing_issue_terminate_threshold (3)
+    # consecutive misses before termination, so a single snapshot should
+    # still show the issue as running.
+    snapshot = Orchestrator.snapshot(Module.concat(__MODULE__, :MissingReconcile), 1_000)
+    assert length(snapshot.running) == 1
+  end
 end

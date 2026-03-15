@@ -5,6 +5,7 @@ defmodule Rondo.Workspace do
 
   require Logger
   alias Rondo.Config
+  alias Rondo.PathSafety
 
   @excluded_entries MapSet.new([".elixir_ls", "tmp"])
 
@@ -15,9 +16,8 @@ defmodule Rondo.Workspace do
     try do
       safe_id = safe_identifier(issue_context.issue_identifier)
 
-      workspace = workspace_path_for_issue(safe_id)
-
-      with :ok <- validate_workspace_path(workspace),
+      with {:ok, workspace} <- workspace_path_for_issue(safe_id),
+           :ok <- validate_workspace_path(workspace),
            {:ok, created?} <- ensure_workspace(workspace),
            :ok <- maybe_run_after_create_hook(workspace, issue_context, created?) do
         {:ok, workspace}
@@ -71,9 +71,12 @@ defmodule Rondo.Workspace do
   @spec remove_issue_workspaces(term()) :: :ok
   def remove_issue_workspaces(identifier) when is_binary(identifier) do
     safe_id = safe_identifier(identifier)
-    workspace = Path.join(Config.workspace_root(), safe_id)
 
-    remove(workspace)
+    case workspace_path_for_issue(safe_id) do
+      {:ok, workspace} -> remove(workspace)
+      {:error, _reason} -> :ok
+    end
+
     :ok
   end
 
@@ -109,7 +112,9 @@ defmodule Rondo.Workspace do
   end
 
   defp workspace_path_for_issue(safe_id) when is_binary(safe_id) do
-    Path.join(Config.workspace_root(), safe_id)
+    Config.workspace_root()
+    |> Path.join(safe_id)
+    |> PathSafety.canonicalize()
   end
 
   defp safe_identifier(identifier) do
@@ -213,53 +218,40 @@ defmodule Rondo.Workspace do
 
   defp validate_workspace_path(workspace) when is_binary(workspace) do
     expanded_workspace = Path.expand(workspace)
-    root = Path.expand(Config.workspace_root())
-    root_prefix = root <> "/"
+    expanded_root = Path.expand(Config.workspace_root())
+    expanded_root_prefix = expanded_root <> "/"
 
-    cond do
-      expanded_workspace == root ->
-        {:error, {:workspace_equals_root, expanded_workspace, root}}
+    with {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded_workspace),
+         {:ok, canonical_root} <- PathSafety.canonicalize(expanded_root) do
+      canonical_root_prefix = canonical_root <> "/"
 
-      String.starts_with?(expanded_workspace <> "/", root_prefix) ->
-        ensure_no_symlink_components(expanded_workspace, root)
+      cond do
+        canonical_workspace == canonical_root ->
+          {:error, {:workspace_equals_root, canonical_workspace, canonical_root}}
 
-      true ->
-        {:error, {:workspace_outside_root, expanded_workspace, root}}
-    end
-  end
+        String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
+          :ok
 
-  defp ensure_no_symlink_components(workspace, root) do
-    workspace
-    |> Path.relative_to(root)
-    |> Path.split()
-    |> Enum.reduce_while(root, fn segment, current_path ->
-      next_path = Path.join(current_path, segment)
+        String.starts_with?(expanded_workspace <> "/", expanded_root_prefix) ->
+          {:error, {:workspace_symlink_escape, expanded_workspace, canonical_root}}
 
-      case File.lstat(next_path) do
-        {:ok, %File.Stat{type: :symlink}} ->
-          {:halt, {:error, {:workspace_symlink_escape, next_path, root}}}
-
-        {:ok, _stat} ->
-          {:cont, next_path}
-
-        {:error, :enoent} ->
-          {:halt, :ok}
-
-        {:error, reason} ->
-          {:halt, {:error, {:workspace_path_unreadable, next_path, reason}}}
+        true ->
+          {:error, {:workspace_outside_root, canonical_workspace, canonical_root}}
       end
-    end)
-    |> case do
-      :ok -> :ok
-      {:error, _reason} = error -> error
-      _final_path -> :ok
+    else
+      {:error, {:path_canonicalize_failed, path, reason}} ->
+        {:error, {:workspace_path_unreadable, path, reason}}
     end
   end
 
   defp interpolate_hook_command(command, workspace, issue_context) do
     command
-    |> String.replace("{{ workspace.path }}", workspace)
-    |> String.replace("{{ issue.identifier }}", issue_context.issue_identifier)
+    |> String.replace("{{ workspace.path }}", shell_escape(workspace))
+    |> String.replace("{{ issue.identifier }}", shell_escape(issue_context.issue_identifier))
+  end
+
+  defp shell_escape(value) when is_binary(value) do
+    "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
   end
 
   defp issue_context(%{id: issue_id, identifier: identifier}) do

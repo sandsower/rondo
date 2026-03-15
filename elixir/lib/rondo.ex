@@ -24,6 +24,7 @@ defmodule Rondo.Application do
     :ok = Rondo.LogFile.configure()
 
     children = [
+      {Phoenix.PubSub, name: Rondo.PubSub},
       {Task.Supervisor, name: Rondo.TaskSupervisor},
       Rondo.WorkflowStore,
       Rondo.Orchestrator,
