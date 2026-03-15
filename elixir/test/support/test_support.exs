@@ -66,10 +66,20 @@ defmodule Rondo.TestSupport do
   def restore_env(key, value), do: System.put_env(key, value)
 
   def stop_default_http_server do
-    case Process.whereis(Rondo.HttpServer) do
+    try do
+      Supervisor.terminate_child(Rondo.Supervisor, Rondo.HttpServer)
+    catch
+      :exit, _ -> :ok
+    end
+
+    case Process.whereis(RondoWeb.Endpoint) do
       pid when is_pid(pid) ->
-        Supervisor.terminate_child(Rondo.Supervisor, Rondo.HttpServer)
-        Process.exit(pid, :normal)
+        Process.unlink(pid)
+        try do
+          Supervisor.stop(pid, :shutdown, 2_000)
+        catch
+          :exit, _ -> :ok
+        end
         :ok
 
       _ ->

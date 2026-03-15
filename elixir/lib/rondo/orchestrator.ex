@@ -16,6 +16,7 @@ defmodule Rondo.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @missing_issue_terminate_threshold 3
   @empty_claude_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -33,6 +34,8 @@ defmodule Rondo.Orchestrator do
       :max_concurrent_agents,
       :next_poll_due_at_ms,
       :poll_check_in_progress,
+      :tick_timer_ref,
+      :tick_token,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
@@ -57,13 +60,15 @@ defmodule Rondo.Orchestrator do
       max_concurrent_agents: Config.max_concurrent_agents(),
       next_poll_due_at_ms: now_ms,
       poll_check_in_progress: false,
+      tick_timer_ref: nil,
+      tick_token: nil,
       claude_totals: @empty_claude_totals,
       claude_rate_limits: nil
     }
 
     Process.flag(:trap_exit, true)
     run_terminal_workspace_cleanup()
-    :ok = schedule_tick(0)
+    state = schedule_tick(state, 0)
 
     {:ok, state}
   end
@@ -84,23 +89,35 @@ defmodule Rondo.Orchestrator do
   def terminate(_reason, _state), do: :ok
 
   @impl true
-  def handle_info(:tick, state) do
+  def handle_info({:tick, tick_token}, %{tick_token: tick_token} = state)
+      when is_reference(tick_token) do
     state = refresh_runtime_config(state)
-    state = %{state | poll_check_in_progress: true, next_poll_due_at_ms: nil}
+
+    state = %{
+      state
+      | poll_check_in_progress: true,
+        next_poll_due_at_ms: nil,
+        tick_timer_ref: nil,
+        tick_token: nil
+    }
 
     notify_dashboard()
     :ok = schedule_poll_cycle_start()
     {:noreply, state}
   end
 
+  def handle_info({:tick, _tick_token}, state), do: {:noreply, state}
+
+  def handle_info(:tick, state) do
+    Logger.debug("Orchestrator ignored bare :tick (no token)")
+    {:noreply, state}
+  end
+
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
     state = maybe_dispatch(state)
-    now_ms = System.monotonic_time(:millisecond)
-    next_poll_due_at_ms = now_ms + state.poll_interval_ms
-    :ok = schedule_tick(state.poll_interval_ms)
-
-    state = %{state | poll_check_in_progress: false, next_poll_due_at_ms: next_poll_due_at_ms}
+    state = schedule_tick(state, state.poll_interval_ms)
+    state = %{state | poll_check_in_progress: false}
 
     notify_dashboard()
     {:noreply, state}
@@ -172,9 +189,9 @@ defmodule Rondo.Orchestrator do
 
   def handle_info({:claude_worker_update, _issue_id, _update}, state), do: {:noreply, state}
 
-  def handle_info({:retry_issue, issue_id}, state) do
+  def handle_info({:retry_issue, issue_id, retry_token}, state) do
     result =
-      case pop_retry_attempt_state(state, issue_id) do
+      case pop_retry_attempt_state(state, issue_id, retry_token) do
         {:ok, attempt, metadata, state} -> handle_retry_issue(state, issue_id, attempt, metadata)
         :missing -> {:noreply, state}
       end
@@ -182,6 +199,8 @@ defmodule Rondo.Orchestrator do
     notify_dashboard()
     result
   end
+
+  def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
 
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
@@ -248,12 +267,13 @@ defmodule Rondo.Orchestrator do
     else
       case Tracker.fetch_issue_states_by_ids(running_ids) do
         {:ok, issues} ->
-          reconcile_running_issue_states(
-            issues,
+          issues
+          |> reconcile_running_issue_states(
             state,
             active_state_set(),
             terminal_state_set()
           )
+          |> reconcile_missing_running_issue_ids(running_ids, issues)
 
         {:error, reason} ->
           Logger.debug("Failed to refresh running issue states: #{inspect(reason)}; keeping active workers")
@@ -327,6 +347,78 @@ defmodule Rondo.Orchestrator do
   end
 
   defp reconcile_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp reconcile_missing_running_issue_ids(%State{} = state, requested_issue_ids, issues)
+       when is_list(requested_issue_ids) and is_list(issues) do
+    visible_issue_ids =
+      issues
+      |> Enum.flat_map(fn
+        %Issue{id: issue_id} when is_binary(issue_id) -> [issue_id]
+        _ -> []
+      end)
+      |> MapSet.new()
+
+    Enum.reduce(requested_issue_ids, state, fn issue_id, state_acc ->
+      if MapSet.member?(visible_issue_ids, issue_id) do
+        clear_missing_count(state_acc, issue_id)
+      else
+        missing_count = get_missing_count(state_acc, issue_id) + 1
+        state_acc = set_missing_count(state_acc, issue_id, missing_count)
+
+        if missing_count >= @missing_issue_terminate_threshold do
+          log_missing_running_issue(state_acc, issue_id)
+
+          state_acc
+          |> clear_missing_count(issue_id)
+          |> terminate_running_issue(issue_id, false)
+        else
+          Logger.debug("Issue not visible during running-state refresh: issue_id=#{issue_id} missing_count=#{missing_count}/#{@missing_issue_terminate_threshold}")
+          state_acc
+        end
+      end
+    end)
+  end
+
+  defp reconcile_missing_running_issue_ids(state, _requested_issue_ids, _issues), do: state
+
+  defp log_missing_running_issue(%State{} = state, issue_id) when is_binary(issue_id) do
+    case Map.get(state.running, issue_id) do
+      %{identifier: identifier} ->
+        Logger.info("Issue no longer visible during running-state refresh: issue_id=#{issue_id} issue_identifier=#{identifier}; stopping active agent")
+
+      _ ->
+        Logger.info("Issue no longer visible during running-state refresh: issue_id=#{issue_id}; stopping active agent")
+    end
+  end
+
+  defp log_missing_running_issue(_state, _issue_id), do: :ok
+
+  defp get_missing_count(%State{running: running}, issue_id) do
+    case Map.get(running, issue_id) do
+      %{} = entry -> Map.get(entry, :missing_count, 0)
+      _ -> 0
+    end
+  end
+
+  defp set_missing_count(%State{running: running} = state, issue_id, count) do
+    case Map.get(running, issue_id) do
+      %{} = entry ->
+        %{state | running: Map.put(running, issue_id, Map.put(entry, :missing_count, count))}
+
+      _ ->
+        state
+    end
+  end
+
+  defp clear_missing_count(%State{running: running} = state, issue_id) do
+    case Map.get(running, issue_id) do
+      %{} = entry ->
+        %{state | running: Map.put(running, issue_id, Map.delete(entry, :missing_count))}
+
+      _ ->
+        state
+    end
+  end
 
   defp refresh_running_issue_state(%State{} = state, %Issue{} = issue) do
     case Map.get(state.running, issue.id) do
@@ -685,6 +777,7 @@ defmodule Rondo.Orchestrator do
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
     delay_ms = retry_delay(next_attempt, metadata)
     old_timer = Map.get(previous_retry, :timer_ref)
+    retry_token = make_ref()
     due_at_ms = System.monotonic_time(:millisecond) + delay_ms
     identifier = pick_retry_identifier(issue_id, previous_retry, metadata)
     error = pick_retry_error(previous_retry, metadata)
@@ -693,7 +786,7 @@ defmodule Rondo.Orchestrator do
       Process.cancel_timer(old_timer)
     end
 
-    timer_ref = Process.send_after(self(), {:retry_issue, issue_id}, delay_ms)
+    timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
 
     error_suffix = if is_binary(error), do: " error=#{error}", else: ""
 
@@ -705,6 +798,7 @@ defmodule Rondo.Orchestrator do
           Map.put(state.retry_attempts, issue_id, %{
             attempt: next_attempt,
             timer_ref: timer_ref,
+            retry_token: retry_token,
             due_at_ms: due_at_ms,
             identifier: identifier,
             error: error
@@ -712,9 +806,9 @@ defmodule Rondo.Orchestrator do
     }
   end
 
-  defp pop_retry_attempt_state(%State{} = state, issue_id) do
+  defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
     case Map.get(state.retry_attempts, issue_id) do
-      %{attempt: attempt} = retry_entry ->
+      %{attempt: attempt, retry_token: ^retry_token} = retry_entry ->
         metadata = %{
           identifier: Map.get(retry_entry, :identifier),
           error: Map.get(retry_entry, :error)
@@ -758,7 +852,7 @@ defmodule Rondo.Orchestrator do
         {:noreply, release_issue_claim(state, issue_id)}
 
       retry_candidate_issue?(issue, terminal_states) ->
-        handle_active_retry(state, issue, attempt, metadata)
+        handle_active_retry(state, issue, attempt, metadata, terminal_states)
 
       true ->
         Logger.debug("Issue left active states, removing claim issue_id=#{issue_id} issue_identifier=#{issue.identifier}")
@@ -799,8 +893,8 @@ defmodule Rondo.Orchestrator do
     StatusDashboard.notify_update()
   end
 
-  defp handle_active_retry(state, issue, attempt, metadata) do
-    if retry_candidate_issue?(issue, terminal_state_set()) and
+  defp handle_active_retry(state, issue, attempt, metadata, terminal_states) do
+    if retry_candidate_issue?(issue, terminal_states) and
          dispatch_slots_available?(issue, state) do
       {:noreply, dispatch_issue(state, issue, attempt)}
     else
@@ -976,10 +1070,7 @@ defmodule Rondo.Orchestrator do
     now_ms = System.monotonic_time(:millisecond)
     already_due? = is_integer(state.next_poll_due_at_ms) and state.next_poll_due_at_ms <= now_ms
     coalesced = state.poll_check_in_progress == true or already_due?
-
-    unless coalesced do
-      :ok = schedule_tick(0)
-    end
+    state = if coalesced, do: state, else: schedule_tick(state, 0)
 
     {:reply,
      %{
@@ -1049,9 +1140,20 @@ defmodule Rondo.Orchestrator do
     }
   end
 
-  defp schedule_tick(delay_ms) do
-    :timer.send_after(delay_ms, self(), :tick)
-    :ok
+  defp schedule_tick(%State{} = state, delay_ms) when is_integer(delay_ms) and delay_ms >= 0 do
+    if is_reference(state.tick_timer_ref) do
+      Process.cancel_timer(state.tick_timer_ref)
+    end
+
+    tick_token = make_ref()
+    timer_ref = Process.send_after(self(), {:tick, tick_token}, delay_ms)
+
+    %{
+      state
+      | tick_timer_ref: timer_ref,
+        tick_token: tick_token,
+        next_poll_due_at_ms: System.monotonic_time(:millisecond) + delay_ms
+    }
   end
 
   defp schedule_poll_cycle_start do

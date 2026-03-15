@@ -8,6 +8,7 @@ defmodule Rondo.StatusDashboard do
 
   alias Rondo.{Config, HttpServer}
   alias Rondo.Orchestrator
+  alias RondoWeb.ObservabilityPubSub
 
   @minimum_idle_rerender_ms 1_000
   @throughput_window_ms 5_000
@@ -81,6 +82,8 @@ defmodule Rondo.StatusDashboard do
 
   @spec notify_update(GenServer.name()) :: :ok
   def notify_update(server \\ __MODULE__) do
+    ObservabilityPubSub.broadcast_update()
+
     case GenServer.whereis(server) do
       pid when is_pid(pid) ->
         send(pid, :refresh)
