@@ -3,7 +3,12 @@
 Rondo turns project work into isolated, autonomous implementation runs, allowing teams to manage
 work instead of supervising coding agents.
 
-<img width="1920" height="1200" alt="2026-03-08-19:14:38-screenshot" src="https://github.com/user-attachments/assets/c7703d5c-6e18-40c3-bf24-fb9723f4f612" />
+<p>
+  <img width="1906" height="1047" alt="Rondo dashboard - light mode" src="https://github.com/user-attachments/assets/5bb16a0a-91ac-4080-949b-5bcf7fc280c0" />
+</p>
+<p>
+  <img width="1906" height="1047" alt="Rondo dashboard - dark mode" src="https://github.com/user-attachments/assets/c0ab2d80-1f90-43f6-ba1f-7a6c3165186d" />
+</p>
 
 
 > [!NOTE]
