@@ -48,11 +48,20 @@ defmodule RondoWeb.StaticAssets do
     end
   )
 
+  @chart_js_content (
+    path = Path.join([__DIR__, "..", "..", "priv", "static", "chart.min.js"]) |> Path.expand()
+    case File.read(path) do
+      {:ok, content} -> content
+      {:error, _} -> nil
+    end
+  )
+
   @spec fetch(String.t()) :: {:ok, String.t(), String.t()} | :error
   def fetch("/dashboard.css"), do: serve("text/css", @dashboard_css_content)
   def fetch("/vendor/phoenix_html/phoenix_html.js"), do: serve("application/javascript", @phoenix_html_js_content)
   def fetch("/vendor/phoenix/phoenix.js"), do: serve("application/javascript", @phoenix_js_content)
   def fetch("/vendor/phoenix_live_view/phoenix_live_view.js"), do: serve("application/javascript", @phoenix_live_view_js_content)
+  def fetch("/vendor/chart.js/chart.min.js"), do: serve("application/javascript", @chart_js_content)
   def fetch(_path), do: :error
 
   defp serve(_content_type, nil), do: :error

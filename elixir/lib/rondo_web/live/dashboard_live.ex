@@ -20,6 +20,9 @@ defmodule RondoWeb.DashboardLive do
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
       schedule_runtime_tick()
+      schedule_chart_push()
+      # Push initial chart data after a short delay so hooks are mounted
+      Process.send_after(self(), :push_chart_data, 500)
     end
 
     {:ok, socket}
@@ -29,6 +32,13 @@ defmodule RondoWeb.DashboardLive do
   def handle_info(:runtime_tick, socket) do
     schedule_runtime_tick()
     {:noreply, assign(socket, :now, DateTime.utc_now())}
+  end
+
+  @impl true
+  def handle_info(:push_chart_data, socket) do
+    schedule_chart_push()
+    socket = push_dashboard_charts(socket)
+    {:noreply, socket}
   end
 
   @impl true
@@ -89,7 +99,8 @@ defmodule RondoWeb.DashboardLive do
        |> assign(:selected_issue, identifier)
        |> assign(:selected_issue_data, run_with_log)
        |> assign(:selected_run_index, latest_index)
-       |> assign(:selected_runs, group.runs)}
+       |> assign(:selected_runs, group.runs)
+       |> push_run_charts(group.runs)}
     else
       {:noreply, socket}
     end
@@ -146,10 +157,13 @@ defmodule RondoWeb.DashboardLive do
               <span class="status-badge-dot"></span>
               Live
             </span>
-            <span class="status-badge status-badge-offline">
-              <span class="status-badge-dot"></span>
-              Offline
-            </span>
+            <label class="theme-switch" id="theme-toggle" phx-hook="ThemeToggle" phx-update="ignore">
+              <input type="checkbox" onclick="RondoTheme.toggle()" />
+              <span class="theme-switch-track">
+                <svg class="theme-icon-sun" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+                <svg class="theme-icon-moon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+              </span>
+            </label>
           </div>
         </div>
       </header>
@@ -192,16 +206,26 @@ defmodule RondoWeb.DashboardLive do
           </article>
         </section>
 
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">Rate limits</h2>
-              <p class="section-copy">Latest upstream rate-limit snapshot, when available.</p>
+        <div class="chart-grid">
+          <div class="chart-card">
+            <p class="chart-card-title">Token usage</p>
+            <div class="chart-wrap">
+              <canvas id="token-chart" phx-hook="TokenChart" phx-update="ignore"></canvas>
             </div>
           </div>
-
-          <pre class="code-panel"><%= pretty_value(@payload.rate_limits) %></pre>
-        </section>
+          <div class="chart-card">
+            <p class="chart-card-title">Active sessions</p>
+            <div class="chart-wrap">
+              <canvas id="session-chart" phx-hook="SessionChart" phx-update="ignore"></canvas>
+            </div>
+          </div>
+          <div class="chart-card chart-grid-full">
+            <p class="chart-card-title">Archived runs by ticket (tokens)</p>
+            <div class="chart-wrap">
+              <canvas id="outcome-chart" phx-hook="OutcomeChart" phx-update="ignore"></canvas>
+            </div>
+          </div>
+        </div>
 
         <section class="section-card">
           <div class="section-header">
@@ -452,6 +476,23 @@ defmodule RondoWeb.DashboardLive do
             </div>
           </div>
 
+          <%= if @selected_runs && length(@selected_runs) > 0 do %>
+            <div class="panel-charts">
+              <div>
+                <p class="chart-card-title">Tokens per run</p>
+                <div class="panel-chart-wrap">
+                  <canvas id="run-token-chart" phx-hook="RunTokenChart" phx-update="ignore"></canvas>
+                </div>
+              </div>
+              <div>
+                <p class="chart-card-title">Duration per run</p>
+                <div class="panel-chart-wrap">
+                  <canvas id="run-duration-chart" phx-hook="RunDurationChart" phx-update="ignore"></canvas>
+                </div>
+              </div>
+            </div>
+          <% end %>
+
           <div class="panel-stream-header">
             <span class="panel-metric-label">Event stream</span>
             <span class="muted" style="font-size: 11px;"><%= length(@selected_issue_data.event_log) %> events</span>
@@ -462,8 +503,9 @@ defmodule RondoWeb.DashboardLive do
           <% else %>
             <div class="event-stream" id="event-stream" phx-hook="ScrollBottom">
               <div :for={entry <- @selected_issue_data.event_log} class="event-row">
-                <span class="event-row-time mono muted"><%= format_event_time(entry.at) %></span>
-                <span class={event_type_class(entry.event)}><%= entry.event %></span>
+                <span class={event_type_class(entry.event)}>
+                  <%= if tool_event?(entry.event) do %><svg class="event-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg><% end %><%= entry.event %>
+                </span>
                 <span class="event-row-message"><%= render_event_message(entry.message) %></span>
               </div>
             </div>
@@ -615,21 +657,50 @@ defmodule RondoWeb.DashboardLive do
     |> Phoenix.HTML.raw()
   end
 
+  @tool_events ~w(linear github bash read write edit grep glob agent tool)a
+
+  defp tool_event?(event), do: event in @tool_events
+
   defp event_type_class(event) do
     base = "event-row-type mono"
-    event_str = to_string(event)
 
-    cond do
-      String.contains?(event_str, ["error", "fail"]) -> "#{base} event-type-danger"
-      String.contains?(event_str, ["start", "claude_starting"]) -> "#{base} event-type-success"
-      String.contains?(event_str, ["end", "complete", "result"]) -> "#{base} event-type-muted"
-      true -> base
+    case event do
+      :linear -> "#{base} event-type-linear"
+      :github -> "#{base} event-type-github"
+      e when e in [:bash, :read, :write, :edit, :grep, :glob, :agent, :tool] -> "#{base} event-type-tool"
+      e when e in [:error, :fail] -> "#{base} event-type-danger"
+      e when e in [:session_started, :claude_starting] -> "#{base} event-type-success"
+      e when e in [:result] -> "#{base} event-type-muted"
+      :rate_limit -> "#{base} event-type-danger"
+      _ -> base
     end
   end
 
   defp schedule_runtime_tick do
     Process.send_after(self(), :runtime_tick, @runtime_tick_ms)
   end
+
+  @chart_push_ms 10_000
+  defp schedule_chart_push do
+    Process.send_after(self(), :push_chart_data, @chart_push_ms)
+  end
+
+  defp push_dashboard_charts(socket) do
+    archived = Map.get(socket.assigns.payload, :archived, [])
+
+    socket
+    |> push_event("update-token-chart", Presenter.token_timeseries())
+    |> push_event("update-session-chart", Presenter.session_timeseries())
+    |> push_event("update-outcome-chart", Presenter.run_outcomes(archived))
+  end
+
+  defp push_run_charts(socket, runs) when is_list(runs) do
+    socket
+    |> push_event("update-run-token-chart", Presenter.run_token_comparison(runs))
+    |> push_event("update-run-duration-chart", Presenter.run_duration_comparison(runs))
+  end
+
+  defp push_run_charts(socket, _), do: socket
 
   defp pretty_value(nil), do: "n/a"
   defp pretty_value(value), do: inspect(value, pretty: true, limit: :infinity)

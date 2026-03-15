@@ -233,13 +233,31 @@ defmodule RondoWeb.Presenter do
     log
     |> Enum.reverse()
     |> Enum.map(fn entry ->
-      %{
-        at: iso8601(entry[:at]),
-        event: entry[:event],
-        message: summarize_message(entry[:message])
-      }
+      message = summarize_message(entry[:message])
+      event = refine_event_from_message(entry[:event], message)
+
+      %{at: iso8601(entry[:at]), event: event, message: message}
     end)
   end
+
+  defp refine_event_from_message(event, message) when event in [:assistant, "assistant"] and is_binary(message) do
+    cond do
+      String.contains?(message, "linear") or String.contains?(message, "Linear") -> :linear
+      String.starts_with?(message, "$ gh ") or String.starts_with?(message, "$ git ") -> :github
+      String.starts_with?(message, "$ ") -> :bash
+      String.starts_with?(message, "Read ") -> :read
+      String.starts_with?(message, "Write ") -> :write
+      String.starts_with?(message, "Edit ") -> :edit
+      String.starts_with?(message, "Grep ") -> :grep
+      String.starts_with?(message, "Glob ") -> :glob
+      String.starts_with?(message, "Agent") -> :agent
+      String.starts_with?(message, "ToolSearch") -> :tool
+      String.starts_with?(message, "mcp__") -> :tool
+      true -> :assistant
+    end
+  end
+
+  defp refine_event_from_message(event, _message), do: event
 
   defp format_event_log(_), do: []
 
@@ -263,4 +281,105 @@ defmodule RondoWeb.Presenter do
   end
 
   defp iso8601(_datetime), do: nil
+
+  # --- Chart data projections ---
+
+  @spec token_timeseries() :: map()
+  def token_timeseries do
+    samples = Rondo.TimeSeries.read()
+
+    labels = Enum.map(samples, fn s ->
+      case s.at do
+        %DateTime{} = dt -> Calendar.strftime(dt, "%H:%M:%S")
+        _ -> ""
+      end
+    end)
+
+    %{
+      labels: labels,
+      input: Enum.map(samples, & &1.input_tokens),
+      output: Enum.map(samples, & &1.output_tokens)
+    }
+  end
+
+  @spec session_timeseries() :: map()
+  def session_timeseries do
+    samples = Rondo.TimeSeries.read()
+
+    labels = Enum.map(samples, fn s ->
+      case s.at do
+        %DateTime{} = dt -> Calendar.strftime(dt, "%H:%M:%S")
+        _ -> ""
+      end
+    end)
+
+    %{
+      labels: labels,
+      running: Enum.map(samples, & &1.running),
+      retrying: Enum.map(samples, & &1.retrying)
+    }
+  end
+
+  @spec run_outcomes(list()) :: map()
+  def run_outcomes(archived_groups) when is_list(archived_groups) do
+    %{
+      labels: Enum.map(archived_groups, & &1.issue_identifier),
+      values: Enum.map(archived_groups, & &1.total_tokens),
+      colors: Enum.map(archived_groups, & &1.latest_result)
+    }
+  end
+
+  def run_outcomes(_), do: %{labels: [], values: [], colors: []}
+
+  @spec run_token_comparison(list()) :: map()
+  def run_token_comparison(runs) when is_list(runs) do
+    %{
+      labels: runs |> Enum.with_index(1) |> Enum.map(fn {r, i} ->
+        time = case r[:started_at] do
+          s when is_binary(s) ->
+            case DateTime.from_iso8601(s) do
+              {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M")
+              _ -> "Run #{i}"
+            end
+          _ -> "Run #{i}"
+        end
+        "Run #{i} (#{time})"
+      end),
+      input: Enum.map(runs, fn r -> get_in(r, [:tokens, :input_tokens]) || 0 end),
+      output: Enum.map(runs, fn r -> get_in(r, [:tokens, :output_tokens]) || 0 end)
+    }
+  end
+
+  def run_token_comparison(_), do: %{labels: [], input: [], output: []}
+
+  @spec run_duration_comparison(list()) :: map()
+  def run_duration_comparison(runs) when is_list(runs) do
+    %{
+      labels: runs |> Enum.with_index(1) |> Enum.map(fn {r, i} ->
+        time = case r[:started_at] do
+          s when is_binary(s) ->
+            case DateTime.from_iso8601(s) do
+              {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M")
+              _ -> "Run #{i}"
+            end
+          _ -> "Run #{i}"
+        end
+        "Run #{i} (#{time})"
+      end),
+      durations: Enum.map(runs, fn r ->
+        case {r[:started_at], r[:finished_at]} do
+          {s, f} when is_binary(s) and is_binary(f) ->
+            with {:ok, s_dt, _} <- DateTime.from_iso8601(s),
+                 {:ok, f_dt, _} <- DateTime.from_iso8601(f) do
+              DateTime.diff(f_dt, s_dt, :second)
+            else
+              _ -> 0
+            end
+          _ -> 0
+        end
+      end)
+    }
+  end
+
+  def run_duration_comparison(_), do: %{labels: [], durations: []}
 end

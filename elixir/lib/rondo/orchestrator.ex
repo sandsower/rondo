@@ -10,6 +10,7 @@ defmodule Rondo.Orchestrator do
   alias Rondo.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
   alias Rondo.Linear.Issue
 
+  @timeseries_sample_interval_ms 10_000
   @continuation_retry_delay_ms 1_000
   @poll_retry_delay_ms 5_000
   @slot_wait_delay_ms 5_000
@@ -70,6 +71,8 @@ defmodule Rondo.Orchestrator do
     }
 
     Process.flag(:trap_exit, true)
+    Rondo.TimeSeries.init()
+    schedule_timeseries_sample()
     run_terminal_workspace_cleanup()
     state = schedule_tick(state, 0)
 
@@ -206,6 +209,19 @@ defmodule Rondo.Orchestrator do
   end
 
   def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
+
+  def handle_info(:timeseries_sample, state) do
+    schedule_timeseries_sample()
+
+    snapshot = %{
+      running: Map.values(state.running),
+      retrying: Map.values(state.retry_attempts),
+      claude_totals: state.claude_totals
+    }
+
+    Rondo.TimeSeries.record(snapshot)
+    {:noreply, state}
+  end
 
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
@@ -1113,10 +1129,11 @@ defmodule Rondo.Orchestrator do
     turn_count = Map.get(running_entry, :turn_count, 0)
 
     message = extract_event_summary(event, update)
+    refined_event = refine_event_label(event, message, update)
 
     event_log =
-      if loggable_event?(event, message) do
-        log_entry = %{at: timestamp, event: event, message: message, tokens: token_delta}
+      if loggable_event?(refined_event, message) do
+        log_entry = %{at: timestamp, event: refined_event, message: message, tokens: token_delta}
 
         running_entry
         |> Map.get(:event_log, [])
@@ -1173,6 +1190,53 @@ defmodule Rondo.Orchestrator do
       message: update[:payload] || update[:raw],
       timestamp: update[:timestamp]
     }
+  end
+
+  defp refine_event_label(:assistant, message, %{raw: raw}) when is_map(raw) do
+    content = get_in_any(raw, ["message", "content"])
+    tool_name = extract_first_tool_name(content)
+
+    cond do
+      is_linear_event?(tool_name, message) -> :linear
+      is_github_event?(tool_name, message) -> :github
+      tool_name == "Bash" -> :bash
+      tool_name == "Read" -> :read
+      tool_name == "Write" -> :write
+      tool_name == "Edit" -> :edit
+      tool_name == "Grep" -> :grep
+      tool_name == "Glob" -> :glob
+      tool_name == "Agent" -> :agent
+      tool_name != nil -> :tool
+      is_binary(message) and message != "" -> :assistant
+      true -> :assistant
+    end
+  end
+
+  defp refine_event_label(event, _message, _update), do: event
+
+  defp extract_first_tool_name(content) when is_list(content) do
+    Enum.find_value(content, fn
+      %{"type" => "tool_use", "name" => name} -> name
+      _ -> nil
+    end)
+  end
+
+  defp extract_first_tool_name(_), do: nil
+
+  defp is_linear_event?(tool_name, message) do
+    tool_name_str = to_string(tool_name)
+    message_str = to_string(message)
+
+    String.contains?(tool_name_str, "Linear") or
+      String.contains?(tool_name_str, "linear") or
+      (tool_name == "ToolSearch" and String.contains?(message_str, "linear"))
+  end
+
+  defp is_github_event?(tool_name, message) do
+    message_str = to_string(message)
+
+    (tool_name == "Bash" and (String.starts_with?(message_str, "$ gh ") or String.starts_with?(message_str, "$ git "))) or
+      (tool_name == "ToolSearch" and String.contains?(message_str, "github"))
   end
 
   # Filter noisy/empty events from the log
@@ -1494,6 +1558,10 @@ defmodule Rondo.Orchestrator do
 
   defp normalize_state(state) when is_binary(state), do: state |> String.trim() |> String.downcase()
   defp normalize_state(_state), do: ""
+
+  defp schedule_timeseries_sample do
+    Process.send_after(self(), :timeseries_sample, @timeseries_sample_interval_ms)
+  end
 
   defp schedule_tick(%State{} = state, delay_ms) when is_integer(delay_ms) and delay_ms >= 0 do
     if is_reference(state.tick_timer_ref) do
