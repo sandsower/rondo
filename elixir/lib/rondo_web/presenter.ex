@@ -13,6 +13,7 @@ defmodule RondoWeb.Presenter do
       %{} = snapshot ->
         running = Map.get(snapshot, :running, [])
         retrying = Map.get(snapshot, :retrying, [])
+        archived = Map.get(snapshot, :archived, [])
 
         %{
           generated_at: generated_at,
@@ -22,6 +23,7 @@ defmodule RondoWeb.Presenter do
           },
           running: Enum.map(running, &running_entry_payload/1),
           retrying: Enum.map(retrying, &retry_entry_payload/1),
+          archived: group_archived_by_ticket(archived),
           claude_totals: Map.get(snapshot, :claude_totals, %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}),
           rate_limits: Map.get(snapshot, :rate_limits)
         }
@@ -81,7 +83,7 @@ defmodule RondoWeb.Presenter do
       running: running && running_issue_payload(running),
       retry: retry && retry_issue_payload(retry),
       logs: %{
-        claude_session_logs: []
+        claude_session_logs: (running && format_event_log(Map.get(running, :event_log, []))) || []
       },
       recent_events: (running && recent_events_payload(running)) || [],
       last_error: retry && retry.error,
@@ -115,7 +117,8 @@ defmodule RondoWeb.Presenter do
         input_tokens: entry.claude_input_tokens,
         output_tokens: entry.claude_output_tokens,
         total_tokens: entry.claude_total_tokens
-      }
+      },
+      event_log: format_event_log(Map.get(entry, :event_log, []))
     }
   end
 
@@ -164,6 +167,81 @@ defmodule RondoWeb.Presenter do
     ]
     |> Enum.reject(&is_nil(&1.at))
   end
+
+  defp group_archived_by_ticket(archived) do
+    archived
+    |> Enum.map(&archived_entry_payload/1)
+    |> Enum.group_by(& &1.issue_identifier)
+    |> Enum.map(fn {identifier, runs} ->
+      sorted_runs = Enum.sort_by(runs, & &1.started_at, :asc)
+      latest = List.last(sorted_runs)
+
+      %{
+        issue_identifier: identifier,
+        latest_result: latest.exit_reason,
+        latest_finished_at: latest.finished_at,
+        total_tokens: Enum.reduce(runs, 0, fn r, acc -> acc + r.tokens.total_tokens end),
+        run_count: length(runs),
+        runs: sorted_runs
+      }
+    end)
+    |> Enum.sort_by(& &1.latest_finished_at, :desc)
+  end
+
+  defp archived_entry_payload(entry) do
+    started_at = iso8601(entry.started_at) || to_string(entry.started_at)
+
+    %{
+      issue_id: entry.issue_id,
+      issue_identifier: entry.identifier,
+      session_id: entry.session_id,
+      state: entry.state,
+      started_at: started_at,
+      finished_at: iso8601(entry.finished_at) || to_string(entry.finished_at),
+      exit_reason: entry.exit_reason,
+      turn_count: entry.turn_count,
+      tokens: entry.tokens,
+      filename: run_filename(entry.started_at)
+    }
+  end
+
+  defp run_filename(%DateTime{} = dt) do
+    dt
+    |> DateTime.truncate(:second)
+    |> DateTime.to_iso8601()
+    |> String.replace(~r/[:\.]/, "-")
+    |> Kernel.<>(".json")
+  end
+
+  defp run_filename(started_at) when is_binary(started_at) do
+    # Parse and truncate to match the file naming (seconds only, no microseconds)
+    case DateTime.from_iso8601(started_at) do
+      {:ok, dt, _} -> run_filename(dt)
+      _ ->
+        started_at
+        |> String.replace(~r/[:\.]/, "-")
+        |> Kernel.<>(".json")
+    end
+  end
+
+  defp run_filename(_), do: "unknown.json"
+
+  @spec format_event_log_public(list()) :: list()
+  def format_event_log_public(log), do: format_event_log(log)
+
+  defp format_event_log(log) when is_list(log) do
+    log
+    |> Enum.reverse()
+    |> Enum.map(fn entry ->
+      %{
+        at: iso8601(entry[:at]),
+        event: entry[:event],
+        message: summarize_message(entry[:message])
+      }
+    end)
+  end
+
+  defp format_event_log(_), do: []
 
   defp summarize_message(%{message: message}) when is_binary(message), do: message
   defp summarize_message(message) when is_binary(message), do: message

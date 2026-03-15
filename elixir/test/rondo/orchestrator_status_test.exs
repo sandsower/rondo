@@ -1709,4 +1709,191 @@ defmodule Rondo.OrchestratorStatusTest do
     end)
     |> elem(1)
   end
+
+  test "snapshot includes event_log from claude updates" do
+    issue_id = "issue-event-log"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-301",
+      title: "Event log test",
+      description: "Verify event log accumulates",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-301"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :EventLogOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    initial_state = :sys.get_state(pid)
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      turn_count: 0,
+      last_claude_message: nil,
+      last_claude_timestamp: nil,
+      last_claude_event: nil,
+      claude_input_tokens: 0,
+      claude_output_tokens: 0,
+      claude_total_tokens: 0,
+      claude_last_reported_input_tokens: 0,
+      claude_last_reported_output_tokens: 0,
+      claude_last_reported_total_tokens: 0,
+      started_at: started_at,
+      event_log: []
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    now = DateTime.utc_now()
+
+    send(pid, {:claude_worker_update, issue_id, %{event: :session_started, session_id: "sess-1", timestamp: now}})
+    send(pid, {:claude_worker_update, issue_id, %{event: :unknown, raw: %{}, timestamp: now}})
+    send(pid, {:claude_worker_update, issue_id, %{event: :assistant, raw: %{}, timestamp: now}})
+    send(pid, {:claude_worker_update, issue_id, %{event: :notification, payload: %{method: "tool_use"}, timestamp: now}})
+    send(pid, {:claude_worker_update, issue_id, %{event: :assistant, raw: %{"message" => %{"content" => [%{"type" => "text", "text" => "hello world"}]}}, timestamp: now}})
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [entry]} = snapshot
+    assert is_list(entry.event_log)
+    # :unknown and empty :assistant events are filtered out
+    assert length(entry.event_log) == 3
+
+    # event_log is stored newest-first (prepended); presenter reverses for display
+    [newest, middle, oldest] = entry.event_log
+    assert oldest.event == :session_started
+    assert middle.event == :notification
+    assert newest.event == :assistant
+    assert newest.message == "hello world"
+  end
+
+  test "dispatch transitions todo issue to in progress via tracker" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue = %Issue{
+      id: "issue-todo-transition",
+      identifier: "MT-302",
+      title: "Transition test",
+      description: "Should move to In Progress",
+      state: "Todo",
+      url: "https://example.org/issues/MT-302"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+    Application.put_env(:rondo, :memory_tracker_recipient, self())
+
+    orchestrator_name = Module.concat(__MODULE__, :TransitionOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_recipient)
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    state_with_dispatch =
+      initial_state
+      |> Map.put(:max_concurrent_agents, 1)
+      |> Map.put(:poll_interval_ms, 60_000)
+
+    :sys.replace_state(pid, fn _ -> state_with_dispatch end)
+
+    # Trigger a poll by sending the tick message
+    send(pid, {:tick, state_with_dispatch.tick_token})
+
+    assert_receive {:memory_tracker_state_update, "issue-todo-transition", "In Progress"}, 10_000
+  end
+
+  test "completed agent runs appear in snapshot archived list" do
+    issue_id = "issue-archive-test"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-401",
+      title: "Archive test",
+      description: "Verify archiving",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-401"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :ArchiveOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "sess-archive",
+      turn_count: 2,
+      last_claude_message: nil,
+      last_claude_timestamp: nil,
+      last_claude_event: nil,
+      claude_input_tokens: 50,
+      claude_output_tokens: 100,
+      claude_total_tokens: 150,
+      claude_last_reported_input_tokens: 50,
+      claude_last_reported_output_tokens: 100,
+      claude_last_reported_total_tokens: 150,
+      started_at: DateTime.utc_now(),
+      event_log: [%{at: DateTime.utc_now(), event: :session_started, message: "test", tokens: %{}}]
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    # Simulate agent completion
+    send(pid, {:DOWN, process_ref, :process, self(), :normal})
+
+    # Give the orchestrator time to process
+    Process.sleep(50)
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert snapshot.running == []
+    assert length(snapshot.archived) >= 1
+
+    archived = Enum.find(snapshot.archived, &(&1.identifier == "MT-401"))
+    assert archived != nil
+    assert archived.identifier == "MT-401"
+    assert archived.session_id == "sess-archive"
+    assert archived.exit_reason == "completed"
+    assert archived.tokens.total_tokens == 150
+    assert archived.turn_count == 2
+
+    # Event log is persisted to disk, not in-memory index
+    filename =
+      archived.started_at
+      |> DateTime.truncate(:second)
+      |> DateTime.to_iso8601()
+      |> String.replace(~r/[:\.]/, "-")
+      |> Kernel.<>(".json")
+
+    assert {:ok, full_run} = Rondo.Orchestrator.load_archived_run("MT-401", filename)
+    assert length(full_run.event_log) == 1
+  end
 end

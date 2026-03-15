@@ -5,9 +5,20 @@ defmodule RondoWeb.Layouts do
 
   use Phoenix.Component
 
+  @css_version (
+    path = Path.join([__DIR__, "..", "..", "..", "priv", "static", "dashboard.css"]) |> Path.expand()
+    case File.read(path) do
+      {:ok, content} -> content |> :erlang.md5() |> Base.encode16(case: :lower) |> binary_part(0, 8)
+      {:error, _} -> "0"
+    end
+  )
+
   @spec root(map()) :: Phoenix.LiveView.Rendered.t()
   def root(assigns) do
-    assigns = assign(assigns, :csrf_token, Plug.CSRFProtection.get_csrf_token())
+    assigns =
+      assigns
+      |> assign(:csrf_token, Plug.CSRFProtection.get_csrf_token())
+      |> assign(:css_version, @css_version)
 
     ~H"""
     <!DOCTYPE html>
@@ -28,15 +39,23 @@ defmodule RondoWeb.Layouts do
 
             if (!window.Phoenix || !window.LiveView) return;
 
+            var Hooks = {};
+            Hooks.ScrollBottom = {
+              mounted() { this.scrollToBottom(); },
+              updated() { this.scrollToBottom(); },
+              scrollToBottom() { this.el.scrollTop = this.el.scrollHeight; }
+            };
+
             var liveSocket = new window.LiveView.LiveSocket("/live", window.Phoenix.Socket, {
-              params: {_csrf_token: csrfToken}
+              params: {_csrf_token: csrfToken},
+              hooks: Hooks
             });
 
             liveSocket.connect();
             window.liveSocket = liveSocket;
           });
         </script>
-        <link rel="stylesheet" href="/dashboard.css" />
+        <link rel="stylesheet" href={"/dashboard.css?v=#{@css_version}"} />
       </head>
       <body>
         {@inner_content}
