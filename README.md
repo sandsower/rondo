@@ -34,6 +34,12 @@ See [elixir/README.md](elixir/README.md) for setup and usage.
 - **Config:** `claude.*` fields replace `codex.*` throughout WORKFLOW.md and the codebase
 - **Dashboard:** Real-time token tracking, phase display (hooks/claude), orphan process cleanup on shutdown
 
+## Releases
+
+### v0.1.0
+
+First release. Phoenix LiveView dashboard with real-time agent observability, Chart.js visualizations, dark mode, archived run persistence, and event stream categorization. See the [full release notes](https://github.com/sandsower/rondo/releases/tag/v0.1.0).
+
 ## License
 
 This project is licensed under the [Apache License 2.0](LICENSE).
