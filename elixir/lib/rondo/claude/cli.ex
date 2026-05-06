@@ -66,8 +66,7 @@ defmodule Rondo.Claude.CLI do
             {cmd_path, cmd_args}
 
           _ ->
-            sh_path = System.find_executable("sh") || "/bin/sh"
-            {sh_path, ["-c", build_wrapper_script(cmd, cmd_args)]}
+            {"/bin/sh", ["-c", build_wrapper_script(cmd, cmd_args)]}
         end
 
       port =
