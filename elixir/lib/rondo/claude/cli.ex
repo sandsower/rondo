@@ -55,18 +55,31 @@ defmodule Rondo.Claude.CLI do
       # group. safe_port_close/1 sends SIGTERM to the entire group via
       # `kill -- -$PID`, preventing orphan Claude processes when Rondo
       # exits or the agent is terminated.
-      wrapper_args = ["-c", build_wrapper_script(cmd, cmd_args)]
+      {spawn_target, spawn_args} =
+        case :os.type() do
+          {:win32, _} ->
+            # On Windows, skip the /bin/sh wrapper entirely. Erlang Port handles
+            # argv → CreateProcess command-line quoting natively, which avoids
+            # the multiline-prompt + single-quote escaping problems that break
+            # bash's `-c` parser.
+            cmd_path = System.find_executable(cmd) || cmd
+            {cmd_path, cmd_args}
+
+          _ ->
+            sh_path = System.find_executable("sh") || "/bin/sh"
+            {sh_path, ["-c", build_wrapper_script(cmd, cmd_args)]}
+        end
 
       port =
         Port.open(
-          {:spawn_executable, "/bin/sh"},
+          {:spawn_executable, spawn_target},
           [
             :binary,
             :exit_status,
             :stderr_to_stdout,
             {:line, @port_line_bytes},
             {:cd, Path.expand(workspace)},
-            {:args, wrapper_args},
+            {:args, spawn_args},
             {:env, [{~c"CLAUDECODE", false}]}
           ]
         )
@@ -269,7 +282,12 @@ defmodule Rondo.Claude.CLI do
         "'" <> String.replace(arg, "'", "'\\''") <> "'"
       end)
 
-    "exec script -qfec #{shell_escape(escaped_args)} /dev/null"
+    case :os.type() do
+      {:win32, _} ->
+        "exec " <> escaped_args
+      _ ->
+        "exec script -qfec #{shell_escape(escaped_args)} /dev/null"
+    end
   end
 
   defp shell_escape(str) do
