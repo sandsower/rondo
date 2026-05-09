@@ -143,13 +143,18 @@ defmodule Rondo.ExtensionsTest do
     ensure_workflow_store_running()
     assert {:ok, %{prompt: "You are an agent for this repository."}} = Workflow.current()
 
+    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
+
     cases = [
-      {"---\ntracker:\n  api_key: token\n  project_slug: project\n---\nMissing kind\n", "tracker.kind"},
-      {"---\ntracker:\n  kind: unknown\n  api_key: token\n  project_slug: project\n---\nBad kind\n", "tracker.kind"},
-      {"---\ntracker:\n  kind: linear\n  api_key: token\n---\nMissing project\n", "tracker.project_slug"}
+      {"---\ntracker:\n  api_key: token\n  project_slug: project\n---\nMissing kind\n", "tracker.kind", :keep_env},
+      {"---\ntracker:\n  kind: unknown\n  api_key: token\n  project_slug: project\n---\nBad kind\n", "tracker.kind", :keep_env},
+      {"---\ntracker:\n  kind: linear\n  project_slug: project\n---\nMissing token\n", "tracker.api_key", :clear_env},
+      {"---\ntracker:\n  kind: linear\n  api_key: token\n---\nMissing project\n", "tracker.project_slug", :keep_env}
     ]
 
-    for {content, expected_path} <- cases do
+    for {content, expected_path, env_mode} <- cases do
+      if env_mode == :clear_env, do: System.delete_env("LINEAR_API_KEY"), else: restore_env("LINEAR_API_KEY", previous_linear_api_key)
       File.write!(Workflow.workflow_file_path(), content)
 
       assert {:error, {:invalid_workflow_config, _, [%{path: ^expected_path}]}} = WorkflowStore.force_reload()

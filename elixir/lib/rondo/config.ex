@@ -386,6 +386,7 @@ defmodule Rondo.Config do
   def validate_workflow(workflow, path \\ Workflow.workflow_file_path()) do
     with {:ok, options} <- validate_workflow_options(workflow, path),
          :ok <- require_tracker_kind(options, path),
+         :ok <- require_linear_token(options, path),
          :ok <- require_linear_project(options, path) do
       require_claude_command(options, path)
     end
@@ -465,6 +466,13 @@ defmodule Rondo.Config do
       :ok -> :ok
       {:error, :missing_tracker_kind} -> {:error, invalid_workflow_config(path, [config_error("tracker.kind", nil, "is required")])}
       {:error, {:unsupported_tracker_kind, kind}} -> {:error, invalid_workflow_config(path, [config_error("tracker.kind", kind, "must be linear or memory")])}
+    end
+  end
+
+  defp require_linear_token(options, path) do
+    case require_linear_token(options) do
+      :ok -> :ok
+      {:error, :missing_linear_api_token} -> {:error, invalid_workflow_config(path, [config_error("tracker.api_key", nil, "is required for linear tracker")])}
     end
   end
 
