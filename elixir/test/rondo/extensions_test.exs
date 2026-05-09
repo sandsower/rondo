@@ -103,6 +103,31 @@ defmodule Rondo.ExtensionsTest do
     assert {:error, _reason} = WorkflowStore.force_reload()
     assert {:ok, %{prompt: "Second prompt"}} = Workflow.current()
 
+    invalid_config = """
+    ---
+    tracker:
+      kind: linear
+      api_key: token
+      project_slug: project
+    claude:
+      permission_mode: YOLO
+    ---
+    Invalid config prompt
+    """
+
+    File.write!(Workflow.workflow_file_path(), invalid_config)
+
+    log =
+      capture_log(fn ->
+        assert {:error, {:invalid_workflow_config, path, errors}} = WorkflowStore.force_reload()
+        assert path == Workflow.workflow_file_path()
+        assert Enum.map(errors, & &1.path) == ["claude.permission_mode"]
+      end)
+
+    assert log =~ "Failed to reload workflow path=#{Workflow.workflow_file_path()}"
+    assert log =~ "claude.permission_mode"
+    assert {:ok, %{prompt: "Second prompt"}} = Workflow.current()
+
     third_workflow = Path.join(Path.dirname(Workflow.workflow_file_path()), "THIRD_WORKFLOW.md")
     write_workflow_file!(third_workflow, prompt: "Third prompt")
     Workflow.set_workflow_file_path(third_workflow)
@@ -119,6 +144,27 @@ defmodule Rondo.ExtensionsTest do
     Workflow.set_workflow_file_path(missing_path)
 
     assert {:stop, {:missing_workflow_file, ^missing_path, :enoent}} = WorkflowStore.init([])
+  end
+
+  test "workflow store init stops on invalid workflow config" do
+    invalid_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "INVALID_CONFIG_WORKFLOW.md")
+
+    File.write!(invalid_path, """
+    ---
+    tracker:
+      kind: linear
+      api_key: token
+      project_slug: project
+    claude:
+      permission_mode: YOLO
+    ---
+    Prompt
+    """)
+
+    Workflow.set_workflow_file_path(invalid_path)
+
+    assert {:stop, {:invalid_workflow_config, ^invalid_path, [%{path: "claude.permission_mode"}]}} =
+             WorkflowStore.init([])
   end
 
   test "workflow store start_link and poll callback cover missing-file error paths" do
@@ -636,6 +682,7 @@ defmodule Rondo.ExtensionsTest do
 
           # Wait for the process to terminate
           ref = Process.monitor(pid)
+
           receive do
             {:DOWN, ^ref, :process, ^pid, _} -> :ok
           after

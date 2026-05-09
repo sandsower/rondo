@@ -18,13 +18,13 @@ defmodule Rondo.CoreTest do
     assert Config.agent_max_turns() == 20
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
-    assert Config.poll_interval_ms() == 30_000
+    assert {:error, {:invalid_workflow_config, _, [%{path: "polling.interval_ms"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 45_000)
     assert Config.poll_interval_ms() == 45_000
 
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 0)
-    assert Config.agent_max_turns() == 20
+    assert {:error, {:invalid_workflow_config, _, [%{path: "agent.max_turns"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 5)
     assert Config.agent_max_turns() == 5
@@ -44,13 +44,13 @@ defmodule Rondo.CoreTest do
       claude_command: ""
     )
 
-    assert :ok = Config.validate!()
+    assert {:error, {:invalid_workflow_config, _, [%{path: "claude.command"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), claude_command: "/usr/bin/claude")
     assert :ok = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: 123)
-    assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
+    assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.kind"}]}} = Config.validate!()
   end
 
   test "current WORKFLOW.md file is valid and complete" do

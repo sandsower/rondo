@@ -30,6 +30,7 @@ defmodule Rondo.Config do
   @default_max_retry_backoff_ms 300_000
   @default_claude_command "claude"
   @default_claude_permission_mode "bypassPermissions"
+  @valid_claude_permission_modes ["default", "plan", "bypassPermissions"]
   @default_claude_dangerously_skip_permissions true
   @default_claude_max_turns 50
   @default_claude_output_format "stream-json"
@@ -370,16 +371,41 @@ defmodule Rondo.Config do
 
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
-    with {:ok, _workflow} <- current_workflow(),
-         :ok <- require_tracker_kind(),
-         :ok <- require_linear_token(),
-         :ok <- require_linear_project() do
-      require_claude_command()
+    path = Workflow.workflow_file_path()
+
+    with {:ok, workflow} <- Workflow.load(path),
+         {:ok, options} <- validate_workflow_options(workflow, path),
+         :ok <- require_tracker_kind(options),
+         :ok <- require_linear_token(options),
+         :ok <- require_linear_project(options) do
+      require_claude_command(options)
     end
   end
 
-  defp require_tracker_kind do
-    case tracker_kind() do
+  @spec validate_workflow(workflow_payload(), Path.t()) :: :ok | {:error, term()}
+  def validate_workflow(workflow, path \\ Workflow.workflow_file_path()) do
+    case validate_workflow_options(workflow, path) do
+      {:ok, _options} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @spec format_validation_error(term()) :: String.t()
+  def format_validation_error({:invalid_workflow_config, path, errors}) when is_list(errors) do
+    fields = Enum.map_join(errors, ", ", &Map.fetch!(&1, :path))
+
+    details =
+      Enum.map_join(errors, "; ", fn error ->
+        "#{Map.fetch!(error, :path)}: #{Map.fetch!(error, :message)}"
+      end)
+
+    "Invalid WORKFLOW.md config path=#{path} fields=#{fields} errors=#{details}"
+  end
+
+  def format_validation_error(reason), do: inspect(reason)
+
+  defp require_tracker_kind(options) do
+    case get_in(options, [:tracker, :kind]) do
       "linear" -> :ok
       "memory" -> :ok
       nil -> {:error, :missing_tracker_kind}
@@ -387,13 +413,17 @@ defmodule Rondo.Config do
     end
   end
 
-  defp require_linear_token do
-    case tracker_kind() do
+  defp require_linear_token(options) do
+    case get_in(options, [:tracker, :kind]) do
       "linear" ->
-        if is_binary(linear_api_token()) do
-          :ok
-        else
-          {:error, :missing_linear_api_token}
+        options
+        |> get_in([:tracker, :api_key])
+        |> resolve_env_value(System.get_env("LINEAR_API_KEY"))
+        |> normalize_secret_value()
+        |> is_binary()
+        |> case do
+          true -> :ok
+          false -> {:error, :missing_linear_api_token}
         end
 
       _ ->
@@ -401,10 +431,10 @@ defmodule Rondo.Config do
     end
   end
 
-  defp require_linear_project do
-    case tracker_kind() do
+  defp require_linear_project(options) do
+    case get_in(options, [:tracker, :kind]) do
       "linear" ->
-        if is_binary(linear_project_slug()) do
+        if is_binary(get_in(options, [:tracker, :project_slug])) do
           :ok
         else
           {:error, :missing_linear_project_slug}
@@ -415,18 +445,58 @@ defmodule Rondo.Config do
     end
   end
 
-  defp require_claude_command do
-    if byte_size(String.trim(claude_command())) > 0 do
-      :ok
-    else
-      {:error, :missing_claude_command}
+  defp require_claude_command(options) do
+    case get_in(options, [:claude, :command]) do
+      command when is_binary(command) ->
+        if byte_size(String.trim(command)) > 0 do
+          :ok
+        else
+          {:error, :missing_claude_command}
+        end
+
+      _ ->
+        {:error, :missing_claude_command}
     end
   end
 
   defp validated_workflow_options do
-    workflow_config()
-    |> extract_workflow_options()
-    |> NimbleOptions.validate!(@workflow_options_schema)
+    case current_workflow() do
+      {:ok, workflow} ->
+        case validate_workflow_options(workflow, Workflow.workflow_file_path()) do
+          {:ok, options} ->
+            options
+
+          {:error, reason} ->
+            raise ArgumentError, format_validation_error(reason)
+        end
+
+      _ ->
+        %{}
+        |> extract_workflow_options()
+        |> NimbleOptions.validate!(@workflow_options_schema)
+    end
+  end
+
+  defp validate_workflow_options(%{config: config}, path) when is_map(config) do
+    config = normalize_keys(config)
+
+    case validate_raw_config(config) do
+      [] ->
+        config
+        |> extract_workflow_options()
+        |> NimbleOptions.validate(@workflow_options_schema)
+        |> case do
+          {:ok, options} -> {:ok, options}
+          {:error, %NimbleOptions.ValidationError{} = error} -> {:error, invalid_workflow_config(path, [nimble_error(error)])}
+        end
+
+      errors ->
+        {:error, invalid_workflow_config(path, errors)}
+    end
+  end
+
+  defp validate_workflow_options(_workflow, path) do
+    {:error, invalid_workflow_config(path, [config_error("workflow", nil, "must include a config map")])}
   end
 
   defp extract_workflow_options(config) do
@@ -514,6 +584,207 @@ defmodule Rondo.Config do
     %{}
     |> put_if_present(:port, non_negative_integer_value(Map.get(section, "port")))
     |> put_if_present(:host, scalar_string_value(Map.get(section, "host")))
+  end
+
+  defp validate_raw_config(config) do
+    tracker = section_map(config, "tracker")
+    polling = section_map(config, "polling")
+    workspace = section_map(config, "workspace")
+    agent = section_map(config, "agent")
+    claude = section_map(config, "claude")
+    hooks = section_map(config, "hooks")
+    observability = section_map(config, "observability")
+    server = section_map(config, "server")
+
+    [
+      validate_section_map(config, "tracker"),
+      validate_section_map(config, "polling"),
+      validate_section_map(config, "workspace"),
+      validate_section_map(config, "agent"),
+      validate_section_map(config, "claude"),
+      validate_section_map(config, "hooks"),
+      validate_section_map(config, "observability"),
+      validate_section_map(config, "server"),
+      validate_string_field(tracker, "tracker.kind"),
+      validate_string_field(tracker, "tracker.endpoint"),
+      validate_string_field(tracker, "tracker.api_key", allow_empty: true),
+      validate_string_field(tracker, "tracker.project_slug"),
+      validate_string_field(tracker, "tracker.assignee"),
+      validate_string_or_string_list_field(tracker, "tracker.active_states"),
+      validate_string_or_string_list_field(tracker, "tracker.terminal_states"),
+      validate_string_or_string_list_field(tracker, "tracker.label_filter"),
+      validate_positive_integer_field(polling, "polling.interval_ms"),
+      validate_string_field(workspace, "workspace.root"),
+      validate_positive_integer_field(agent, "agent.max_concurrent_agents"),
+      validate_positive_integer_field(agent, "agent.max_turns"),
+      validate_positive_integer_field(agent, "agent.max_retry_backoff_ms"),
+      validate_state_limits_field(agent, "agent.max_concurrent_agents_by_state"),
+      validate_non_empty_string_field(claude, "claude.command"),
+      validate_inclusion_field(claude, "claude.permission_mode", @valid_claude_permission_modes),
+      validate_boolean_field(claude, "claude.dangerously_skip_permissions"),
+      validate_positive_integer_field(claude, "claude.max_turns"),
+      validate_inclusion_field(claude, "claude.output_format", ["stream-json"]),
+      validate_string_field(claude, "claude.model"),
+      validate_optional_string_list_field(claude, "claude.allowed_tools"),
+      validate_positive_integer_field(claude, "claude.turn_timeout_ms"),
+      validate_positive_integer_field(claude, "claude.stall_timeout_ms"),
+      validate_string_field(hooks, "hooks.after_create"),
+      validate_string_field(hooks, "hooks.before_run"),
+      validate_string_field(hooks, "hooks.after_run"),
+      validate_string_field(hooks, "hooks.before_remove"),
+      validate_positive_integer_field(hooks, "hooks.timeout_ms"),
+      validate_boolean_field(observability, "observability.dashboard_enabled"),
+      validate_positive_integer_field(observability, "observability.refresh_ms"),
+      validate_positive_integer_field(observability, "observability.render_interval_ms"),
+      validate_non_negative_integer_field(server, "server.port"),
+      validate_string_field(server, "server.host")
+    ]
+    |> List.flatten()
+  end
+
+  defp validate_section_map(config, section) do
+    case Map.fetch(config, section) do
+      {:ok, nil} -> []
+      {:ok, value} when is_map(value) -> []
+      {:ok, value} -> [config_error(section, value, "must be a map")]
+      :error -> []
+    end
+  end
+
+  defp validate_string_field(section, path, opts \\ []) do
+    validate_present_value(section, path, fn value ->
+      allow_empty = Keyword.get(opts, :allow_empty, false)
+
+      cond do
+        is_binary(value) and (allow_empty or String.trim(value) != "") ->
+          []
+
+        is_binary(value) ->
+          [config_error(path, value, "must be a non-empty string")]
+
+        true ->
+          [config_error(path, value, "must be a string")]
+      end
+    end)
+  end
+
+  defp validate_non_empty_string_field(section, path), do: validate_string_field(section, path)
+
+  defp validate_string_or_string_list_field(section, path) do
+    validate_present_value(section, path, fn
+      value when is_binary(value) ->
+        []
+
+      values when is_list(values) ->
+        invalid? = Enum.any?(values, fn value -> not is_binary(value) end)
+        if invalid?, do: [config_error(path, values, "must be a string or list of strings")], else: []
+
+      value ->
+        [config_error(path, value, "must be a string or list of strings")]
+    end)
+  end
+
+  defp validate_optional_string_list_field(section, path) do
+    validate_present_value(section, path, fn
+      values when is_list(values) ->
+        invalid? = Enum.any?(values, fn value -> not is_binary(value) or String.trim(value) == "" end)
+        if invalid?, do: [config_error(path, values, "must be a list of non-empty strings")], else: []
+
+      value ->
+        [config_error(path, value, "must be a list of non-empty strings")]
+    end)
+  end
+
+  defp validate_inclusion_field(section, path, valid_values) do
+    validate_present_value(section, path, fn
+      value when is_binary(value) ->
+        trimmed = String.trim(value)
+
+        if trimmed in valid_values do
+          []
+        else
+          [config_error(path, value, "must be one of #{Enum.join(valid_values, ", ")}")]
+        end
+
+      value ->
+        [config_error(path, value, "must be one of #{Enum.join(valid_values, ", ")}")]
+    end)
+  end
+
+  defp validate_boolean_field(section, path) do
+    validate_present_value(section, path, fn
+      value when is_boolean(value) ->
+        []
+
+      value when is_binary(value) ->
+        case String.downcase(String.trim(value)) do
+          "true" -> []
+          "false" -> []
+          _ -> [config_error(path, value, "must be true or false")]
+        end
+
+      value ->
+        [config_error(path, value, "must be true or false")]
+    end)
+  end
+
+  defp validate_positive_integer_field(section, path) do
+    validate_integer_field(section, path, &(&1 > 0), "must be a positive integer")
+  end
+
+  defp validate_non_negative_integer_field(section, path) do
+    validate_integer_field(section, path, &(&1 >= 0), "must be a non-negative integer")
+  end
+
+  defp validate_integer_field(section, path, predicate, message) do
+    validate_present_value(section, path, fn value ->
+      case parse_integer(value) do
+        {:ok, parsed} ->
+          if predicate.(parsed), do: [], else: [config_error(path, value, message)]
+
+        :error ->
+          [config_error(path, value, message)]
+      end
+    end)
+  end
+
+  defp validate_state_limits_field(section, path) do
+    validate_present_value(section, path, fn
+      value when is_map(value) ->
+        value
+        |> Enum.flat_map(fn {state_name, limit} ->
+          entry_path = path <> "." <> normalize_issue_state(to_string(state_name))
+
+          case parse_integer(limit) do
+            {:ok, parsed} when parsed > 0 -> []
+            _ -> [config_error(entry_path, limit, "must be a positive integer")]
+          end
+        end)
+
+      value ->
+        [config_error(path, value, "must be a map of state names to positive integers")]
+    end)
+  end
+
+  defp validate_present_value(section, path, validator) do
+    key = path |> String.split(".") |> List.last()
+
+    case Map.fetch(section, key) do
+      {:ok, nil} -> []
+      {:ok, value} -> validator.(value)
+      :error -> []
+    end
+  end
+
+  defp invalid_workflow_config(path, errors), do: {:invalid_workflow_config, path, errors}
+
+  defp config_error(path, value, message) do
+    %{path: path, value: value, message: message}
+  end
+
+  defp nimble_error(%NimbleOptions.ValidationError{} = error) do
+    keys_path = error |> Map.from_struct() |> Map.get(:keys_path, [])
+    config_error(Enum.join(keys_path || [], "."), nil, Exception.message(error))
   end
 
   defp section_map(config, key) do
@@ -674,8 +945,11 @@ defmodule Rondo.Config do
 
   defp parse_integer(value) when is_binary(value) do
     case Integer.parse(String.trim(value)) do
-      {parsed, _} -> {:ok, parsed}
-      :error -> :error
+      {parsed, rest} ->
+        if String.trim(rest) == "", do: {:ok, parsed}, else: :error
+
+      :error ->
+        :error
     end
   end
 
@@ -712,16 +986,6 @@ defmodule Rondo.Config do
   end
 
   defp normalize_tracker_kind(_kind), do: nil
-
-  defp workflow_config do
-    case current_workflow() do
-      {:ok, %{config: config}} when is_map(config) ->
-        normalize_keys(config)
-
-      _ ->
-        %{}
-    end
-  end
 
   defp normalize_keys(value) when is_map(value) do
     Enum.reduce(value, %{}, fn {key, raw_value}, normalized ->

@@ -258,6 +258,10 @@ defmodule Rondo.Orchestrator do
         Logger.error("Claude command missing in WORKFLOW.md")
         state
 
+      {:error, {:invalid_workflow_config, _path, _errors} = reason} ->
+        Logger.error(Config.format_validation_error(reason))
+        state
+
       {:error, {:missing_workflow_file, path, reason}} ->
         Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
         state
@@ -1284,6 +1288,7 @@ defmodule Rondo.Orchestrator do
 
   defp get_in_any(map, [key | rest]) when is_map(map) do
     value = Map.get(map, key) || Map.get(map, String.to_existing_atom(key))
+
     case rest do
       [] -> value
       _ when is_map(value) -> get_in_any(value, rest)
@@ -1327,6 +1332,7 @@ defmodule Rondo.Orchestrator do
   defp summarize_tool_use(name, %{"file_path" => p}), do: "#{name} #{p}"
   defp summarize_tool_use(name, %{"url" => u}), do: "#{name} #{truncate_text(u, 200)}"
   defp summarize_tool_use(name, input) when map_size(input) == 0, do: name
+
   defp summarize_tool_use(name, input) when is_map(input) do
     case Enum.take(input, 1) do
       [{k, v}] when is_binary(v) -> "#{name}: #{k}=#{truncate_text(v, 150)}"
@@ -1446,6 +1452,7 @@ defmodule Rondo.Orchestrator do
 
   defp load_archived_runs do
     root = archive_root()
+
     case File.ls(root) do
       {:ok, identifiers} ->
         identifiers
@@ -1504,13 +1511,22 @@ defmodule Rondo.Orchestrator do
 
   defp deserialize_archived_entry(entry) when is_map(entry) do
     entry
-    |> Map.new(fn {k, v} when is_binary(k) -> {safe_atom(k, @archive_keys), v}; other -> other end)
+    |> Map.new(fn
+      {k, v} when is_binary(k) -> {safe_atom(k, @archive_keys), v}
+      other -> other
+    end)
     |> Map.update(:tokens, %{}, fn t when is_map(t) ->
-      Map.new(t, fn {k, v} when is_binary(k) -> {safe_atom(k, @token_keys), v}; other -> other end)
+      Map.new(t, fn
+        {k, v} when is_binary(k) -> {safe_atom(k, @token_keys), v}
+        other -> other
+      end)
     end)
     |> Map.update(:event_log, [], fn log when is_list(log) ->
       Enum.map(log, fn e when is_map(e) ->
-        Map.new(e, fn {k, v} when is_binary(k) -> {safe_atom(k, @event_keys), v}; other -> other end)
+        Map.new(e, fn
+          {k, v} when is_binary(k) -> {safe_atom(k, @event_keys), v}
+          other -> other
+        end)
       end)
     end)
   end
@@ -1518,6 +1534,7 @@ defmodule Rondo.Orchestrator do
   defp deserialize_archived_entry(_), do: %{}
 
   defp safe_atom(key, _allowed) when is_atom(key), do: key
+
   defp safe_atom(key, allowed) when is_binary(key) do
     if key in allowed, do: String.to_atom(key), else: String.to_atom(key)
   end

@@ -111,9 +111,10 @@ Title: {{ issue.title }} Body: {{ issue.description }}
 
 Notes:
 
-- If a value is missing, defaults are used.
+- If a value is omitted or set to `null`, defaults are used. Explicit malformed values fail
+  validation instead of silently falling back.
 - `claude.permission_mode` controls Claude Code's permission system. Supported values: `default`,
-  `plan`, `bypassPermissions`. Default: `default`.
+  `plan`, `bypassPermissions`. Default: `bypassPermissions`.
 - `claude.dangerously_skip_permissions` when `true`, passes `--dangerously-skip-permissions` to
   Claude Code, bypassing all permission checks. Recommended for unattended operation when combined
   with `claude.allowed_tools` for tightening. Default: `true`.
@@ -153,7 +154,9 @@ claude:
   dangerously_skip_permissions: true
 ```
 
-- If `WORKFLOW.md` is missing or has invalid YAML, startup and scheduling are halted until fixed.
+- If `WORKFLOW.md` is missing, has invalid YAML, or contains invalid configured values, startup
+  and scheduling are halted until fixed. Invalid live reloads keep the last known good workflow and
+  log the config path plus invalid field names.
 - `server.port` or CLI `--port` enables the optional HTTP dashboard and JSON API at `/`,
   `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 

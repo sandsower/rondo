@@ -666,6 +666,15 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Config.claude_turn_timeout_ms() == 3_600_000
     assert Config.claude_stall_timeout_ms() == 300_000
 
+    write_workflow_file!(Workflow.workflow_file_path(), claude_permission_mode: "YOLO")
+    assert {:error, {:invalid_workflow_config, _, [%{path: "claude.permission_mode"}]}} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(), claude_turn_timeout_ms: 0)
+    assert {:error, {:invalid_workflow_config, _, [%{path: "claude.turn_timeout_ms"}]}} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(), claude_stall_timeout_ms: -1)
+    assert {:error, {:invalid_workflow_config, _, [%{path: "claude.stall_timeout_ms"}]}} = Config.validate!()
+
     write_workflow_file!(Workflow.workflow_file_path(), claude_command: "claude --model opus")
     assert Config.claude_command() == "claude --model opus"
 
@@ -673,7 +682,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Config.linear_active_states() == ["Todo", "In Progress"]
 
     write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: "bad")
-    assert Config.max_concurrent_agents() == 10
+    assert {:error, {:invalid_workflow_config, _, [%{path: "agent.max_concurrent_agents"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_active_states: %{todo: true},
@@ -690,19 +699,21 @@ defmodule Rondo.WorkspaceAndConfigTest do
       server_host: 123
     )
 
-    assert Config.linear_active_states() == ["Todo", "In Progress"]
-    assert Config.linear_terminal_states() == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
-    assert Config.poll_interval_ms() == 30_000
-    assert Config.workspace_root() == Path.join(System.tmp_dir!(), "rondo_workspaces")
-    assert Config.max_retry_backoff_ms() == 300_000
-    assert Config.max_concurrent_agents_for_state("Todo") == 1
-    assert Config.max_concurrent_agents_for_state("Review") == 10
-    assert Config.hook_timeout_ms() == 60_000
-    assert Config.observability_enabled?()
-    assert Config.observability_refresh_ms() == 1_000
-    assert Config.observability_render_interval_ms() == 16
-    assert Config.server_port() == nil
-    assert Config.server_host() == "123"
+    assert {:error, {:invalid_workflow_config, _, errors}} = Config.validate!()
+    error_paths = Enum.map(errors, & &1.path)
+    assert "tracker.active_states" in error_paths
+    assert "tracker.terminal_states" in error_paths
+    assert "polling.interval_ms" in error_paths
+    assert "workspace.root" in error_paths
+    assert "agent.max_retry_backoff_ms" in error_paths
+    assert "agent.max_concurrent_agents_by_state.review" in error_paths
+    assert "agent.max_concurrent_agents_by_state.done" in error_paths
+    assert "hooks.timeout_ms" in error_paths
+    assert "observability.dashboard_enabled" in error_paths
+    assert "observability.refresh_ms" in error_paths
+    assert "observability.render_interval_ms" in error_paths
+    assert "server.port" in error_paths
+    assert "server.host" in error_paths
 
     write_workflow_file!(Workflow.workflow_file_path(), claude_command: "claude")
     assert Config.claude_command() == "claude"
