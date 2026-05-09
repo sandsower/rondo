@@ -643,6 +643,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
     System.delete_env("LINEAR_API_KEY")
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
       workspace_root: nil,
       max_concurrent_agents: nil,
       claude_turn_timeout_ms: nil,
@@ -678,8 +679,13 @@ defmodule Rondo.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), claude_command: "claude --model opus")
     assert Config.claude_command() == "claude --model opus"
 
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ",")
-    assert Config.linear_active_states() == ["Todo", "In Progress"]
+    for invalid_active_states <- ["", ",", [], [""]] do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: invalid_active_states)
+      assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.active_states"}]}} = Config.validate!()
+    end
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_terminal_states: ",")
+    assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.terminal_states"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: "bad")
     assert {:error, {:invalid_workflow_config, _, [%{path: "agent.max_concurrent_agents"}]}} = Config.validate!()
@@ -777,6 +783,8 @@ defmodule Rondo.WorkspaceAndConfigTest do
   test "config supports per-state max concurrent agent overrides" do
     workflow = """
     ---
+    tracker:
+      kind: memory
     agent:
       max_concurrent_agents: 10
       max_concurrent_agents_by_state:

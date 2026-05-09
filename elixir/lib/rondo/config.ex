@@ -384,9 +384,10 @@ defmodule Rondo.Config do
 
   @spec validate_workflow(workflow_payload(), Path.t()) :: :ok | {:error, term()}
   def validate_workflow(workflow, path \\ Workflow.workflow_file_path()) do
-    case validate_workflow_options(workflow, path) do
-      {:ok, _options} -> :ok
-      {:error, reason} -> {:error, reason}
+    with {:ok, options} <- validate_workflow_options(workflow, path),
+         :ok <- require_tracker_kind(options, path),
+         :ok <- require_linear_project(options, path) do
+      require_claude_command(options, path)
     end
   end
 
@@ -456,6 +457,28 @@ defmodule Rondo.Config do
 
       _ ->
         {:error, :missing_claude_command}
+    end
+  end
+
+  defp require_tracker_kind(options, path) do
+    case require_tracker_kind(options) do
+      :ok -> :ok
+      {:error, :missing_tracker_kind} -> {:error, invalid_workflow_config(path, [config_error("tracker.kind", nil, "is required")])}
+      {:error, {:unsupported_tracker_kind, kind}} -> {:error, invalid_workflow_config(path, [config_error("tracker.kind", kind, "must be linear or memory")])}
+    end
+  end
+
+  defp require_linear_project(options, path) do
+    case require_linear_project(options) do
+      :ok -> :ok
+      {:error, :missing_linear_project_slug} -> {:error, invalid_workflow_config(path, [config_error("tracker.project_slug", nil, "is required for linear tracker")])}
+    end
+  end
+
+  defp require_claude_command(options, path) do
+    case require_claude_command(options) do
+      :ok -> :ok
+      {:error, :missing_claude_command} -> {:error, invalid_workflow_config(path, [config_error("claude.command", nil, "is required")])}
     end
   end
 
@@ -610,8 +633,8 @@ defmodule Rondo.Config do
       validate_string_field(tracker, "tracker.api_key", allow_empty: true),
       validate_string_field(tracker, "tracker.project_slug"),
       validate_string_field(tracker, "tracker.assignee"),
-      validate_string_or_string_list_field(tracker, "tracker.active_states"),
-      validate_string_or_string_list_field(tracker, "tracker.terminal_states"),
+      validate_non_empty_string_or_string_list_field(tracker, "tracker.active_states"),
+      validate_non_empty_string_or_string_list_field(tracker, "tracker.terminal_states"),
       validate_string_or_string_list_field(tracker, "tracker.label_filter"),
       validate_positive_integer_field(polling, "polling.interval_ms"),
       validate_string_field(workspace, "workspace.root"),
@@ -678,6 +701,41 @@ defmodule Rondo.Config do
       values when is_list(values) ->
         invalid? = Enum.any?(values, fn value -> not is_binary(value) end)
         if invalid?, do: [config_error(path, values, "must be a string or list of strings")], else: []
+
+      value ->
+        [config_error(path, value, "must be a string or list of strings")]
+    end)
+  end
+
+  defp validate_non_empty_string_or_string_list_field(section, path) do
+    validate_present_value(section, path, fn
+      value when is_binary(value) ->
+        value
+        |> String.split(",", trim: true)
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
+        |> case do
+          [] -> [config_error(path, value, "must include at least one non-empty value")]
+          _values -> []
+        end
+
+      values when is_list(values) ->
+        normalized_values =
+          values
+          |> Enum.filter(&is_binary/1)
+          |> Enum.map(&String.trim/1)
+          |> Enum.reject(&(&1 == ""))
+
+        cond do
+          Enum.any?(values, fn value -> not is_binary(value) end) ->
+            [config_error(path, values, "must be a string or list of strings")]
+
+          normalized_values == [] ->
+            [config_error(path, values, "must include at least one non-empty value")]
+
+          true ->
+            []
+        end
 
       value ->
         [config_error(path, value, "must be a string or list of strings")]

@@ -139,6 +139,24 @@ defmodule Rondo.ExtensionsTest do
     assert {:ok, _pid} = Supervisor.restart_child(Rondo.Supervisor, WorkflowStore)
   end
 
+  test "workflow store rejects reloads missing required workflow config" do
+    ensure_workflow_store_running()
+    assert {:ok, %{prompt: "You are an agent for this repository."}} = Workflow.current()
+
+    cases = [
+      {"---\ntracker:\n  api_key: token\n  project_slug: project\n---\nMissing kind\n", "tracker.kind"},
+      {"---\ntracker:\n  kind: unknown\n  api_key: token\n  project_slug: project\n---\nBad kind\n", "tracker.kind"},
+      {"---\ntracker:\n  kind: linear\n  api_key: token\n---\nMissing project\n", "tracker.project_slug"}
+    ]
+
+    for {content, expected_path} <- cases do
+      File.write!(Workflow.workflow_file_path(), content)
+
+      assert {:error, {:invalid_workflow_config, _, [%{path: ^expected_path}]}} = WorkflowStore.force_reload()
+      assert {:ok, %{prompt: "You are an agent for this repository."}} = Workflow.current()
+    end
+  end
+
   test "workflow store init stops on missing workflow file" do
     missing_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "MISSING_WORKFLOW.md")
     Workflow.set_workflow_file_path(missing_path)
