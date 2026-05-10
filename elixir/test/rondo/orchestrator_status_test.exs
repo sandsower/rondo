@@ -1789,6 +1789,248 @@ defmodule Rondo.OrchestratorStatusTest do
     assert newest.message == "hello world"
   end
 
+  test "dispatch creates run ledger and exposes it in running snapshot" do
+    workspace_root = tmp_dir("orchestrator-ledger-dispatch")
+    claude_bin = fake_claude_script(workspace_root, "ledger-session", 1)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: claude_bin,
+      max_turns: 1
+    )
+
+    issue = %Issue{
+      id: "issue-ledger-dispatch",
+      identifier: "MT-LEDGER",
+      title: "Ledger dispatch test",
+      description: "Create a run ledger",
+      state: "Todo",
+      url: "https://example.org/issues/MT-LEDGER"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :LedgerDispatchOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    state = :sys.get_state(pid)
+    state = %{state | max_concurrent_agents: 1, poll_interval_ms: 60_000}
+    :sys.replace_state(pid, fn _ -> state end)
+
+    send(pid, {:tick, state.tick_token})
+
+    snapshot_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).running do
+          [entry | _] -> entry
+          _ -> nil
+        end
+      end)
+
+    assert snapshot_entry.run_id =~ "MT-LEDGER-"
+    assert snapshot_entry.run_dir =~ Path.join([workspace_root, ".rondo_runs", "MT-LEDGER"])
+    assert File.exists?(Path.join(snapshot_entry.run_dir, "manifest.json"))
+  end
+
+  test "claude worker updates append run ledger artifacts and checkpoints" do
+    workspace_root = tmp_dir("orchestrator-ledger-updates")
+    issue_id = "issue-ledger-update"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-LEDGER-UPD",
+      title: "Ledger update test",
+      description: "Capture worker updates",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-LEDGER-UPD"
+    }
+
+    assert {:ok, ledger} = Rondo.RunLedger.create_run(issue, workspace_root: workspace_root, random_suffix: "feedface")
+
+    orchestrator_name = Module.concat(__MODULE__, :LedgerUpdateOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      turn_count: 0,
+      last_claude_message: nil,
+      last_claude_timestamp: nil,
+      last_claude_event: nil,
+      started_at: DateTime.utc_now(),
+      run_id: ledger.run_id,
+      run_dir: ledger.run_dir,
+      ledger: ledger
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:claude_worker_update, issue_id,
+       %{
+         event: :assistant,
+         session_id: "session-ledger-update",
+         timestamp: DateTime.utc_now(),
+         raw: %{"method" => "turn/completed", "params" => %{"turn" => %{"status" => "completed"}}}
+       }}
+    )
+
+    checkpoint_index =
+      wait_until(fn ->
+        manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+        Enum.find(manifest["checkpoints"], &(&1["kind"] == "turn_completed"))
+      end)
+
+    checkpoint = ledger.run_dir |> Path.join(checkpoint_index["path"]) |> File.read!() |> Jason.decode!()
+    assert checkpoint["source"] == %{"adapter" => "claude_code", "event" => "turn/completed"}
+
+    artifact_path = Path.join(ledger.run_dir, "artifacts/agent-events.ndjson")
+    assert File.read!(artifact_path) =~ "turn/completed"
+  end
+
+  test "orchestrator shutdown marks active run ledgers terminated" do
+    workspace_root = tmp_dir("orchestrator-ledger-shutdown")
+    issue_id = "issue-ledger-shutdown"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-LEDGER-STOP",
+      title: "Ledger shutdown test",
+      description: "Terminate active ledger",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-LEDGER-STOP"
+    }
+
+    assert {:ok, ledger} = Rondo.RunLedger.create_run(issue, workspace_root: workspace_root, random_suffix: "5a5a5a5a")
+
+    orchestrator_name = Module.concat(__MODULE__, :LedgerShutdownOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    worker = spawn(fn -> Process.sleep(:infinity) end)
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker,
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "session-ledger-shutdown",
+      turn_count: 3,
+      last_claude_message: nil,
+      last_claude_timestamp: nil,
+      last_claude_event: nil,
+      started_at: DateTime.utc_now(),
+      event_log: [],
+      run_id: ledger.run_id,
+      run_dir: ledger.run_dir,
+      ledger: ledger
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    GenServer.stop(pid, :normal)
+
+    manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+    assert manifest["status"] == "terminated"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "terminated"))
+  end
+
+  test "completed agent runs complete ledger and link existing archive" do
+    workspace_root = tmp_dir("orchestrator-ledger-complete")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    issue_id = "issue-ledger-complete"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-LEDGER-DONE",
+      title: "Ledger completion test",
+      description: "Finish the ledger",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-LEDGER-DONE"
+    }
+
+    assert {:ok, ledger} = Rondo.RunLedger.create_run(issue, workspace_root: workspace_root, random_suffix: "cafebabe")
+
+    orchestrator_name = Module.concat(__MODULE__, :LedgerCompleteOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    initial_state = :sys.get_state(pid)
+    ref = make_ref()
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "session-ledger-complete",
+      turn_count: 1,
+      last_claude_message: nil,
+      last_claude_timestamp: nil,
+      last_claude_event: nil,
+      started_at: DateTime.utc_now(),
+      event_log: [],
+      run_id: ledger.run_id,
+      run_dir: ledger.run_dir,
+      ledger: ledger
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+
+    manifest =
+      wait_until(fn ->
+        manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+
+        if manifest["status"] == "completed" and Enum.any?(manifest["artifacts"], &(&1["kind"] == "archive")) do
+          manifest
+        end
+      end)
+
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "completed"))
+    assert Enum.any?(manifest["artifacts"], &(&1["kind"] == "archive"))
+  end
+
   test "dispatch transitions todo issue to in progress via tracker" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
@@ -1920,4 +2162,44 @@ defmodule Rondo.OrchestratorStatusTest do
     assert {:error, :invalid_path} = Rondo.Orchestrator.load_archived_run("MT-401", "../outside.json")
     assert {:error, :invalid_path} = Rondo.Orchestrator.load_archived_run("MT-401", "..")
   end
+
+  defp tmp_dir(name) do
+    path = Path.join(System.tmp_dir!(), "rondo-#{name}-#{System.unique_integer([:positive])}")
+    File.rm_rf!(path)
+    File.mkdir_p!(path)
+    path
+  end
+
+  defp fake_claude_script(root, session_id, sleep_seconds) do
+    path = Path.join(root, "fake-claude.sh")
+
+    File.write!(path, """
+    #!/bin/sh
+    echo '{"type":"system","subtype":"init","session_id":"#{session_id}","tools":[]}'
+    sleep #{sleep_seconds}
+    echo '{"type":"result","subtype":"success","session_id":"#{session_id}","usage":{"input_tokens":1,"output_tokens":1}}'
+    """)
+
+    File.chmod!(path, 0o755)
+    path
+  end
+
+  defp wait_until(fun, attempts \\ 100)
+
+  defp wait_until(fun, attempts) when attempts > 0 do
+    case fun.() do
+      nil ->
+        Process.sleep(50)
+        wait_until(fun, attempts - 1)
+
+      false ->
+        Process.sleep(50)
+        wait_until(fun, attempts - 1)
+
+      value ->
+        value
+    end
+  end
+
+  defp wait_until(_fun, 0), do: flunk("timed out waiting for condition")
 end

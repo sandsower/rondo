@@ -1262,6 +1262,14 @@ Requirements:
 - If a configured log sink fails, the service should continue running when possible and emit an
   operator-visible warning through any remaining sink.
 
+#### 13.2.1 Durable Run Ledger
+
+Implementations may persist per-attempt run ledger artifacts under the workspace root. When present,
+the ledger should be additive to existing logs/archives, write incrementally during dispatch and agent
+lifecycle transitions, and treat write failures as warnings rather than run-fatal errors. Ledger
+artifacts are local diagnostic data and may include issue text, file paths, summarized agent events,
+session metadata, and token counts.
+
 ### 13.3 Runtime Snapshot / Monitoring Interface (Optional but Recommended)
 
 If the implementation exposes a synchronous runtime snapshot (for dashboards or monitoring), it

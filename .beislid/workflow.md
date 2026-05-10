@@ -13,6 +13,11 @@ id_pattern: '^\d+$'
 link_template: 'https://github.com/sandsower/rondo/issues/{id}'
 ```
 
+```beislid:ticket_update
+type: cli
+comment_command: 'gh issue comment {id} --body-file {body_file}'
+```
+
 ## PR reviews
 
 Read GitHub PR review comments and post clear-fix replies through the `gh` CLI.

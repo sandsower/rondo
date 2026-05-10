@@ -159,6 +159,9 @@ claude:
   log the config path plus invalid field names.
 - `server.port` or CLI `--port` enables the optional HTTP dashboard and JSON API at `/`,
   `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+- Each dispatched attempt writes a local run ledger under
+  `<workspace.root>/.rondo_runs/<issue_identifier>/<run_id>/`. See
+  [`docs/run_ledger.md`](docs/run_ledger.md) for layout, privacy, and retention notes.
 
 ## Project Layout
 

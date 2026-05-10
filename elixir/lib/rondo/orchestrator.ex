@@ -7,7 +7,7 @@ defmodule Rondo.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias Rondo.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias Rondo.{AgentRunner, Config, RunLedger, StatusDashboard, Tracker, Workspace}
   alias Rondo.Linear.Issue
 
   @timeseries_sample_interval_ms 10_000
@@ -80,11 +80,12 @@ defmodule Rondo.Orchestrator do
   end
 
   @impl true
-  def terminate(_reason, %{running: running}) do
+  def terminate(reason, %{running: running}) do
     running
     |> Map.values()
-    |> Enum.each(fn %{pid: pid} when is_pid(pid) ->
-      Task.Supervisor.terminate_child(Rondo.TaskSupervisor, pid)
+    |> Enum.each(fn running_entry ->
+      terminate_run_ledger_on_shutdown(running_entry, reason)
+      terminate_running_child(running_entry)
     end)
 
     :ok
@@ -93,6 +94,24 @@ defmodule Rondo.Orchestrator do
   end
 
   def terminate(_reason, _state), do: :ok
+
+  defp terminate_run_ledger_on_shutdown(%{ledger: %RunLedger{} = ledger} = running_entry, reason) do
+    complete_run_ledger(ledger, :terminated, %{
+      exit_reason: "orchestrator shutdown: #{inspect(reason)}",
+      session_id: Map.get(running_entry, :session_id),
+      turn_count: Map.get(running_entry, :turn_count, 0)
+    })
+
+    :ok
+  end
+
+  defp terminate_run_ledger_on_shutdown(_running_entry, _reason), do: :ok
+
+  defp terminate_running_child(%{pid: pid}) when is_pid(pid) do
+    Task.Supervisor.terminate_child(Rondo.TaskSupervisor, pid)
+  end
+
+  defp terminate_running_child(_running_entry), do: :ok
 
   @impl true
   def handle_info({:tick, tick_token}, %{tick_token: tick_token} = state)
@@ -184,6 +203,7 @@ defmodule Rondo.Orchestrator do
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_claude_update(running_entry, update)
+        updated_running_entry = record_ledger_claude_update(updated_running_entry, update)
 
         state =
           state
@@ -737,12 +757,20 @@ defmodule Rondo.Orchestrator do
 
   defp do_dispatch_issue(%State{} = state, issue, attempt) do
     recipient = self()
+    {ledger, dispatch_payload} = create_run_ledger(issue, attempt)
+    ledger = write_run_ledger_checkpoint(ledger, :dispatch, dispatch_payload)
 
     case Task.Supervisor.start_child(Rondo.TaskSupervisor, fn ->
            AgentRunner.run(issue, recipient, attempt: attempt)
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
+
+        ledger =
+          write_run_ledger_checkpoint(ledger, :spawned, %{
+            pid: inspect(pid),
+            attempt: normalize_retry_attempt(attempt)
+          })
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
 
@@ -755,6 +783,9 @@ defmodule Rondo.Orchestrator do
             identifier: issue.identifier,
             issue: issue,
             session_id: nil,
+            run_id: run_ledger_id(ledger),
+            run_dir: run_ledger_dir(ledger),
+            ledger: ledger,
             last_claude_message: nil,
             last_claude_timestamp: nil,
             last_claude_event: nil,
@@ -778,6 +809,8 @@ defmodule Rondo.Orchestrator do
         }
 
       {:error, reason} ->
+        ledger = complete_run_ledger(ledger, :failed, %{phase: "spawn", reason: inspect(reason)})
+        _ledger = ledger
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
         next_attempt = if is_integer(attempt), do: attempt + 1, else: nil
 
@@ -787,6 +820,69 @@ defmodule Rondo.Orchestrator do
         })
     end
   end
+
+  defp create_run_ledger(issue, attempt) do
+    payload = %{
+      issue_id: Map.get(issue, :id),
+      issue_identifier: Map.get(issue, :identifier),
+      attempt: normalize_retry_attempt(attempt)
+    }
+
+    case RunLedger.create_run(issue) do
+      {:ok, ledger} ->
+        {ledger, payload}
+
+      {:error, reason} ->
+        Logger.warning("Run ledger create failed for #{issue_context(issue)} reason=#{inspect(reason)}")
+        {nil, payload}
+    end
+  end
+
+  defp write_run_ledger_checkpoint(ledger, kind, payload, opts \\ [])
+  defp write_run_ledger_checkpoint(nil, _kind, _payload, _opts), do: nil
+
+  defp write_run_ledger_checkpoint(%RunLedger{} = ledger, kind, payload, opts) do
+    case RunLedger.write_checkpoint(ledger, kind, payload, opts) do
+      {:ok, ledger} ->
+        ledger
+
+      {:error, reason} ->
+        Logger.warning("Run ledger checkpoint failed run_id=#{ledger.run_id} kind=#{kind} reason=#{inspect(reason)}")
+        ledger
+    end
+  end
+
+  defp complete_run_ledger(nil, _status, _payload), do: nil
+
+  defp complete_run_ledger(%RunLedger{} = ledger, status, payload) do
+    case RunLedger.complete_run(ledger, status, payload) do
+      {:ok, ledger} ->
+        ledger
+
+      {:error, reason} ->
+        Logger.warning("Run ledger completion failed run_id=#{ledger.run_id} status=#{status} reason=#{inspect(reason)}")
+        ledger
+    end
+  end
+
+  defp link_run_ledger_archive(nil, _archive_path), do: nil
+
+  defp link_run_ledger_archive(%RunLedger{} = ledger, archive_path) do
+    case RunLedger.link_archive(ledger, archive_path) do
+      {:ok, ledger} ->
+        ledger
+
+      {:error, reason} ->
+        Logger.warning("Run ledger archive link failed run_id=#{ledger.run_id} reason=#{inspect(reason)}")
+        ledger
+    end
+  end
+
+  defp run_ledger_id(%RunLedger{run_id: run_id}), do: run_id
+  defp run_ledger_id(_ledger), do: nil
+
+  defp run_ledger_dir(%RunLedger{run_dir: run_dir}), do: run_dir
+  defp run_ledger_dir(_ledger), do: nil
 
   defp revalidate_issue_for_dispatch(%Issue{id: issue_id}, issue_fetcher, terminal_states)
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do
@@ -1073,6 +1169,8 @@ defmodule Rondo.Orchestrator do
           identifier: metadata.identifier,
           state: metadata.issue.state,
           session_id: metadata.session_id,
+          run_id: Map.get(metadata, :run_id),
+          run_dir: Map.get(metadata, :run_dir),
           claude_input_tokens: metadata.claude_input_tokens,
           claude_output_tokens: metadata.claude_output_tokens,
           claude_total_tokens: metadata.claude_total_tokens,
@@ -1170,6 +1268,34 @@ defmodule Rondo.Orchestrator do
       token_delta
     }
   end
+
+  defp record_ledger_claude_update(%{ledger: %RunLedger{} = ledger} = running_entry, update) do
+    case RunLedger.append_agent_event(ledger, update) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Run ledger agent event append failed run_id=#{ledger.run_id} reason=#{inspect(reason)}")
+    end
+
+    ledger =
+      case RunLedger.checkpoint_kind_for_agent_update(update) do
+        nil ->
+          ledger
+
+        kind ->
+          write_run_ledger_checkpoint(
+            ledger,
+            kind,
+            RunLedger.checkpoint_payload_for_agent_update(update),
+            source: RunLedger.checkpoint_source_for_agent_update(update)
+          )
+      end
+
+    Map.merge(running_entry, %{ledger: ledger, run_id: run_ledger_id(ledger), run_dir: run_ledger_dir(ledger)})
+  end
+
+  defp record_ledger_claude_update(running_entry, _update), do: running_entry
 
   defp session_id_for_update(_existing, %{session_id: session_id}) when is_binary(session_id),
     do: session_id
@@ -1401,7 +1527,16 @@ defmodule Rondo.Orchestrator do
       event_log: Map.get(running_entry, :event_log, [])
     }
 
-    persist_archived_run(archived_entry)
+    archive_path = persist_archived_run(archived_entry)
+
+    running_entry
+    |> Map.get(:ledger)
+    |> complete_run_ledger(run_ledger_status(reason), %{
+      exit_reason: archive_exit_reason(reason),
+      session_id: Map.get(running_entry, :session_id),
+      turn_count: Map.get(running_entry, :turn_count, 0)
+    })
+    |> link_run_ledger_archive(archive_path)
 
     # In-memory index: metadata only, no event_log
     index_entry = Map.delete(archived_entry, :event_log)
@@ -1414,6 +1549,10 @@ defmodule Rondo.Orchestrator do
   defp archive_exit_reason(:normal), do: "completed"
   defp archive_exit_reason(:terminated), do: "completed"
   defp archive_exit_reason(reason), do: "exited: #{inspect(reason)}"
+
+  defp run_ledger_status(:normal), do: :completed
+  defp run_ledger_status(:terminated), do: :terminated
+  defp run_ledger_status(_reason), do: :failed
 
   # --- Per-run file persistence ---
   # Layout: <archive_root>/<IDENTIFIER>/<timestamp>.json
@@ -1436,13 +1575,16 @@ defmodule Rondo.Orchestrator do
       {:ok, json} ->
         File.mkdir_p!(dir)
         File.write!(path, json)
+        path
 
       {:error, reason} ->
         Logger.warning("Failed to persist archived run for #{identifier}: #{inspect(reason)}")
+        nil
     end
   rescue
     error ->
       Logger.warning("Failed to persist archived run: #{Exception.message(error)}")
+      nil
   end
 
   @doc false
