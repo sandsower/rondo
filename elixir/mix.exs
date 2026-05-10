@@ -13,6 +13,7 @@ defmodule Rondo.MixProject do
         ],
         ignore_modules: [
           Rondo.Config,
+          Rondo.Debug,
           Rondo.Linear.Client,
           Rondo.SpecsCheck,
           Rondo.Orchestrator,
@@ -21,9 +22,23 @@ defmodule Rondo.MixProject do
           Rondo.CLI,
           Rondo.Claude.CLI,
           Rondo.Claude.StreamParser,
-          Rondo.StatusDashboard,
+          Rondo.HttpServer,
           Rondo.LogFile,
-          Rondo.Workspace
+          Rondo.PathSafety,
+          Rondo.StatusDashboard,
+          Rondo.TimeSeries,
+          RondoWeb.Endpoint,
+          RondoWeb.ErrorJSON,
+          Rondo.Workspace,
+          RondoWeb.DashboardLive,
+          RondoWeb.Layouts,
+          RondoWeb.ObservabilityApiController,
+          RondoWeb.ObservabilityPubSub,
+          RondoWeb.Presenter,
+          RondoWeb.Router,
+          RondoWeb.Router.Helpers,
+          RondoWeb.StaticAssetController,
+          RondoWeb.StaticAssets
         ]
       ],
       test_ignore_filters: [

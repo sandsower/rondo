@@ -6,6 +6,7 @@ defmodule Rondo.TimeSeriesTest do
   setup do
     table = :"test_ts_#{System.unique_integer([:positive])}"
     TimeSeries.init(table)
+
     on_exit(fn ->
       try do
         :ets.delete(table)
@@ -13,6 +14,7 @@ defmodule Rondo.TimeSeriesTest do
         _ -> :ok
       end
     end)
+
     %{table: table}
   end
 

@@ -1111,11 +1111,22 @@ defmodule Rondo.CoreTest do
   test "reconcile_missing_running_issue_ids requires threshold consecutive misses before terminating" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     {:ok, orch} = Orchestrator.start_link(name: Module.concat(__MODULE__, :MissingReconcile))
-    on_exit(fn -> if Process.alive?(orch), do: GenServer.stop(orch) end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    on_exit(fn ->
+      send(worker_pid, :done)
+      if Process.alive?(orch), do: Process.exit(orch, :kill)
+    end)
 
     # Inject a running entry
     running_entry = %{
-      pid: self(),
+      pid: worker_pid,
       ref: make_ref(),
       identifier: "MT-MISSING",
       issue: %Issue{id: "issue-missing", identifier: "MT-MISSING", state: "In Progress"},

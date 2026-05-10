@@ -1,6 +1,8 @@
 # Gleam rewrite design
 
-Status: Approved
+> Obsolete: the Gleam implementation was removed. Rondo development continues in `elixir/`.
+
+Status: Superseded
 Date: 2026-03-08
 
 ## Context

@@ -1764,7 +1764,16 @@ defmodule Rondo.OrchestratorStatusTest do
     send(pid, {:claude_worker_update, issue_id, %{event: :unknown, raw: %{}, timestamp: now}})
     send(pid, {:claude_worker_update, issue_id, %{event: :assistant, raw: %{}, timestamp: now}})
     send(pid, {:claude_worker_update, issue_id, %{event: :notification, payload: %{method: "tool_use"}, timestamp: now}})
-    send(pid, {:claude_worker_update, issue_id, %{event: :assistant, raw: %{"message" => %{"content" => [%{"type" => "text", "text" => "hello world"}]}}, timestamp: now}})
+
+    send(
+      pid,
+      {:claude_worker_update, issue_id,
+       %{
+         event: :assistant,
+         raw: %{"message" => %{"content" => [%{"type" => "text", "text" => "hello world"}]}},
+         timestamp: now
+       }}
+    )
 
     snapshot = GenServer.call(pid, :snapshot)
     assert %{running: [entry]} = snapshot
@@ -1858,7 +1867,14 @@ defmodule Rondo.OrchestratorStatusTest do
       claude_last_reported_output_tokens: 100,
       claude_last_reported_total_tokens: 150,
       started_at: DateTime.utc_now(),
-      event_log: [%{at: DateTime.utc_now(), event: :session_started, message: "test", tokens: %{}}]
+      event_log: [
+        %{
+          at: DateTime.utc_now(),
+          event: :session_started,
+          message: "test",
+          tokens: %{input_tokens: 100, output_tokens: 50, total_tokens: 150}
+        }
+      ]
     }
 
     :sys.replace_state(pid, fn _ ->
@@ -1875,7 +1891,7 @@ defmodule Rondo.OrchestratorStatusTest do
 
     snapshot = GenServer.call(pid, :snapshot)
     assert snapshot.running == []
-    assert length(snapshot.archived) >= 1
+    assert snapshot.archived != []
 
     archived = Enum.find(snapshot.archived, &(&1.identifier == "MT-401"))
     assert archived != nil
@@ -1894,6 +1910,14 @@ defmodule Rondo.OrchestratorStatusTest do
       |> Kernel.<>(".json")
 
     assert {:ok, full_run} = Rondo.Orchestrator.load_archived_run("MT-401", filename)
-    assert length(full_run.event_log) == 1
+    assert [event] = full_run.event_log
+    assert event.event == :session_started
+    assert event.tokens.total_tokens == 150
+  end
+
+  test "archived run loader rejects path traversal" do
+    assert {:error, :invalid_path} = Rondo.Orchestrator.load_archived_run("../outside", "run.json")
+    assert {:error, :invalid_path} = Rondo.Orchestrator.load_archived_run("MT-401", "../outside.json")
+    assert {:error, :invalid_path} = Rondo.Orchestrator.load_archived_run("MT-401", "..")
   end
 end

@@ -216,7 +216,9 @@ defmodule RondoWeb.Presenter do
   defp run_filename(started_at) when is_binary(started_at) do
     # Parse and truncate to match the file naming (seconds only, no microseconds)
     case DateTime.from_iso8601(started_at) do
-      {:ok, dt, _} -> run_filename(dt)
+      {:ok, dt, _} ->
+        run_filename(dt)
+
       _ ->
         started_at
         |> String.replace(~r/[:\.]/, "-")
@@ -240,26 +242,42 @@ defmodule RondoWeb.Presenter do
     end)
   end
 
-  defp refine_event_from_message(event, message) when event in [:assistant, "assistant"] and is_binary(message) do
+  defp format_event_log(_), do: []
+
+  defp refine_event_from_message(event, message)
+       when event in [:assistant, "assistant"] and is_binary(message) do
     cond do
-      String.contains?(message, "linear") or String.contains?(message, "Linear") -> :linear
-      String.starts_with?(message, "$ gh ") or String.starts_with?(message, "$ git ") -> :github
+      linear_message?(message) -> :linear
+      github_message?(message) -> :github
       String.starts_with?(message, "$ ") -> :bash
-      String.starts_with?(message, "Read ") -> :read
-      String.starts_with?(message, "Write ") -> :write
-      String.starts_with?(message, "Edit ") -> :edit
-      String.starts_with?(message, "Grep ") -> :grep
-      String.starts_with?(message, "Glob ") -> :glob
-      String.starts_with?(message, "Agent") -> :agent
-      String.starts_with?(message, "ToolSearch") -> :tool
-      String.starts_with?(message, "mcp__") -> :tool
-      true -> :assistant
+      true -> prefixed_event_label(message) || :assistant
     end
   end
 
   defp refine_event_from_message(event, _message), do: event
 
-  defp format_event_log(_), do: []
+  defp linear_message?(message), do: String.contains?(message, "linear") or String.contains?(message, "Linear")
+
+  defp github_message?(message), do: String.starts_with?(message, "$ gh ") or String.starts_with?(message, "$ git ")
+
+  defp prefixed_event_label(message) do
+    Enum.find_value(event_prefixes(), fn {prefix, event} ->
+      if String.starts_with?(message, prefix), do: event
+    end)
+  end
+
+  defp event_prefixes do
+    [
+      {"Read ", :read},
+      {"Write ", :write},
+      {"Edit ", :edit},
+      {"Grep ", :grep},
+      {"Glob ", :glob},
+      {"Agent", :agent},
+      {"ToolSearch", :tool},
+      {"mcp__", :tool}
+    ]
+  end
 
   defp summarize_message(%{message: message}) when is_binary(message), do: message
   defp summarize_message(message) when is_binary(message), do: message
@@ -288,12 +306,13 @@ defmodule RondoWeb.Presenter do
   def token_timeseries do
     samples = Rondo.TimeSeries.read()
 
-    labels = Enum.map(samples, fn s ->
-      case s.at do
-        %DateTime{} = dt -> Calendar.strftime(dt, "%H:%M:%S")
-        _ -> ""
-      end
-    end)
+    labels =
+      Enum.map(samples, fn s ->
+        case s.at do
+          %DateTime{} = dt -> Calendar.strftime(dt, "%H:%M:%S")
+          _ -> ""
+        end
+      end)
 
     %{
       labels: labels,
@@ -306,12 +325,13 @@ defmodule RondoWeb.Presenter do
   def session_timeseries do
     samples = Rondo.TimeSeries.read()
 
-    labels = Enum.map(samples, fn s ->
-      case s.at do
-        %DateTime{} = dt -> Calendar.strftime(dt, "%H:%M:%S")
-        _ -> ""
-      end
-    end)
+    labels =
+      Enum.map(samples, fn s ->
+        case s.at do
+          %DateTime{} = dt -> Calendar.strftime(dt, "%H:%M:%S")
+          _ -> ""
+        end
+      end)
 
     %{
       labels: labels,
@@ -334,17 +354,10 @@ defmodule RondoWeb.Presenter do
   @spec run_token_comparison(list()) :: map()
   def run_token_comparison(runs) when is_list(runs) do
     %{
-      labels: runs |> Enum.with_index(1) |> Enum.map(fn {r, i} ->
-        time = case r[:started_at] do
-          s when is_binary(s) ->
-            case DateTime.from_iso8601(s) do
-              {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M")
-              _ -> "Run #{i}"
-            end
-          _ -> "Run #{i}"
-        end
-        "Run #{i} (#{time})"
-      end),
+      labels:
+        runs
+        |> Enum.with_index(1)
+        |> Enum.map(fn {r, i} -> run_label(r, i) end),
       input: Enum.map(runs, fn r -> get_in(r, [:tokens, :input_tokens]) || 0 end),
       output: Enum.map(runs, fn r -> get_in(r, [:tokens, :output_tokens]) || 0 end)
     }
@@ -355,31 +368,40 @@ defmodule RondoWeb.Presenter do
   @spec run_duration_comparison(list()) :: map()
   def run_duration_comparison(runs) when is_list(runs) do
     %{
-      labels: runs |> Enum.with_index(1) |> Enum.map(fn {r, i} ->
-        time = case r[:started_at] do
-          s when is_binary(s) ->
-            case DateTime.from_iso8601(s) do
-              {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M")
-              _ -> "Run #{i}"
-            end
-          _ -> "Run #{i}"
-        end
-        "Run #{i} (#{time})"
-      end),
-      durations: Enum.map(runs, fn r ->
-        case {r[:started_at], r[:finished_at]} do
-          {s, f} when is_binary(s) and is_binary(f) ->
-            with {:ok, s_dt, _} <- DateTime.from_iso8601(s),
-                 {:ok, f_dt, _} <- DateTime.from_iso8601(f) do
-              DateTime.diff(f_dt, s_dt, :second)
-            else
-              _ -> 0
-            end
-          _ -> 0
-        end
-      end)
+      labels:
+        runs
+        |> Enum.with_index(1)
+        |> Enum.map(fn {r, i} -> run_label(r, i) end),
+      durations:
+        Enum.map(runs, fn r ->
+          case {r[:started_at], r[:finished_at]} do
+            {s, f} when is_binary(s) and is_binary(f) ->
+              with {:ok, s_dt, _} <- DateTime.from_iso8601(s),
+                   {:ok, f_dt, _} <- DateTime.from_iso8601(f) do
+                DateTime.diff(f_dt, s_dt, :second)
+              else
+                _ -> 0
+              end
+
+            _ ->
+              0
+          end
+        end)
     }
   end
 
   def run_duration_comparison(_), do: %{labels: [], durations: []}
+
+  defp run_label(run, index) do
+    case run[:started_at] do
+      timestamp when is_binary(timestamp) ->
+        case DateTime.from_iso8601(timestamp) do
+          {:ok, dt, _} -> "Run #{index} (#{Calendar.strftime(dt, "%H:%M")})"
+          _ -> "Run #{index}"
+        end
+
+      _ ->
+        "Run #{index}"
+    end
+  end
 end

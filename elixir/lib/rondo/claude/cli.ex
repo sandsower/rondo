@@ -284,6 +284,7 @@ defmodule Rondo.Claude.CLI do
     case :os.type() do
       {:win32, _} ->
         "exec " <> escaped_args
+
       _ ->
         "exec script -qfec #{shell_escape(escaped_args)} /dev/null"
     end
