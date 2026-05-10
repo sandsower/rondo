@@ -728,14 +728,14 @@ defmodule Rondo.Orchestrator do
   end
 
   defp terminal_state_set do
-    Config.linear_terminal_states()
+    Config.tracker_terminal_states()
     |> Enum.map(&normalize_issue_state/1)
     |> Enum.filter(&(&1 != ""))
     |> MapSet.new()
   end
 
   defp active_state_set do
-    Config.linear_active_states()
+    Config.tracker_active_states()
     |> Enum.map(&normalize_issue_state/1)
     |> Enum.filter(&(&1 != ""))
     |> MapSet.new()
@@ -1023,7 +1023,7 @@ defmodule Rondo.Orchestrator do
   defp cleanup_issue_workspace(_identifier), do: :ok
 
   defp run_terminal_workspace_cleanup do
-    case Tracker.fetch_issues_by_states(Config.linear_terminal_states()) do
+    case Tracker.fetch_issues_by_states(Config.tracker_terminal_states()) do
       {:ok, issues} ->
         issues
         |> Enum.each(fn

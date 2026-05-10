@@ -13,7 +13,7 @@ This directory contains the current Elixir/OTP implementation of Rondo, based on
 
 ## How it works
 
-1. Polls Linear for candidate work
+1. Polls Linear or GitHub Issues for candidate work
 2. Creates an isolated workspace per issue
 3. Launches Claude Code as a CLI subprocess inside the workspace
 4. Sends a workflow prompt to Claude Code
@@ -109,6 +109,39 @@ You are working on a Linear issue {{ issue.identifier }}.
 Title: {{ issue.title }} Body: {{ issue.description }}
 ```
 
+GitHub Issues can also be used as the tracker. Rondo uses the `gh` CLI, GitHub labels for
+workflow state, and `gh issue comment` for basic issue comments:
+
+```md
+---
+tracker:
+  kind: github
+  repo: "owner/repo"
+  label_filter:
+    - rondo
+  state_label_prefix: "status:"
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+    - Closed
+workspace:
+  root: ~/code/rondo-workspaces
+claude:
+  command: claude
+---
+
+You are working on a GitHub issue {{ issue.identifier }}.
+```
+
+For GitHub, every configured `label_filter` label is required. Rondo reads the issue workflow state
+from exactly one label with the configured prefix, such as `status: Todo`; candidate polling skips
+issues with no state label or multiple state labels. State transitions replace only prefixed state
+labels, create the target state label if missing, and leave all other labels untouched. Native
+GitHub `open`/`closed` state is used as an outer filter; label state is Rondo's workflow source of
+truth. See [`examples/github-WORKFLOW.md`](examples/github-WORKFLOW.md) for a fuller prompt.
+
 Notes:
 
 - If a value is omitted or set to `null`, defaults are used. Explicit malformed values fail
@@ -135,6 +168,8 @@ Notes:
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- `tracker.repo` is required for `tracker.kind: github` and uses `owner/repo` syntax.
+- `tracker.state_label_prefix` defaults to `status:` for GitHub label-emulated workflow states.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `claude.command` stays a shell command string and any `$VAR` expansion there happens in the

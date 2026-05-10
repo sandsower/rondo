@@ -176,7 +176,7 @@ defmodule Rondo.AgentRunner do
   defp active_issue_state?(state_name) when is_binary(state_name) do
     normalized_state = normalize_issue_state(state_name)
 
-    Config.linear_active_states()
+    Config.tracker_active_states()
     |> Enum.any?(fn active_state -> normalize_issue_state(active_state) == normalized_state end)
   end
 

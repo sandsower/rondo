@@ -14,6 +14,8 @@ defmodule Rondo.MixProject do
         ignore_modules: [
           Rondo.Config,
           Rondo.Debug,
+          Rondo.GitHub.Adapter,
+          Rondo.GitHub.Client,
           Rondo.Linear.Client,
           Rondo.SpecsCheck,
           Rondo.Orchestrator,

@@ -816,6 +816,41 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Config.tracker_label_filter() == ["rondo", "autofix"]
   end
 
+  test "config supports github tracker settings" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_project_slug: nil,
+      tracker_repo: "sandsower/memento-vault",
+      tracker_state_label_prefix: "status:",
+      tracker_active_states: ["Todo", "In Progress"],
+      tracker_terminal_states: ["Done", "Closed"]
+    )
+
+    assert Config.tracker_kind() == "github"
+    assert Config.tracker_repo() == "sandsower/memento-vault"
+    assert Config.tracker_state_label_prefix() == "status:"
+    assert Config.tracker_active_states() == ["Todo", "In Progress"]
+    assert Config.tracker_terminal_states() == ["Done", "Closed"]
+    assert Config.validate!() == :ok
+    assert Tracker.adapter() == Rondo.GitHub.Adapter
+  end
+
+  test "config requires repo for github tracker" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_project_slug: nil,
+      tracker_repo: nil
+    )
+
+    assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.repo"}]}} = Config.validate!()
+  end
+
+  test "linear tracker still routes to linear adapter" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
+
+    assert Tracker.adapter() == Rondo.Linear.Adapter
+  end
+
   test "config returns empty list when tracker label_filter is nil" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_label_filter: nil)
 

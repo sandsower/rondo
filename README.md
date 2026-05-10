@@ -23,7 +23,7 @@ work instead of supervising coding agents.
 
 ## What it does
 
-Rondo polls Linear for issues, creates an isolated workspace for each one, and launches a
+Rondo polls a configured tracker (Linear or GitHub Issues) for issues, creates an isolated workspace for each one, and launches a
 Claude Code session to do the work. When the agent finishes, it moves the ticket forward
 (opens a PR, requests review, etc.). Multiple agents run concurrently.
 

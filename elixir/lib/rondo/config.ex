@@ -41,6 +41,7 @@ defmodule Rondo.Config do
   @default_observability_refresh_ms 1_000
   @default_observability_render_interval_ms 16
   @default_server_host "127.0.0.1"
+  @default_github_state_label_prefix "status:"
   @workflow_options_schema NimbleOptions.new!(
                              tracker: [
                                type: :map,
@@ -50,6 +51,8 @@ defmodule Rondo.Config do
                                  endpoint: [type: :string, default: @default_linear_endpoint],
                                  api_key: [type: {:or, [:string, nil]}, default: nil],
                                  project_slug: [type: {:or, [:string, nil]}, default: nil],
+                                 repo: [type: {:or, [:string, nil]}, default: nil],
+                                 state_label_prefix: [type: :string, default: @default_github_state_label_prefix],
                                  assignee: [type: {:or, [:string, nil]}, default: nil],
                                  active_states: [
                                    type: {:list, :string},
@@ -204,15 +207,31 @@ defmodule Rondo.Config do
     |> normalize_secret_value()
   end
 
-  @spec linear_active_states() :: [String.t()]
-  def linear_active_states do
+  @spec tracker_repo() :: String.t() | nil
+  def tracker_repo do
+    get_in(validated_workflow_options(), [:tracker, :repo])
+  end
+
+  @spec tracker_state_label_prefix() :: String.t()
+  def tracker_state_label_prefix do
+    get_in(validated_workflow_options(), [:tracker, :state_label_prefix])
+  end
+
+  @spec tracker_active_states() :: [String.t()]
+  def tracker_active_states do
     get_in(validated_workflow_options(), [:tracker, :active_states])
   end
 
-  @spec linear_terminal_states() :: [String.t()]
-  def linear_terminal_states do
+  @spec tracker_terminal_states() :: [String.t()]
+  def tracker_terminal_states do
     get_in(validated_workflow_options(), [:tracker, :terminal_states])
   end
+
+  @spec linear_active_states() :: [String.t()]
+  def linear_active_states, do: tracker_active_states()
+
+  @spec linear_terminal_states() :: [String.t()]
+  def linear_terminal_states, do: tracker_terminal_states()
 
   @spec tracker_label_filter() :: [String.t()]
   def tracker_label_filter do
@@ -386,7 +405,8 @@ defmodule Rondo.Config do
     with {:ok, options} <- validate_workflow_options(workflow, path),
          :ok <- require_tracker_kind(options, path),
          :ok <- require_linear_token(options, path),
-         :ok <- require_linear_project(options, path) do
+         :ok <- require_linear_project(options, path),
+         :ok <- require_github_repo(options, path) do
       require_claude_command(options, path)
     end
   end
@@ -409,6 +429,7 @@ defmodule Rondo.Config do
     case get_in(options, [:tracker, :kind]) do
       "linear" -> :ok
       "memory" -> :ok
+      "github" -> :ok
       nil -> {:error, :missing_tracker_kind}
       other -> {:error, {:unsupported_tracker_kind, other}}
     end
@@ -446,6 +467,20 @@ defmodule Rondo.Config do
     end
   end
 
+  defp require_github_repo(options) do
+    case get_in(options, [:tracker, :kind]) do
+      "github" ->
+        if is_binary(get_in(options, [:tracker, :repo])) do
+          :ok
+        else
+          {:error, :missing_github_repo}
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
   defp require_claude_command(options) do
     case get_in(options, [:claude, :command]) do
       command when is_binary(command) ->
@@ -469,7 +504,7 @@ defmodule Rondo.Config do
         {:error, invalid_workflow_config(path, [config_error("tracker.kind", nil, "is required")])}
 
       {:error, {:unsupported_tracker_kind, kind}} ->
-        error = config_error("tracker.kind", kind, "must be linear or memory")
+        error = config_error("tracker.kind", kind, "must be linear, memory, or github")
         {:error, invalid_workflow_config(path, [error])}
     end
   end
@@ -492,6 +527,17 @@ defmodule Rondo.Config do
 
       {:error, :missing_linear_project_slug} ->
         error = config_error("tracker.project_slug", nil, "is required for linear tracker")
+        {:error, invalid_workflow_config(path, [error])}
+    end
+  end
+
+  defp require_github_repo(options, path) do
+    case require_github_repo(options) do
+      :ok ->
+        :ok
+
+      {:error, :missing_github_repo} ->
+        error = config_error("tracker.repo", nil, "is required for github tracker")
         {:error, invalid_workflow_config(path, [error])}
     end
   end
@@ -565,6 +611,8 @@ defmodule Rondo.Config do
     |> put_if_present(:endpoint, scalar_string_value(Map.get(section, "endpoint")))
     |> put_if_present(:api_key, binary_value(Map.get(section, "api_key"), allow_empty: true))
     |> put_if_present(:project_slug, scalar_string_value(Map.get(section, "project_slug")))
+    |> put_if_present(:repo, scalar_string_value(Map.get(section, "repo")))
+    |> put_if_present(:state_label_prefix, scalar_string_value(Map.get(section, "state_label_prefix")))
     |> put_if_present(:active_states, csv_value(Map.get(section, "active_states")))
     |> put_if_present(:terminal_states, csv_value(Map.get(section, "terminal_states")))
     |> put_if_present(:label_filter, label_filter_value(Map.get(section, "label_filter")))
@@ -656,6 +704,8 @@ defmodule Rondo.Config do
       validate_string_field(tracker, "tracker.endpoint"),
       validate_string_field(tracker, "tracker.api_key", allow_empty: true),
       validate_string_field(tracker, "tracker.project_slug"),
+      validate_string_field(tracker, "tracker.repo"),
+      validate_string_field(tracker, "tracker.state_label_prefix"),
       validate_string_field(tracker, "tracker.assignee"),
       validate_non_empty_string_or_string_list_field(tracker, "tracker.active_states"),
       validate_non_empty_string_or_string_list_field(tracker, "tracker.terminal_states"),
