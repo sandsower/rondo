@@ -96,6 +96,18 @@ defmodule Rondo.CoreTest do
     assert Config.linear_api_token() == env_api_key
     assert Config.linear_project_slug() == "project"
     assert :ok = Config.validate!()
+
+    missing_api_key_env_var = "RONDO_MISSING_LINEAR_API_KEY_#{System.unique_integer([:positive])}"
+    System.delete_env(missing_api_key_env_var)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: "$#{missing_api_key_env_var}",
+      tracker_project_slug: "project",
+      claude_command: "/usr/bin/claude"
+    )
+
+    assert Config.linear_api_token() == nil
+    assert {:error, :missing_linear_api_token} = Config.validate!()
   end
 
   test "linear assignee resolves from LINEAR_ASSIGNEE env var" do

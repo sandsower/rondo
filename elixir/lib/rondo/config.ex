@@ -184,7 +184,7 @@ defmodule Rondo.Config do
   def linear_api_token do
     validated_workflow_options()
     |> get_in([:tracker, :api_key])
-    |> resolve_env_value(System.get_env("LINEAR_API_KEY"))
+    |> resolve_secret_env_value(System.get_env("LINEAR_API_KEY"))
     |> normalize_secret_value()
   end
 
@@ -420,7 +420,7 @@ defmodule Rondo.Config do
       "linear" ->
         options
         |> get_in([:tracker, :api_key])
-        |> resolve_env_value(System.get_env("LINEAR_API_KEY"))
+        |> resolve_secret_env_value(System.get_env("LINEAR_API_KEY"))
         |> normalize_secret_value()
         |> is_binary()
         |> case do
@@ -1102,6 +1102,29 @@ defmodule Rondo.Config do
   defp uri_path?(path) do
     String.match?(to_string(path), ~r/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//)
   end
+
+  defp resolve_secret_env_value(:missing, fallback), do: fallback
+  defp resolve_secret_env_value(nil, fallback), do: fallback
+
+  defp resolve_secret_env_value(value, _fallback) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    case env_reference_name(trimmed) do
+      {:ok, env_name} ->
+        env_name
+        |> System.get_env()
+        |> then(fn
+          nil -> nil
+          "" -> nil
+          env_value -> env_value
+        end)
+
+      :error ->
+        trimmed
+    end
+  end
+
+  defp resolve_secret_env_value(_value, fallback), do: fallback
 
   defp resolve_env_value(:missing, fallback), do: fallback
   defp resolve_env_value(nil, fallback), do: fallback

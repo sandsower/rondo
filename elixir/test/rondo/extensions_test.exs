@@ -146,10 +146,14 @@ defmodule Rondo.ExtensionsTest do
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
     on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
 
+    missing_api_key_env_var = "RONDO_MISSING_LINEAR_API_KEY_#{System.unique_integer([:positive])}"
+    System.delete_env(missing_api_key_env_var)
+
     cases = [
       {"---\ntracker:\n  api_key: token\n  project_slug: project\n---\nMissing kind\n", "tracker.kind", :keep_env},
       {"---\ntracker:\n  kind: unknown\n  api_key: token\n  project_slug: project\n---\nBad kind\n", "tracker.kind", :keep_env},
       {"---\ntracker:\n  kind: linear\n  project_slug: project\n---\nMissing token\n", "tracker.api_key", :clear_env},
+      {"---\ntracker:\n  kind: linear\n  api_key: \"$#{missing_api_key_env_var}\"\n  project_slug: project\n---\nMissing token env\n", "tracker.api_key", :keep_env},
       {"---\ntracker:\n  kind: linear\n  api_key: token\n---\nMissing project\n", "tracker.project_slug", :keep_env}
     ]
 
