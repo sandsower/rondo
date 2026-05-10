@@ -34,8 +34,12 @@ defmodule Rondo.AgentRunner do
     end
   end
 
-  defp claude_event_handler(recipient, issue) do
+  defp claude_event_handler(recipient, issue, completion_ref \\ nil) do
     fn event ->
+      if Map.get(event, :event_type) == :invocation_completed and is_reference(completion_ref) do
+        Process.put(completion_ref, true)
+      end
+
       send_claude_update(recipient, issue, event)
     end
   end
@@ -113,17 +117,23 @@ defmodule Rondo.AgentRunner do
   defp do_run_agent_turns(context, issue, turn_number, run_ref) do
     prompt = build_turn_prompt(issue, context.opts, turn_number, context.max_turns)
 
+    completion_ref = make_ref()
+    Process.put(completion_ref, false)
+
     result =
       context.adapter.invoke(%{
         prompt: prompt,
         workspace: context.workspace,
         previous_run_ref: run_ref,
-        on_event: claude_event_handler(context.claude_update_recipient, issue),
+        on_event: claude_event_handler(context.claude_update_recipient, issue, completion_ref),
         opts: context.opts
       })
 
+    completion_observed? = Process.get(completion_ref, false)
+    Process.delete(completion_ref)
+
     case result do
-      {:ok, %{run_ref: new_run_ref}} ->
+      {:ok, %{run_ref: new_run_ref} = invocation_result} ->
         effective_run_ref = new_run_ref || run_ref
         provider_ref = if effective_run_ref, do: Map.get(effective_run_ref, :provider_ref)
 
@@ -132,11 +142,35 @@ defmodule Rondo.AgentRunner do
             "provider_ref=#{provider_ref} workspace=#{context.workspace} turn=#{turn_number}/#{context.max_turns}"
         )
 
+        maybe_send_invocation_result_update(
+          context.claude_update_recipient,
+          issue,
+          context.adapter,
+          invocation_result,
+          completion_observed?
+        )
+
         continue_agent_turns(context, issue, turn_number, effective_run_ref)
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp maybe_send_invocation_result_update(_recipient, _issue, _adapter, _invocation_result, true), do: :ok
+
+  defp maybe_send_invocation_result_update(recipient, issue, adapter, invocation_result, false) do
+    :invocation_completed
+    |> Adapter.event(
+      adapter: adapter.id(),
+      run_ref: Map.get(invocation_result, :run_ref),
+      usage: Map.get(invocation_result, :usage),
+      capabilities: Map.get(invocation_result, :capabilities),
+      final_report: Map.get(invocation_result, :final_report),
+      diff_source: Map.get(invocation_result, :diff_source),
+      raw: Map.get(invocation_result, :raw, %{})
+    )
+    |> claude_event_handler(recipient, issue).()
   end
 
   defp continue_agent_turns(context, issue, turn_number, effective_run_ref) do

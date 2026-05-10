@@ -94,6 +94,7 @@ hooks:
   after_create: |
     git clone git@github.com:your-org/your-repo.git .
 agent:
+  adapter: claude_code
   max_concurrent_agents: 10
   max_turns: 20
 claude:

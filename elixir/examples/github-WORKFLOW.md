@@ -18,6 +18,7 @@ hooks:
   after_create: |
     git clone --depth 1 git@github.com:owner/repo.git .
 agent:
+  adapter: claude_code
   max_concurrent_agents: 2
   max_turns: 20
 claude:
