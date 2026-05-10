@@ -159,10 +159,10 @@ defmodule Rondo.RunLedger do
   @spec checkpoint_payload_for_agent_update(map()) :: map()
   def checkpoint_payload_for_agent_update(update) when is_map(update) do
     %{
-      event: Map.get(update, :event),
-      session_id: Map.get(update, :session_id),
-      usage: sanitize_value(Map.get(update, :usage)),
-      raw: sanitize_agent_raw(Map.get(update, :raw, %{}))
+      event: Map.get(update, :event, Map.get(update, "event")),
+      session_id: Map.get(update, :session_id, Map.get(update, "session_id")),
+      usage: sanitize_value(Map.get(update, :usage, Map.get(update, "usage"))),
+      raw: sanitize_agent_raw(Map.get(update, :raw, Map.get(update, "raw", %{})))
     }
   end
 
@@ -170,7 +170,7 @@ defmodule Rondo.RunLedger do
   def checkpoint_source_for_agent_update(update) when is_map(update) do
     %{
       adapter: "claude_code",
-      event: raw_method(update) || kind_to_string(Map.get(update, :event))
+      event: raw_method(update) || kind_to_string(Map.get(update, :event, Map.get(update, "event")))
     }
   end
 
@@ -224,12 +224,15 @@ defmodule Rondo.RunLedger do
         "workspace" => Path.expand(workspace)
       },
       "tracker" => %{"adapter" => Keyword.get(opts, :tracker_adapter, Config.tracker_kind())},
-      "agent" => %{"adapter" => Keyword.get(opts, :agent_adapter, "claude_code"), "session_id" => nil},
+      "agent" => %{
+        "adapter" => Keyword.get(opts, :agent_adapter, "claude_code"),
+        "session_id" => Keyword.get(opts, :agent_session_id)
+      },
       "mode" => mode_snapshot(opts),
       "timestamps" => %{
         "created_at" => iso_timestamp,
         "updated_at" => iso_timestamp,
-        "started_at" => nil,
+        "started_at" => opts |> Keyword.get(:started_at, iso_timestamp) |> datetime_to_iso(),
         "finished_at" => nil
       },
       "checkpoints" => [],

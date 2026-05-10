@@ -13,7 +13,9 @@ defmodule Rondo.RunLedgerTest do
              RunLedger.create_run(issue,
                workspace_root: workspace_root,
                now: @now,
-               random_suffix: "a1b2c3d4"
+               random_suffix: "a1b2c3d4",
+               agent_session_id: "session-abc",
+               started_at: "2026-05-10T15:30:01Z"
              )
 
     assert ledger.run_id == "MT-401-20260510T153012Z-a1b2c3d4"
@@ -27,6 +29,8 @@ defmodule Rondo.RunLedgerTest do
     assert manifest["issue"]["identifier"] == "MT-401"
     assert manifest["issue"]["title"] == "Durable ledger"
     assert manifest["repo"]["workspace_root"] == Path.expand(workspace_root)
+    assert manifest["agent"]["session_id"] == "session-abc"
+    assert manifest["timestamps"]["started_at"] == "2026-05-10T15:30:01Z"
     assert manifest["checkpoints"] == []
 
     assert {:ok, ledger} =
@@ -149,6 +153,27 @@ defmodule Rondo.RunLedgerTest do
     assert RunLedger.checkpoint_kind_for_agent_update(%{event: :result}) == "turn_completed"
     assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "result"}) == "turn_completed"
     assert RunLedger.checkpoint_kind_for_agent_update(%{event: :unknown}) == nil
+  end
+
+  test "agent update checkpoint helpers accept string-keyed maps" do
+    update = %{
+      "event" => "result",
+      "session_id" => "session-json",
+      "usage" => %{"input_tokens" => 11},
+      "raw" => %{"method" => "turn/completed", "result" => "private result"}
+    }
+
+    assert RunLedger.checkpoint_payload_for_agent_update(update) == %{
+             event: "result",
+             session_id: "session-json",
+             usage: %{"input_tokens" => 11},
+             raw: %{"method" => "turn/completed", "result" => "[REDACTED]"}
+           }
+
+    assert RunLedger.checkpoint_source_for_agent_update(update) == %{
+             adapter: "claude_code",
+             event: "turn/completed"
+           }
   end
 
   test "load_manifest accepts either run directory or manifest path" do

@@ -847,7 +847,7 @@ defmodule Rondo.Orchestrator do
         ledger
 
       {:error, reason} ->
-        Logger.warning("Run ledger checkpoint failed run_id=#{ledger.run_id} kind=#{kind} reason=#{inspect(reason)}")
+        Logger.warning("Run ledger checkpoint failed #{ledger_context(ledger)} kind=#{kind} reason=#{inspect(reason)}")
         ledger
     end
   end
@@ -860,7 +860,7 @@ defmodule Rondo.Orchestrator do
         ledger
 
       {:error, reason} ->
-        Logger.warning("Run ledger completion failed run_id=#{ledger.run_id} status=#{status} reason=#{inspect(reason)}")
+        Logger.warning("Run ledger completion failed #{ledger_context(ledger)} status=#{status} reason=#{inspect(reason)}")
         ledger
     end
   end
@@ -873,7 +873,7 @@ defmodule Rondo.Orchestrator do
         ledger
 
       {:error, reason} ->
-        Logger.warning("Run ledger archive link failed run_id=#{ledger.run_id} reason=#{inspect(reason)}")
+        Logger.warning("Run ledger archive link failed #{ledger_context(ledger)} reason=#{inspect(reason)}")
         ledger
     end
   end
@@ -1117,6 +1117,17 @@ defmodule Rondo.Orchestrator do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
 
+  defp ledger_context(%RunLedger{} = ledger, session_id_override \\ nil) do
+    issue = Map.get(ledger.manifest, "issue") || %{}
+    agent = Map.get(ledger.manifest, "agent") || %{}
+
+    issue_id = Map.get(issue, "id") || "n/a"
+    issue_identifier = Map.get(issue, "identifier") || "n/a"
+    session_id = session_id_override || Map.get(agent, "session_id") || "n/a"
+
+    "run_id=#{ledger.run_id} issue_id=#{issue_id} issue_identifier=#{issue_identifier} session_id=#{session_id}"
+  end
+
   defp available_slots(%State{} = state) do
     max(
       (state.max_concurrent_agents || Config.max_concurrent_agents()) - map_size(state.running),
@@ -1275,7 +1286,8 @@ defmodule Rondo.Orchestrator do
         :ok
 
       {:error, reason} ->
-        Logger.warning("Run ledger agent event append failed run_id=#{ledger.run_id} reason=#{inspect(reason)}")
+        session_id = Map.get(update, :session_id, Map.get(update, "session_id"))
+        Logger.warning("Run ledger agent event append failed #{ledger_context(ledger, session_id)} reason=#{inspect(reason)}")
     end
 
     ledger =
@@ -1547,7 +1559,7 @@ defmodule Rondo.Orchestrator do
   end
 
   defp archive_exit_reason(:normal), do: "completed"
-  defp archive_exit_reason(:terminated), do: "completed"
+  defp archive_exit_reason(:terminated), do: "terminated"
   defp archive_exit_reason(reason), do: "exited: #{inspect(reason)}"
 
   defp run_ledger_status(:normal), do: :completed
