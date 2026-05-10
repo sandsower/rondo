@@ -152,28 +152,76 @@ defmodule Rondo.RunLedgerTest do
     assert RunLedger.checkpoint_kind_for_agent_update(%{event: :session_started}) == "turn_started"
     assert RunLedger.checkpoint_kind_for_agent_update(%{event: :result}) == "turn_completed"
     assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "result"}) == "turn_completed"
+    assert RunLedger.checkpoint_kind_for_agent_update(%{event: :invocation_completed}) == "turn_completed"
+    assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "invocation_failed"}) == "turn_failed"
     assert RunLedger.checkpoint_kind_for_agent_update(%{event: :unknown}) == nil
   end
 
   test "agent update checkpoint helpers accept string-keyed maps" do
     update = %{
       "event" => "result",
+      "adapter" => "fake",
+      "run_ref" => %{"adapter" => "fake", "provider_ref" => "run-1", "provider_ref_kind" => "thread_id", "resumable?" => true},
       "session_id" => "session-json",
       "usage" => %{"input_tokens" => 11},
+      "capabilities" => %{"resume" => "thread_id"},
+      "final_report" => "done",
       "raw" => %{"method" => "turn/completed", "result" => "private result"}
     }
 
     assert RunLedger.checkpoint_payload_for_agent_update(update) == %{
              event: "result",
+             adapter: "fake",
+             run_ref: %{"adapter" => "fake", "provider_ref" => "run-1", "provider_ref_kind" => "thread_id", "resumable?" => true},
              session_id: "session-json",
              usage: %{"input_tokens" => 11},
+             capabilities: %{"resume" => "thread_id"},
+             final_report: "done",
              raw: %{"method" => "turn/completed", "result" => "[REDACTED]"}
            }
 
     assert RunLedger.checkpoint_source_for_agent_update(update) == %{
-             adapter: "claude_code",
+             adapter: "fake",
              event: "turn/completed"
            }
+
+    assert RunLedger.agent_metadata_for_agent_update(update) == %{
+             "adapter" => "fake",
+             "run_ref" => %{"adapter" => "fake", "provider_ref" => "run-1", "provider_ref_kind" => "thread_id", "resumable?" => true},
+             "session_id" => "session-json",
+             "usage" => %{"input_tokens" => 11},
+             "capabilities" => %{"resume" => "thread_id"},
+             "final_report" => "done"
+           }
+  end
+
+  test "update_agent_metadata records adapter run ref capabilities and final report in manifest" do
+    workspace_root = tmp_dir("ledger-agent-metadata")
+    issue = issue_fixture()
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "ca11ab1e"
+             )
+
+    metadata = %{
+      "adapter" => "fake",
+      "run_ref" => %{adapter: "fake", provider_ref: "run-1", provider_ref_kind: "thread_id", resumable?: true},
+      "capabilities" => %{resume: :thread_id, usage: :final},
+      "final_report" => "finished",
+      "diff_source" => :fallback_git_diff
+    }
+
+    assert {:ok, ledger} = RunLedger.update_agent_metadata(ledger, metadata)
+
+    manifest = decode_json!(ledger.manifest_path)
+    assert manifest["agent"]["adapter"] == "fake"
+    assert manifest["agent"]["run_ref"] == %{"adapter" => "fake", "provider_ref" => "run-1", "provider_ref_kind" => "thread_id", "resumable?" => true}
+    assert manifest["agent"]["capabilities"] == %{"resume" => "thread_id", "usage" => "final"}
+    assert manifest["agent"]["final_report"] == "finished"
+    assert manifest["agent"]["diff_source"] == "fallback_git_diff"
   end
 
   test "load_manifest accepts either run directory or manifest path" do

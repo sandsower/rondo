@@ -1,11 +1,11 @@
 defmodule Rondo.AgentRunner do
   @moduledoc """
-  Executes a single Linear issue in an isolated workspace with Claude Code.
+  Executes a single Linear issue in an isolated workspace with the configured agent adapter.
   """
 
   require Logger
-  alias Rondo.Claude.CLI, as: ClaudeCLI
-  alias Rondo.Claude.StreamParser
+  alias Rondo.Agent.Adapter
+  alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
@@ -17,7 +17,7 @@ defmodule Rondo.AgentRunner do
         try do
           with :ok <- Workspace.run_before_run_hook(workspace, issue),
                :ok <- send_phase_update(claude_update_recipient, issue, :claude_starting),
-               :ok <- run_claude_turns(workspace, issue, claude_update_recipient, opts) do
+               :ok <- run_agent_turns(workspace, issue, claude_update_recipient, opts) do
             :ok
           else
             {:error, reason} ->
@@ -43,8 +43,8 @@ defmodule Rondo.AgentRunner do
   defp send_claude_update(recipient, %Issue{id: issue_id}, event)
        when is_binary(issue_id) and is_pid(recipient) do
     timestamp = DateTime.utc_now()
-    session_id = StreamParser.extract_session_id(event)
-    usage = StreamParser.extract_usage(event)
+    session_id = Adapter.provider_session_id(event)
+    usage = Map.get(event, :usage)
     event_type = Map.get(event, :event_type, :unknown)
 
     send(
@@ -53,8 +53,13 @@ defmodule Rondo.AgentRunner do
        %{
          event: event_type,
          timestamp: timestamp,
+         adapter: Map.get(event, :adapter),
+         run_ref: Map.get(event, :run_ref),
          session_id: session_id,
          usage: usage,
+         capabilities: Map.get(event, :capabilities),
+         final_report: Map.get(event, :final_report),
+         diff_source: Map.get(event, :diff_source),
          raw: event
        }}
     )
@@ -83,62 +88,78 @@ defmodule Rondo.AgentRunner do
 
   defp send_phase_update(_recipient, _issue, _phase), do: :ok
 
-  defp run_claude_turns(workspace, issue, claude_update_recipient, opts) do
-    max_turns = Keyword.get(opts, :max_turns, Config.agent_max_turns())
-    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+  defp run_agent_turns(workspace, issue, claude_update_recipient, opts) do
+    with {:ok, adapter} <- adapter_module(opts) do
+      context = %{
+        workspace: workspace,
+        claude_update_recipient: claude_update_recipient,
+        opts: opts,
+        issue_state_fetcher: Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1),
+        adapter: adapter,
+        max_turns: Keyword.get(opts, :max_turns, Config.agent_max_turns())
+      }
 
-    do_run_claude_turns(workspace, issue, claude_update_recipient, opts, issue_state_fetcher, 1, max_turns, nil)
+      do_run_agent_turns(context, issue, 1, nil)
+    end
   end
 
-  defp do_run_claude_turns(workspace, issue, claude_update_recipient, opts, issue_state_fetcher, turn_number, max_turns, session_id) do
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
-
-    cli_opts = [
-      on_event: claude_event_handler(claude_update_recipient, issue)
-    ]
+  defp do_run_agent_turns(context, issue, turn_number, run_ref) do
+    prompt = build_turn_prompt(issue, context.opts, turn_number, context.max_turns)
 
     result =
-      if session_id == nil do
-        ClaudeCLI.run(prompt, workspace, cli_opts)
-      else
-        ClaudeCLI.resume(session_id, prompt, workspace, cli_opts)
-      end
+      context.adapter.invoke(%{
+        prompt: prompt,
+        workspace: context.workspace,
+        previous_run_ref: run_ref,
+        on_event: claude_event_handler(context.claude_update_recipient, issue),
+        opts: context.opts
+      })
 
     case result do
-      {:ok, %{session_id: new_session_id}} ->
-        effective_session_id = new_session_id || session_id
-        Logger.info("Completed agent turn for #{issue_context(issue)} session_id=#{effective_session_id} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
+      {:ok, %{run_ref: new_run_ref}} ->
+        effective_run_ref = new_run_ref || run_ref
+        provider_ref = if effective_run_ref, do: Map.get(effective_run_ref, :provider_ref)
 
-        case continue_with_issue?(issue, issue_state_fetcher) do
-          {:continue, refreshed_issue} when turn_number < max_turns ->
-            Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} turn=#{turn_number}/#{max_turns}")
+        Logger.info(
+          "Completed agent turn for #{issue_context(issue)} adapter=#{context.adapter.id()} " <>
+            "provider_ref=#{provider_ref} workspace=#{context.workspace} turn=#{turn_number}/#{context.max_turns}"
+        )
 
-            do_run_claude_turns(
-              workspace,
-              refreshed_issue,
-              claude_update_recipient,
-              opts,
-              issue_state_fetcher,
-              turn_number + 1,
-              max_turns,
-              effective_session_id
-            )
-
-          {:continue, refreshed_issue} ->
-            Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active")
-            :ok
-
-          {:done, _refreshed_issue} ->
-            :ok
-
-          {:error, reason} ->
-            {:error, reason}
-        end
+        continue_agent_turns(context, issue, turn_number, effective_run_ref)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
+
+  defp continue_agent_turns(context, issue, turn_number, effective_run_ref) do
+    case continue_with_issue?(issue, context.issue_state_fetcher) do
+      {:continue, refreshed_issue} when turn_number < context.max_turns ->
+        Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} turn=#{turn_number}/#{context.max_turns}")
+        do_run_agent_turns(context, refreshed_issue, turn_number + 1, effective_run_ref)
+
+      {:continue, refreshed_issue} ->
+        Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active")
+        :ok
+
+      {:done, _refreshed_issue} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp adapter_module(opts) do
+    opts
+    |> Keyword.get(:agent_adapter, Config.agent_adapter())
+    |> resolve_adapter_module()
+  end
+
+  defp resolve_adapter_module(module) when is_atom(module), do: {:ok, module}
+  defp resolve_adapter_module("claude_code"), do: {:ok, ClaudeCodeAdapter}
+  defp resolve_adapter_module(:claude_code), do: {:ok, ClaudeCodeAdapter}
+  defp resolve_adapter_module(other), do: {:error, {:unsupported_agent_adapter, other}}
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
 
