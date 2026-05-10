@@ -75,11 +75,13 @@ defmodule Rondo.TestSupport do
     case Process.whereis(RondoWeb.Endpoint) do
       pid when is_pid(pid) ->
         Process.unlink(pid)
+
         try do
           Supervisor.stop(pid, :shutdown, 2_000)
         catch
           :exit, _ -> :ok
         end
+
         :ok
 
       _ ->

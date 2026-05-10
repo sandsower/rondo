@@ -216,7 +216,9 @@ defmodule RondoWeb.Presenter do
   defp run_filename(started_at) when is_binary(started_at) do
     # Parse and truncate to match the file naming (seconds only, no microseconds)
     case DateTime.from_iso8601(started_at) do
-      {:ok, dt, _} -> run_filename(dt)
+      {:ok, dt, _} ->
+        run_filename(dt)
+
       _ ->
         started_at
         |> String.replace(~r/[:\.]/, "-")
@@ -288,12 +290,13 @@ defmodule RondoWeb.Presenter do
   def token_timeseries do
     samples = Rondo.TimeSeries.read()
 
-    labels = Enum.map(samples, fn s ->
-      case s.at do
-        %DateTime{} = dt -> Calendar.strftime(dt, "%H:%M:%S")
-        _ -> ""
-      end
-    end)
+    labels =
+      Enum.map(samples, fn s ->
+        case s.at do
+          %DateTime{} = dt -> Calendar.strftime(dt, "%H:%M:%S")
+          _ -> ""
+        end
+      end)
 
     %{
       labels: labels,
@@ -306,12 +309,13 @@ defmodule RondoWeb.Presenter do
   def session_timeseries do
     samples = Rondo.TimeSeries.read()
 
-    labels = Enum.map(samples, fn s ->
-      case s.at do
-        %DateTime{} = dt -> Calendar.strftime(dt, "%H:%M:%S")
-        _ -> ""
-      end
-    end)
+    labels =
+      Enum.map(samples, fn s ->
+        case s.at do
+          %DateTime{} = dt -> Calendar.strftime(dt, "%H:%M:%S")
+          _ -> ""
+        end
+      end)
 
     %{
       labels: labels,
@@ -334,17 +338,24 @@ defmodule RondoWeb.Presenter do
   @spec run_token_comparison(list()) :: map()
   def run_token_comparison(runs) when is_list(runs) do
     %{
-      labels: runs |> Enum.with_index(1) |> Enum.map(fn {r, i} ->
-        time = case r[:started_at] do
-          s when is_binary(s) ->
-            case DateTime.from_iso8601(s) do
-              {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M")
-              _ -> "Run #{i}"
+      labels:
+        runs
+        |> Enum.with_index(1)
+        |> Enum.map(fn {r, i} ->
+          time =
+            case r[:started_at] do
+              s when is_binary(s) ->
+                case DateTime.from_iso8601(s) do
+                  {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M")
+                  _ -> "Run #{i}"
+                end
+
+              _ ->
+                "Run #{i}"
             end
-          _ -> "Run #{i}"
-        end
-        "Run #{i} (#{time})"
-      end),
+
+          "Run #{i} (#{time})"
+        end),
       input: Enum.map(runs, fn r -> get_in(r, [:tokens, :input_tokens]) || 0 end),
       output: Enum.map(runs, fn r -> get_in(r, [:tokens, :output_tokens]) || 0 end)
     }
@@ -355,29 +366,39 @@ defmodule RondoWeb.Presenter do
   @spec run_duration_comparison(list()) :: map()
   def run_duration_comparison(runs) when is_list(runs) do
     %{
-      labels: runs |> Enum.with_index(1) |> Enum.map(fn {r, i} ->
-        time = case r[:started_at] do
-          s when is_binary(s) ->
-            case DateTime.from_iso8601(s) do
-              {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M")
-              _ -> "Run #{i}"
+      labels:
+        runs
+        |> Enum.with_index(1)
+        |> Enum.map(fn {r, i} ->
+          time =
+            case r[:started_at] do
+              s when is_binary(s) ->
+                case DateTime.from_iso8601(s) do
+                  {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M")
+                  _ -> "Run #{i}"
+                end
+
+              _ ->
+                "Run #{i}"
             end
-          _ -> "Run #{i}"
-        end
-        "Run #{i} (#{time})"
-      end),
-      durations: Enum.map(runs, fn r ->
-        case {r[:started_at], r[:finished_at]} do
-          {s, f} when is_binary(s) and is_binary(f) ->
-            with {:ok, s_dt, _} <- DateTime.from_iso8601(s),
-                 {:ok, f_dt, _} <- DateTime.from_iso8601(f) do
-              DateTime.diff(f_dt, s_dt, :second)
-            else
-              _ -> 0
-            end
-          _ -> 0
-        end
-      end)
+
+          "Run #{i} (#{time})"
+        end),
+      durations:
+        Enum.map(runs, fn r ->
+          case {r[:started_at], r[:finished_at]} do
+            {s, f} when is_binary(s) and is_binary(f) ->
+              with {:ok, s_dt, _} <- DateTime.from_iso8601(s),
+                   {:ok, f_dt, _} <- DateTime.from_iso8601(f) do
+                DateTime.diff(f_dt, s_dt, :second)
+              else
+                _ -> 0
+              end
+
+            _ ->
+              0
+          end
+        end)
     }
   end
 

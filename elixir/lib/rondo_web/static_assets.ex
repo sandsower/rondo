@@ -5,56 +5,61 @@ defmodule RondoWeb.StaticAssets do
   """
 
   @dashboard_css_content (
-    path = Path.join([__DIR__, "..", "..", "priv", "static", "dashboard.css"]) |> Path.expand()
-    case File.read(path) do
-      {:ok, content} -> content
-      {:error, _} -> nil
-    end
-  )
+                           path = Path.join([__DIR__, "..", "..", "priv", "static", "dashboard.css"]) |> Path.expand()
 
-  @phoenix_html_js_content (
-    case :code.priv_dir(:phoenix_html) do
-      {:error, _} -> nil
-      priv_dir ->
-        path = Path.join(to_string(priv_dir), "static/phoenix_html.js")
-        case File.read(path) do
-          {:ok, content} -> content
-          {:error, _} -> nil
-        end
-    end
-  )
+                           case File.read(path) do
+                             {:ok, content} -> content
+                             {:error, _} -> nil
+                           end
+                         )
 
-  @phoenix_js_content (
-    case :code.priv_dir(:phoenix) do
-      {:error, _} -> nil
-      priv_dir ->
-        path = Path.join(to_string(priv_dir), "static/phoenix.js")
-        case File.read(path) do
-          {:ok, content} -> content
-          {:error, _} -> nil
-        end
-    end
-  )
+  @phoenix_html_js_content (case :code.priv_dir(:phoenix_html) do
+                              {:error, _} ->
+                                nil
 
-  @phoenix_live_view_js_content (
-    case :code.priv_dir(:phoenix_live_view) do
-      {:error, _} -> nil
-      priv_dir ->
-        path = Path.join(to_string(priv_dir), "static/phoenix_live_view.js")
-        case File.read(path) do
-          {:ok, content} -> content
-          {:error, _} -> nil
-        end
-    end
-  )
+                              priv_dir ->
+                                path = Path.join(to_string(priv_dir), "static/phoenix_html.js")
+
+                                case File.read(path) do
+                                  {:ok, content} -> content
+                                  {:error, _} -> nil
+                                end
+                            end)
+
+  @phoenix_js_content (case :code.priv_dir(:phoenix) do
+                         {:error, _} ->
+                           nil
+
+                         priv_dir ->
+                           path = Path.join(to_string(priv_dir), "static/phoenix.js")
+
+                           case File.read(path) do
+                             {:ok, content} -> content
+                             {:error, _} -> nil
+                           end
+                       end)
+
+  @phoenix_live_view_js_content (case :code.priv_dir(:phoenix_live_view) do
+                                   {:error, _} ->
+                                     nil
+
+                                   priv_dir ->
+                                     path = Path.join(to_string(priv_dir), "static/phoenix_live_view.js")
+
+                                     case File.read(path) do
+                                       {:ok, content} -> content
+                                       {:error, _} -> nil
+                                     end
+                                 end)
 
   @chart_js_content (
-    path = Path.join([__DIR__, "..", "..", "priv", "static", "chart.min.js"]) |> Path.expand()
-    case File.read(path) do
-      {:ok, content} -> content
-      {:error, _} -> nil
-    end
-  )
+                      path = Path.join([__DIR__, "..", "..", "priv", "static", "chart.min.js"]) |> Path.expand()
+
+                      case File.read(path) do
+                        {:ok, content} -> content
+                        {:error, _} -> nil
+                      end
+                    )
 
   @spec fetch(String.t()) :: {:ok, String.t(), String.t()} | :error
   def fetch("/dashboard.css"), do: serve("text/css", @dashboard_css_content)

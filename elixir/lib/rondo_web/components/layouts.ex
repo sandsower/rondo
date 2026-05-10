@@ -6,12 +6,13 @@ defmodule RondoWeb.Layouts do
   use Phoenix.Component
 
   @css_version (
-    path = Path.join([__DIR__, "..", "..", "..", "priv", "static", "dashboard.css"]) |> Path.expand()
-    case File.read(path) do
-      {:ok, content} -> content |> :erlang.md5() |> Base.encode16(case: :lower) |> binary_part(0, 8)
-      {:error, _} -> "0"
-    end
-  )
+                 path = Path.join([__DIR__, "..", "..", "..", "priv", "static", "dashboard.css"]) |> Path.expand()
+
+                 case File.read(path) do
+                   {:ok, content} -> content |> :erlang.md5() |> Base.encode16(case: :lower) |> binary_part(0, 8)
+                   {:error, _} -> "0"
+                 end
+               )
 
   @spec root(map()) :: Phoenix.LiveView.Rendered.t()
   def root(assigns) do
