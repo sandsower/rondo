@@ -1448,17 +1448,15 @@ defmodule Rondo.Orchestrator do
   @doc false
   @spec load_archived_run(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def load_archived_run(identifier, filename) do
-    path = Path.join([archive_root(), identifier, filename])
-
-    case File.read(path) do
-      {:ok, json} ->
-        case Jason.decode(json) do
-          {:ok, entry} when is_map(entry) -> {:ok, deserialize_archived_entry(entry)}
-          _ -> {:error, :invalid_json}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+    with true <- safe_archive_segment?(identifier),
+         true <- safe_archive_segment?(filename),
+         path = Path.join([archive_root(), identifier, filename]),
+         {:ok, json} <- File.read(path),
+         {:ok, entry} <- decode_archived_json(json) do
+      {:ok, deserialize_archived_entry(entry)}
+    else
+      false -> {:error, :invalid_path}
+      {:error, reason} -> {:error, reason}
     end
   rescue
     _ -> {:error, :read_failed}
@@ -1492,6 +1490,13 @@ defmodule Rondo.Orchestrator do
 
       {:error, _} ->
         []
+    end
+  end
+
+  defp decode_archived_json(json) do
+    case Jason.decode(json) do
+      {:ok, entry} when is_map(entry) -> {:ok, entry}
+      _ -> {:error, :invalid_json}
     end
   end
 
@@ -1529,8 +1534,22 @@ defmodule Rondo.Orchestrator do
   defp deserialize_event_log(log) when is_list(log), do: Enum.map(log, &deserialize_event_entry/1)
   defp deserialize_event_log(log), do: log
 
-  defp deserialize_event_entry(entry) when is_map(entry), do: atomize_allowed_keys(entry, @event_keys)
+  defp deserialize_event_entry(entry) when is_map(entry) do
+    entry
+    |> atomize_allowed_keys(@event_keys)
+    |> Map.update(:event, nil, &deserialize_event_label/1)
+    |> Map.update(:tokens, %{}, &deserialize_token_map/1)
+  end
+
   defp deserialize_event_entry(entry), do: entry
+
+  defp deserialize_event_label(event) when is_binary(event) do
+    String.to_existing_atom(event)
+  rescue
+    ArgumentError -> event
+  end
+
+  defp deserialize_event_label(event), do: event
 
   defp atomize_allowed_keys(map, allowed) do
     Map.new(map, fn
@@ -1558,6 +1577,12 @@ defmodule Rondo.Orchestrator do
   end
 
   defp format_file_timestamp(_), do: "unknown"
+
+  defp safe_archive_segment?(segment) when is_binary(segment) do
+    segment not in ["", ".", ".."] and Path.basename(segment) == segment
+  end
+
+  defp safe_archive_segment?(_segment), do: false
 
   defp archive_root do
     Path.join(Config.workspace_root(), ".rondo_archive")

@@ -357,21 +357,7 @@ defmodule RondoWeb.Presenter do
       labels:
         runs
         |> Enum.with_index(1)
-        |> Enum.map(fn {r, i} ->
-          time =
-            case r[:started_at] do
-              s when is_binary(s) ->
-                case DateTime.from_iso8601(s) do
-                  {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M")
-                  _ -> "Run #{i}"
-                end
-
-              _ ->
-                "Run #{i}"
-            end
-
-          "Run #{i} (#{time})"
-        end),
+        |> Enum.map(fn {r, i} -> run_label(r, i) end),
       input: Enum.map(runs, fn r -> get_in(r, [:tokens, :input_tokens]) || 0 end),
       output: Enum.map(runs, fn r -> get_in(r, [:tokens, :output_tokens]) || 0 end)
     }
@@ -385,21 +371,7 @@ defmodule RondoWeb.Presenter do
       labels:
         runs
         |> Enum.with_index(1)
-        |> Enum.map(fn {r, i} ->
-          time =
-            case r[:started_at] do
-              s when is_binary(s) ->
-                case DateTime.from_iso8601(s) do
-                  {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M")
-                  _ -> "Run #{i}"
-                end
-
-              _ ->
-                "Run #{i}"
-            end
-
-          "Run #{i} (#{time})"
-        end),
+        |> Enum.map(fn {r, i} -> run_label(r, i) end),
       durations:
         Enum.map(runs, fn r ->
           case {r[:started_at], r[:finished_at]} do
@@ -419,4 +391,17 @@ defmodule RondoWeb.Presenter do
   end
 
   def run_duration_comparison(_), do: %{labels: [], durations: []}
+
+  defp run_label(run, index) do
+    case run[:started_at] do
+      timestamp when is_binary(timestamp) ->
+        case DateTime.from_iso8601(timestamp) do
+          {:ok, dt, _} -> "Run #{index} (#{Calendar.strftime(dt, "%H:%M")})"
+          _ -> "Run #{index}"
+        end
+
+      _ ->
+        "Run #{index}"
+    end
+  end
 end
