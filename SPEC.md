@@ -921,7 +921,7 @@ Subprocess launch parameters:
 
 - Base command: `claude.command` (default: `claude`), interpreted as a shell command string.
 - First turn invocation:
-  ```
+  ```sh
   <claude.command> -p <rendered prompt> \
     --verbose \
     --output-format <claude.output_format> \
@@ -932,7 +932,7 @@ Subprocess launch parameters:
     [--allowedTools <tool> ...]
   ```
 - Continuation invocation:
-  ```
+  ```sh
   <claude.command> --resume <session_id> \
     -p <continuation guidance> \
     --verbose \

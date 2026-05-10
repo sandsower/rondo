@@ -286,15 +286,23 @@ defmodule Rondo.Claude.CLI do
   defp build_wrapper_script(command, args) do
     # claude.command is a shell command string. Preserve its quoting,
     # expansion, and wrappers, while shell-escaping only Rondo-generated args.
-    # exec replaces the shell so the process inherits the shell's PID/PGID,
-    # making `kill -- -$PID` reach the entire tree.
+    # The outer exec replaces the shell with script(1), preserving the wrapper
+    # PID for process-group cleanup. Do not prepend exec to the inner command:
+    # assignment forms like `FOO=bar claude` are valid shell command strings.
     #
-    # We wrap with `script -qfec` to allocate a PTY. Without this, Node.js
-    # (which powers the Claude CLI) fully buffers stdout when writing to a pipe,
-    # and stream-json events only appear when the internal buffer fills (~64KB)
-    # or the process exits. The PTY tricks Node into line-buffering.
+    # We wrap with script(1) to allocate a PTY. Without this, Node.js (which
+    # powers the Claude CLI) fully buffers stdout when writing to a pipe, and
+    # stream-json events only appear when the internal buffer fills (~64KB) or
+    # the process exits. The PTY tricks Node into line-buffering.
     inner_command = shell_command_with_args(command, args)
-    "exec script -qfec #{shell_escape(inner_command)} /dev/null"
+
+    case :os.type() do
+      {:unix, :linux} ->
+        "exec script -qfec #{shell_escape(inner_command)} /dev/null"
+
+      {:unix, _} ->
+        "exec script -q /dev/null /bin/sh -c #{shell_escape(inner_command)}"
+    end
   end
 
   defp shell_command_with_args(command, args) do

@@ -425,6 +425,46 @@ defmodule Rondo.Claude.CLITest do
     end
   end
 
+  test "ClaudeCLI.run keeps generated prompt args inert" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-claude-cli-inert-generated-args-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-113")
+      claude_binary = Path.join(test_root, "fake-claude")
+      injected_file = Path.join(test_root, "injected")
+      trace_file = Path.join(test_root, "argv.trace")
+      File.mkdir_p!(workspace)
+
+      File.write!(claude_binary, """
+      #!/bin/sh
+      printf 'ARGV:%s\n' "$*" > "#{trace_file}"
+      echo '{"type":"system","subtype":"init","session_id":"inert-generated-args-session","tools":[]}'
+      echo '{"type":"result","subtype":"success","session_id":"inert-generated-args-session","usage":{"input_tokens":2,"output_tokens":3}}'
+      exit 0
+      """)
+
+      File.chmod!(claude_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        claude_command: claude_binary
+      )
+
+      prompt = "Generated args stay inert $(touch #{injected_file}) '; exit 99 #'"
+      assert {:ok, result} = ClaudeCLI.run(prompt, workspace)
+      assert result.session_id == "inert-generated-args-session"
+      refute File.exists?(injected_file)
+      assert File.read!(trace_file) =~ prompt
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "ClaudeCLI.run supports wrapper claude.command values" do
     test_root =
       Path.join(
