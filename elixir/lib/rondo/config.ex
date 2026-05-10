@@ -107,7 +107,10 @@ defmodule Rondo.Config do
                                keys: [
                                  command: [type: :string, default: @default_claude_command],
                                  permission_mode: [type: :string, default: @default_claude_permission_mode],
-                                 dangerously_skip_permissions: [type: :boolean, default: @default_claude_dangerously_skip_permissions],
+                                 dangerously_skip_permissions: [
+                                   type: :boolean,
+                                   default: @default_claude_dangerously_skip_permissions
+                                 ],
                                  max_turns: [type: :pos_integer, default: @default_claude_max_turns],
                                  output_format: [type: :string, default: @default_claude_output_format],
                                  model: [type: {:or, [:string, nil]}, default: nil],
@@ -459,23 +462,37 @@ defmodule Rondo.Config do
 
   defp require_tracker_kind(options, path) do
     case require_tracker_kind(options) do
-      :ok -> :ok
-      {:error, :missing_tracker_kind} -> {:error, invalid_workflow_config(path, [config_error("tracker.kind", nil, "is required")])}
-      {:error, {:unsupported_tracker_kind, kind}} -> {:error, invalid_workflow_config(path, [config_error("tracker.kind", kind, "must be linear or memory")])}
+      :ok ->
+        :ok
+
+      {:error, :missing_tracker_kind} ->
+        {:error, invalid_workflow_config(path, [config_error("tracker.kind", nil, "is required")])}
+
+      {:error, {:unsupported_tracker_kind, kind}} ->
+        error = config_error("tracker.kind", kind, "must be linear or memory")
+        {:error, invalid_workflow_config(path, [error])}
     end
   end
 
   defp require_linear_token(options, path) do
     case require_linear_token(options) do
-      :ok -> :ok
-      {:error, :missing_linear_api_token} -> {:error, invalid_workflow_config(path, [config_error("tracker.api_key", nil, "is required for linear tracker")])}
+      :ok ->
+        :ok
+
+      {:error, :missing_linear_api_token} ->
+        error = config_error("tracker.api_key", nil, "is required for linear tracker")
+        {:error, invalid_workflow_config(path, [error])}
     end
   end
 
   defp require_linear_project(options, path) do
     case require_linear_project(options) do
-      :ok -> :ok
-      {:error, :missing_linear_project_slug} -> {:error, invalid_workflow_config(path, [config_error("tracker.project_slug", nil, "is required for linear tracker")])}
+      :ok ->
+        :ok
+
+      {:error, :missing_linear_project_slug} ->
+        error = config_error("tracker.project_slug", nil, "is required for linear tracker")
+        {:error, invalid_workflow_config(path, [error])}
     end
   end
 
@@ -513,8 +530,11 @@ defmodule Rondo.Config do
         |> extract_workflow_options()
         |> NimbleOptions.validate(@workflow_options_schema)
         |> case do
-          {:ok, options} -> {:ok, options}
-          {:error, %NimbleOptions.ValidationError{} = error} -> {:error, invalid_workflow_config(path, [nimble_error(error)])}
+          {:ok, options} ->
+            {:ok, options}
+
+          {:error, %NimbleOptions.ValidationError{} = error} ->
+            {:error, invalid_workflow_config(path, [nimble_error(error)])}
         end
 
       errors ->
@@ -800,38 +820,42 @@ defmodule Rondo.Config do
 
   defp validate_integer_field(section, path, predicate, message) do
     validate_present_value(section, path, fn value ->
-      case parse_integer(value) do
-        {:ok, parsed} ->
-          if predicate.(parsed), do: [], else: [config_error(path, value, message)]
-
-        :error ->
-          [config_error(path, value, message)]
-      end
+      validate_integer_value(value, path, predicate, message)
     end)
+  end
+
+  defp validate_integer_value(value, path, predicate, message) do
+    case parse_integer(value) do
+      {:ok, parsed} -> validate_integer_predicate(parsed, value, path, predicate, message)
+      :error -> [config_error(path, value, message)]
+    end
+  end
+
+  defp validate_integer_predicate(parsed, value, path, predicate, message) do
+    if predicate.(parsed), do: [], else: [config_error(path, value, message)]
   end
 
   defp validate_state_limits_field(section, path) do
     validate_present_value(section, path, fn
-      value when is_map(value) ->
-        value
-        |> Enum.flat_map(fn {state_name, limit} ->
-          normalized_state = normalize_issue_state(to_string(state_name))
-
-          if normalized_state == "" do
-            [config_error(path, state_name, "state name must be non-empty")]
-          else
-            entry_path = path <> "." <> normalized_state
-
-            case parse_integer(limit) do
-              {:ok, parsed} when parsed > 0 -> []
-              _ -> [config_error(entry_path, limit, "must be a positive integer")]
-            end
-          end
-        end)
-
-      value ->
-        [config_error(path, value, "must be a map of state names to positive integers")]
+      value when is_map(value) -> Enum.flat_map(value, &validate_state_limit_entry(&1, path))
+      value -> [config_error(path, value, "must be a map of state names to positive integers")]
     end)
+  end
+
+  defp validate_state_limit_entry({state_name, limit}, path) do
+    normalized_state = normalize_issue_state(to_string(state_name))
+
+    case normalized_state do
+      "" -> [config_error(path, state_name, "state name must be non-empty")]
+      state -> validate_state_limit_value(limit, path <> "." <> state)
+    end
+  end
+
+  defp validate_state_limit_value(limit, entry_path) do
+    case parse_integer(limit) do
+      {:ok, parsed} when parsed > 0 -> []
+      _ -> [config_error(entry_path, limit, "must be a positive integer")]
+    end
   end
 
   defp validate_present_value(section, path, validator) do

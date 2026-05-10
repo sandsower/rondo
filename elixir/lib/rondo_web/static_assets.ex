@@ -69,6 +69,7 @@ defmodule RondoWeb.StaticAssets do
   def fetch("/vendor/chart.js/chart.min.js"), do: serve("application/javascript", @chart_js_content)
   def fetch(_path), do: :error
 
+  @dialyzer {:nowarn_function, serve: 2}
   defp serve(_content_type, nil), do: :error
   defp serve(content_type, body) when is_binary(body), do: {:ok, content_type, body}
 end

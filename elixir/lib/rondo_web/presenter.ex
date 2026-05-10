@@ -242,26 +242,42 @@ defmodule RondoWeb.Presenter do
     end)
   end
 
-  defp refine_event_from_message(event, message) when event in [:assistant, "assistant"] and is_binary(message) do
+  defp format_event_log(_), do: []
+
+  defp refine_event_from_message(event, message)
+       when event in [:assistant, "assistant"] and is_binary(message) do
     cond do
-      String.contains?(message, "linear") or String.contains?(message, "Linear") -> :linear
-      String.starts_with?(message, "$ gh ") or String.starts_with?(message, "$ git ") -> :github
+      linear_message?(message) -> :linear
+      github_message?(message) -> :github
       String.starts_with?(message, "$ ") -> :bash
-      String.starts_with?(message, "Read ") -> :read
-      String.starts_with?(message, "Write ") -> :write
-      String.starts_with?(message, "Edit ") -> :edit
-      String.starts_with?(message, "Grep ") -> :grep
-      String.starts_with?(message, "Glob ") -> :glob
-      String.starts_with?(message, "Agent") -> :agent
-      String.starts_with?(message, "ToolSearch") -> :tool
-      String.starts_with?(message, "mcp__") -> :tool
-      true -> :assistant
+      true -> prefixed_event_label(message) || :assistant
     end
   end
 
   defp refine_event_from_message(event, _message), do: event
 
-  defp format_event_log(_), do: []
+  defp linear_message?(message), do: String.contains?(message, "linear") or String.contains?(message, "Linear")
+
+  defp github_message?(message), do: String.starts_with?(message, "$ gh ") or String.starts_with?(message, "$ git ")
+
+  defp prefixed_event_label(message) do
+    Enum.find_value(event_prefixes(), fn {prefix, event} ->
+      if String.starts_with?(message, prefix), do: event
+    end)
+  end
+
+  defp event_prefixes do
+    [
+      {"Read ", :read},
+      {"Write ", :write},
+      {"Edit ", :edit},
+      {"Grep ", :grep},
+      {"Glob ", :glob},
+      {"Agent", :agent},
+      {"ToolSearch", :tool},
+      {"mcp__", :tool}
+    ]
+  end
 
   defp summarize_message(%{message: message}) when is_binary(message), do: message
   defp summarize_message(message) when is_binary(message), do: message

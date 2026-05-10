@@ -292,7 +292,15 @@ defmodule Rondo.Linear.Client do
 
       case next_page_cursor(page_info) do
         {:ok, next_cursor} ->
-          do_fetch_by_states_page(project_slug, state_names, assignee_filter, label_filter, next_cursor, updated_acc, opts)
+          do_fetch_by_states_page(
+            project_slug,
+            state_names,
+            assignee_filter,
+            label_filter,
+            next_cursor,
+            updated_acc,
+            opts
+          )
 
         :done ->
           {:ok, finalize_paginated_issues(updated_acc)}

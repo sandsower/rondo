@@ -1,5 +1,7 @@
 # Gleam rewrite implementation plan
 
+> Obsolete: the Gleam implementation was removed. Rondo development continues in `elixir/`.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Rewrite Rondo from Elixir to Gleam, implementing against SPEC.md with the Elixir version as behavioral reference.

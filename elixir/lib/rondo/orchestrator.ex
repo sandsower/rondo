@@ -390,21 +390,26 @@ defmodule Rondo.Orchestrator do
         missing_count = get_missing_count(state_acc, issue_id) + 1
         state_acc = set_missing_count(state_acc, issue_id, missing_count)
 
-        if missing_count >= @missing_issue_terminate_threshold do
-          log_missing_running_issue(state_acc, issue_id)
-
-          state_acc
-          |> clear_missing_count(issue_id)
-          |> terminate_running_issue(issue_id, false)
-        else
-          Logger.debug("Issue not visible during running-state refresh: issue_id=#{issue_id} missing_count=#{missing_count}/#{@missing_issue_terminate_threshold}")
-          state_acc
-        end
+        handle_missing_running_issue(state_acc, issue_id, missing_count)
       end
     end)
   end
 
   defp reconcile_missing_running_issue_ids(state, _requested_issue_ids, _issues), do: state
+
+  defp handle_missing_running_issue(state, issue_id, missing_count)
+       when missing_count >= @missing_issue_terminate_threshold do
+    log_missing_running_issue(state, issue_id)
+
+    state
+    |> clear_missing_count(issue_id)
+    |> terminate_running_issue(issue_id, false)
+  end
+
+  defp handle_missing_running_issue(state, issue_id, missing_count) do
+    Logger.debug("Issue not visible during running-state refresh: issue_id=#{issue_id} missing_count=#{missing_count}/#{@missing_issue_terminate_threshold}")
+    state
+  end
 
   defp log_missing_running_issue(%State{} = state, issue_id) when is_binary(issue_id) do
     case Map.get(state.running, issue_id) do
@@ -461,15 +466,7 @@ defmodule Rondo.Orchestrator do
         release_issue_claim(state, issue_id)
 
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
-        running_entry =
-          if final_state do
-            update_in(running_entry, [:issue], fn
-              %Issue{} = issue -> %{issue | state: final_state}
-              other -> other
-            end)
-          else
-            running_entry
-          end
+        running_entry = set_running_entry_final_state(running_entry, final_state)
 
         state = record_session_completion_totals(state, running_entry)
         state = archive_running_entry(state, running_entry, :terminated)
@@ -496,6 +493,15 @@ defmodule Rondo.Orchestrator do
       _ ->
         release_issue_claim(state, issue_id)
     end
+  end
+
+  defp set_running_entry_final_state(running_entry, nil), do: running_entry
+
+  defp set_running_entry_final_state(running_entry, final_state) do
+    update_in(running_entry, [:issue], fn
+      %Issue{} = issue -> %{issue | state: final_state}
+      other -> other
+    end)
   end
 
   defp reconcile_stalled_running_issues(%State{} = state) do
@@ -1200,23 +1206,29 @@ defmodule Rondo.Orchestrator do
     content = get_in_any(raw, ["message", "content"])
     tool_name = extract_first_tool_name(content)
 
+    tool_event_label(tool_name, message)
+  end
+
+  defp refine_event_label(event, _message, _update), do: event
+
+  defp tool_event_label(tool_name, message) do
     cond do
-      is_linear_event?(tool_name, message) -> :linear
-      is_github_event?(tool_name, message) -> :github
-      tool_name == "Bash" -> :bash
-      tool_name == "Read" -> :read
-      tool_name == "Write" -> :write
-      tool_name == "Edit" -> :edit
-      tool_name == "Grep" -> :grep
-      tool_name == "Glob" -> :glob
-      tool_name == "Agent" -> :agent
+      linear_event?(tool_name, message) -> :linear
+      github_event?(tool_name, message) -> :github
+      tool_name in ["Bash", "Read", "Write", "Edit", "Grep", "Glob", "Agent"] -> tool_atom(tool_name)
       tool_name != nil -> :tool
       is_binary(message) and message != "" -> :assistant
       true -> :assistant
     end
   end
 
-  defp refine_event_label(event, _message, _update), do: event
+  defp tool_atom("Bash"), do: :bash
+  defp tool_atom("Read"), do: :read
+  defp tool_atom("Write"), do: :write
+  defp tool_atom("Edit"), do: :edit
+  defp tool_atom("Grep"), do: :grep
+  defp tool_atom("Glob"), do: :glob
+  defp tool_atom("Agent"), do: :agent
 
   defp extract_first_tool_name(content) when is_list(content) do
     Enum.find_value(content, fn
@@ -1227,7 +1239,7 @@ defmodule Rondo.Orchestrator do
 
   defp extract_first_tool_name(_), do: nil
 
-  defp is_linear_event?(tool_name, message) do
+  defp linear_event?(tool_name, message) do
     tool_name_str = to_string(tool_name)
     message_str = to_string(message)
 
@@ -1236,10 +1248,13 @@ defmodule Rondo.Orchestrator do
       (tool_name == "ToolSearch" and String.contains?(message_str, "linear"))
   end
 
-  defp is_github_event?(tool_name, message) do
+  defp github_event?(tool_name, message) do
     message_str = to_string(message)
 
-    (tool_name == "Bash" and (String.starts_with?(message_str, "$ gh ") or String.starts_with?(message_str, "$ git "))) or
+    github_command? =
+      String.starts_with?(message_str, "$ gh ") or String.starts_with?(message_str, "$ git ")
+
+    (tool_name == "Bash" and github_command?) or
       (tool_name == "ToolSearch" and String.contains?(message_str, "github"))
   end
 
@@ -1297,8 +1312,6 @@ defmodule Rondo.Orchestrator do
   rescue
     ArgumentError -> nil
   end
-
-  defp get_in_any(_, _), do: nil
 
   defp extract_content_text(content) when is_list(content) do
     content
@@ -1433,6 +1446,7 @@ defmodule Rondo.Orchestrator do
   end
 
   @doc false
+  @spec load_archived_run(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def load_archived_run(identifier, filename) do
     path = Path.join([archive_root(), identifier, filename])
 
@@ -1451,52 +1465,45 @@ defmodule Rondo.Orchestrator do
   end
 
   defp load_archived_runs do
-    root = archive_root()
-
-    case File.ls(root) do
-      {:ok, identifiers} ->
-        identifiers
-        |> Enum.flat_map(fn identifier ->
-          dir = Path.join(root, identifier)
-
-          case File.ls(dir) do
-            {:ok, files} ->
-              files
-              |> Enum.filter(&String.ends_with?(&1, ".json"))
-              |> Enum.map(fn filename ->
-                path = Path.join(dir, filename)
-
-                case File.read(path) do
-                  {:ok, json} ->
-                    case Jason.decode(json) do
-                      {:ok, entry} when is_map(entry) ->
-                        entry
-                        |> deserialize_archived_entry()
-                        |> Map.delete(:event_log)
-
-                      _ ->
-                        nil
-                    end
-
-                  _ ->
-                    nil
-                end
-              end)
-              |> Enum.reject(&is_nil/1)
-
-            _ ->
-              []
-          end
-        end)
-        |> Enum.sort_by(& &1[:started_at], :desc)
-
-      {:error, _} ->
-        []
-    end
+    archive_root()
+    |> load_archive_identifiers()
+    |> Enum.flat_map(&load_archived_runs_for_identifier/1)
+    |> Enum.sort_by(& &1[:started_at], :desc)
   rescue
     error ->
       Rondo.Debug.log("Failed to load archived runs: #{Exception.message(error)}")
       []
+  end
+
+  defp load_archive_identifiers(root) do
+    case File.ls(root) do
+      {:ok, identifiers} -> Enum.map(identifiers, &Path.join(root, &1))
+      {:error, _} -> []
+    end
+  end
+
+  defp load_archived_runs_for_identifier(dir) do
+    case File.ls(dir) do
+      {:ok, files} ->
+        files
+        |> Enum.filter(&String.ends_with?(&1, ".json"))
+        |> Enum.map(&load_archived_run_file(Path.join(dir, &1)))
+        |> Enum.reject(&is_nil/1)
+
+      {:error, _} ->
+        []
+    end
+  end
+
+  defp load_archived_run_file(path) do
+    with {:ok, json} <- File.read(path),
+         {:ok, entry} when is_map(entry) <- Jason.decode(json) do
+      entry
+      |> deserialize_archived_entry()
+      |> Map.delete(:event_log)
+    else
+      _ -> nil
+    end
   end
 
   defp debug_log(msg) do
@@ -1511,29 +1518,26 @@ defmodule Rondo.Orchestrator do
 
   defp deserialize_archived_entry(entry) when is_map(entry) do
     entry
-    |> Map.new(fn
-      {k, v} when is_binary(k) -> {safe_atom(k, @archive_keys), v}
-      other -> other
-    end)
-    |> Map.update(:tokens, %{}, fn t when is_map(t) ->
-      Map.new(t, fn
-        {k, v} when is_binary(k) -> {safe_atom(k, @token_keys), v}
-        other -> other
-      end)
-    end)
-    |> Map.update(:event_log, [], fn log when is_list(log) ->
-      Enum.map(log, fn e when is_map(e) ->
-        Map.new(e, fn
-          {k, v} when is_binary(k) -> {safe_atom(k, @event_keys), v}
-          other -> other
-        end)
-      end)
-    end)
+    |> atomize_allowed_keys(@archive_keys)
+    |> Map.update(:tokens, %{}, &deserialize_token_map/1)
+    |> Map.update(:event_log, [], &deserialize_event_log/1)
   end
 
-  defp deserialize_archived_entry(_), do: %{}
+  defp deserialize_token_map(tokens) when is_map(tokens), do: atomize_allowed_keys(tokens, @token_keys)
+  defp deserialize_token_map(tokens), do: tokens
 
-  defp safe_atom(key, _allowed) when is_atom(key), do: key
+  defp deserialize_event_log(log) when is_list(log), do: Enum.map(log, &deserialize_event_entry/1)
+  defp deserialize_event_log(log), do: log
+
+  defp deserialize_event_entry(entry) when is_map(entry), do: atomize_allowed_keys(entry, @event_keys)
+  defp deserialize_event_entry(entry), do: entry
+
+  defp atomize_allowed_keys(map, allowed) do
+    Map.new(map, fn
+      {k, v} when is_binary(k) -> {safe_atom(k, allowed), v}
+      other -> other
+    end)
+  end
 
   defp safe_atom(key, allowed) when is_binary(key) do
     if key in allowed, do: String.to_atom(key), else: key
@@ -1825,11 +1829,9 @@ defmodule Rondo.Orchestrator do
         :totalTokens
       ])
 
-  defp payload_get(payload, fields) when is_list(fields) do
+  defp payload_get(payload, fields) do
     Enum.find_value(fields, fn field -> map_integer_value(payload, field) end)
   end
-
-  defp payload_get(payload, field), do: map_integer_value(payload, field)
 
   defp map_integer_value(payload, field) do
     if is_map(payload) do
