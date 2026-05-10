@@ -98,8 +98,8 @@ defmodule Rondo.GitHub.Client do
         |> Enum.filter(&state_label?(&1, context.state_label_prefix))
         |> Enum.reject(&(&1 == target_label))
 
-      with :ok <- remove_state_labels(context, number, old_state_labels) do
-        add_state_label(context, number, target_label)
+      with :ok <- add_state_label(context, number, target_label) do
+        remove_state_labels(context, number, old_state_labels)
       end
     end
   end

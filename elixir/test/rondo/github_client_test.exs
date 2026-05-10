@@ -162,10 +162,50 @@ defmodule Rondo.GitHub.ClientTest do
              )
 
     assert_received {:gh, ["issue", "view", "5", "--repo", @repo, "--json", @json_fields]}
-    assert_received {:gh, ["label", "create", "status: In Progress", "--repo", @repo, "--color", "5319E7", "--description", "Rondo workflow state: In Progress"]}
+
+    assert_received {:gh,
+                     [
+                       "label",
+                       "create",
+                       "status: In Progress",
+                       "--repo",
+                       @repo,
+                       "--color",
+                       "5319E7",
+                       "--description",
+                       "Rondo workflow state: In Progress"
+                     ]}
+
+    assert_received {:gh, ["issue", "edit", "5", "--repo", @repo, "--add-label", "status: In Progress"]}
     assert_received {:gh, ["issue", "edit", "5", "--repo", @repo, "--remove-label", "status: Todo"]}
     assert_received {:gh, ["issue", "edit", "5", "--repo", @repo, "--remove-label", "status: Blocked"]}
+  end
+
+  test "update_issue_state keeps old state labels when adding target state fails" do
+    runner = fn "gh", args, _opts ->
+      send(self(), {:gh, args})
+
+      case args do
+        ["issue", "view", "5" | _] ->
+          {Jason.encode!(%{"number" => 5, "title" => "Work", "state" => "OPEN", "labels" => [%{"name" => "status: Todo"}]}), 0}
+
+        ["label", "create", "status: In Progress" | _] ->
+          {"", 0}
+
+        ["issue", "edit", "5", "--repo", @repo, "--add-label", "status: In Progress"] ->
+          {"add failed", 1}
+      end
+    end
+
+    assert {:error, {:github_cli_failed, _args, 1, "add failed"}} =
+             GitHubClient.update_issue_state("#{@repo}#5", "In Progress",
+               repo: @repo,
+               runner: runner,
+               state_label_prefix: "status:"
+             )
+
     assert_received {:gh, ["issue", "edit", "5", "--repo", @repo, "--add-label", "status: In Progress"]}
+    refute_received {:gh, ["issue", "edit", "5", "--repo", @repo, "--remove-label", "status: Todo"]}
   end
 
   test "create_comment posts through a body file" do

@@ -835,14 +835,16 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Tracker.adapter() == Rondo.GitHub.Adapter
   end
 
-  test "config requires repo for github tracker" do
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "github",
-      tracker_project_slug: nil,
-      tracker_repo: nil
-    )
+  test "config requires owner/repo for github tracker" do
+    for invalid_repo <- [nil, "owner", "/repo", "owner/", "owner/repo/extra", "owner repo/name"] do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "github",
+        tracker_project_slug: nil,
+        tracker_repo: invalid_repo
+      )
 
-    assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.repo"}]}} = Config.validate!()
+      assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.repo"}]}} = Config.validate!()
+    end
   end
 
   test "linear tracker still routes to linear adapter" do

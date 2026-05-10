@@ -470,16 +470,24 @@ defmodule Rondo.Config do
   defp require_github_repo(options) do
     case get_in(options, [:tracker, :kind]) do
       "github" ->
-        if is_binary(get_in(options, [:tracker, :repo])) do
-          :ok
-        else
-          {:error, :missing_github_repo}
+        options
+        |> get_in([:tracker, :repo])
+        |> valid_github_repo?()
+        |> case do
+          true -> :ok
+          false -> {:error, :missing_github_repo}
         end
 
       _ ->
         :ok
     end
   end
+
+  defp valid_github_repo?(repo) when is_binary(repo) do
+    String.match?(String.trim(repo), ~r/^[^\s\/]+\/[^\s\/]+$/)
+  end
+
+  defp valid_github_repo?(_repo), do: false
 
   defp require_claude_command(options) do
     case get_in(options, [:claude, :command]) do
