@@ -45,7 +45,7 @@ defmodule Rondo.AgentRunner do
     timestamp = DateTime.utc_now()
     session_id = Adapter.provider_session_id(event)
     usage = Map.get(event, :usage)
-    event_type = Map.get(event, :event_type, :unknown)
+    event_type = compatibility_event_type(event)
 
     send(
       recipient,
@@ -60,7 +60,7 @@ defmodule Rondo.AgentRunner do
          capabilities: Map.get(event, :capabilities),
          final_report: Map.get(event, :final_report),
          diff_source: Map.get(event, :diff_source),
-         raw: event
+         raw: compatibility_raw(event)
        }}
     )
 
@@ -68,6 +68,13 @@ defmodule Rondo.AgentRunner do
   end
 
   defp send_claude_update(_recipient, _issue, _event), do: :ok
+
+  defp compatibility_event_type(%{adapter: "claude_code", raw: %{event_type: event_type}}) when is_atom(event_type), do: event_type
+  defp compatibility_event_type(%{event_type: event_type}) when is_atom(event_type), do: event_type
+  defp compatibility_event_type(_event), do: :unknown
+
+  defp compatibility_raw(%{adapter: "claude_code", raw: raw}) when is_map(raw), do: raw
+  defp compatibility_raw(event), do: event
 
   defp send_phase_update(recipient, %Issue{id: issue_id}, phase)
        when is_pid(recipient) and is_atom(phase) do

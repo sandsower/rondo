@@ -131,7 +131,8 @@ defmodule Rondo.AgentAdapterTest do
       File.write!(claude_binary, """
       #!/bin/sh
       echo '{"type":"system","subtype":"init","session_id":"session-adapter"}'
-      echo '{"type":"result","session_id":"session-adapter","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}'
+      echo '{"type":"assistant","session_id":"session-adapter","message":{"content":[{"type":"text","text":"assistant fallback"}]}}'
+      echo '{"type":"result","session_id":"session-adapter","result":"final from claude","usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}'
       exit 0
       """)
 
@@ -155,6 +156,7 @@ defmodule Rondo.AgentAdapterTest do
 
       assert result.run_ref == Adapter.run_ref("claude_code", "session-adapter", "session_id", true)
       assert result.usage == %{input_tokens: 10, output_tokens: 5, total_tokens: 15}
+      assert result.final_report == "final from claude"
       assert result.capabilities.resume == :session_id
 
       assert_receive {:adapter_event,
@@ -169,7 +171,69 @@ defmodule Rondo.AgentAdapterTest do
                       %{
                         event_type: :invocation_completed,
                         adapter: "claude_code",
-                        usage: %{total_tokens: 15}
+                        usage: %{total_tokens: 15},
+                        final_report: "final from claude"
+                      }},
+                     500
+
+      refute_receive {:adapter_event, %{event_type: :invocation_completed}}, 100
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner preserves Claude worker update compatibility while carrying adapter metadata" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-claude-compat-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      claude_binary = Path.join(test_root, "fake-claude")
+      File.mkdir_p!(workspace_root)
+
+      File.write!(claude_binary, """
+      #!/bin/sh
+      echo '{"type":"system","subtype":"init","session_id":"session-compat"}'
+      echo '{"type":"assistant","session_id":"session-compat","message":{"content":[{"type":"text","text":"Working"}]}}'
+      echo '{"type":"result","session_id":"session-compat","result":"compat final","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}'
+      exit 0
+      """)
+
+      File.chmod!(claude_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        claude_command: claude_binary
+      )
+
+      issue = %Issue{
+        id: "issue-compat",
+        identifier: "MT-COMPAT",
+        title: "Claude compatibility",
+        description: "Keep legacy event envelope stable",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+
+      assert :ok =
+               AgentRunner.run(issue, parent, issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end)
+
+      assert_receive {:claude_worker_update, "issue-compat",
+                      %{
+                        event: :assistant,
+                        adapter: "claude_code",
+                        run_ref: %{provider_ref: "session-compat"},
+                        session_id: "session-compat",
+                        raw: %{"type" => "assistant", "message" => %{"content" => [%{"text" => "Working"}]}}
+                      }},
+                     500
+
+      assert_receive {:claude_worker_update, "issue-compat",
+                      %{
+                        event: :result,
+                        final_report: "compat final",
+                        raw: %{"type" => "result", "result" => "compat final"}
                       }},
                      500
     after
