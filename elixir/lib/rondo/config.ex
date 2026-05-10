@@ -30,7 +30,7 @@ defmodule Rondo.Config do
   @default_max_retry_backoff_ms 300_000
   @default_claude_command "claude"
   @default_claude_permission_mode "bypassPermissions"
-  @valid_claude_permission_modes ["default", "plan", "bypassPermissions"]
+  @valid_claude_permission_modes ["default", "plan", "acceptEdits", "bypassPermissions"]
   @default_claude_dangerously_skip_permissions true
   @default_claude_max_turns 50
   @default_claude_output_format "stream-json"
@@ -373,12 +373,8 @@ defmodule Rondo.Config do
   def validate! do
     path = Workflow.workflow_file_path()
 
-    with {:ok, workflow} <- Workflow.load(path),
-         {:ok, options} <- validate_workflow_options(workflow, path),
-         :ok <- require_tracker_kind(options),
-         :ok <- require_linear_token(options),
-         :ok <- require_linear_project(options) do
-      require_claude_command(options)
+    with {:ok, workflow} <- Workflow.load(path) do
+      validate_workflow(workflow, path)
     end
   end
 
@@ -819,11 +815,17 @@ defmodule Rondo.Config do
       value when is_map(value) ->
         value
         |> Enum.flat_map(fn {state_name, limit} ->
-          entry_path = path <> "." <> normalize_issue_state(to_string(state_name))
+          normalized_state = normalize_issue_state(to_string(state_name))
 
-          case parse_integer(limit) do
-            {:ok, parsed} when parsed > 0 -> []
-            _ -> [config_error(entry_path, limit, "must be a positive integer")]
+          if normalized_state == "" do
+            [config_error(path, state_name, "state name must be non-empty")]
+          else
+            entry_path = path <> "." <> normalized_state
+
+            case parse_integer(limit) do
+              {:ok, parsed} when parsed > 0 -> []
+              _ -> [config_error(entry_path, limit, "must be a positive integer")]
+            end
           end
         end)
 

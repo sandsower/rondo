@@ -37,7 +37,7 @@ defmodule Rondo.CoreTest do
       tracker_project_slug: nil
     )
 
-    assert {:error, :missing_linear_project_slug} = Config.validate!()
+    assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.project_slug"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_project_slug: "project",
@@ -106,8 +106,7 @@ defmodule Rondo.CoreTest do
       claude_command: "/usr/bin/claude"
     )
 
-    assert Config.linear_api_token() == nil
-    assert {:error, :missing_linear_api_token} = Config.validate!()
+    assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.api_key"}]}} = Config.validate!()
   end
 
   test "linear assignee resolves from LINEAR_ASSIGNEE env var" do

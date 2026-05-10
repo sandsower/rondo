@@ -114,7 +114,7 @@ Notes:
 - If a value is omitted or set to `null`, defaults are used. Explicit malformed values fail
   validation instead of silently falling back.
 - `claude.permission_mode` controls Claude Code's permission system. Supported values: `default`,
-  `plan`, `bypassPermissions`. Default: `bypassPermissions`.
+  `plan`, `acceptEdits`, `bypassPermissions`. Default: `bypassPermissions`.
 - `claude.dangerously_skip_permissions` when `true`, passes `--dangerously-skip-permissions` to
   Claude Code, bypassing all permission checks. Recommended for unattended operation when combined
   with `claude.allowed_tools` for tightening. Default: `true`.

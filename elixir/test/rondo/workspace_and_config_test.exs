@@ -667,6 +667,9 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Config.claude_turn_timeout_ms() == 3_600_000
     assert Config.claude_stall_timeout_ms() == 300_000
 
+    write_workflow_file!(Workflow.workflow_file_path(), claude_permission_mode: "acceptEdits")
+    assert Config.claude_permission_mode() == "acceptEdits"
+
     write_workflow_file!(Workflow.workflow_file_path(), claude_permission_mode: "YOLO")
     assert {:error, {:invalid_workflow_config, _, [%{path: "claude.permission_mode"}]}} = Config.validate!()
 
@@ -696,7 +699,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
       poll_interval_ms: %{bad: true},
       workspace_root: 123,
       max_retry_backoff_ms: 0,
-      max_concurrent_agents_by_state: %{"Todo" => "1", "Review" => 0, "Done" => "bad"},
+      max_concurrent_agents_by_state: %{"Todo" => "1", "Review" => 0, "Done" => "bad", "" => 1},
       hook_timeout_ms: 0,
       observability_enabled: "maybe",
       observability_refresh_ms: %{bad: true},
@@ -714,6 +717,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert "agent.max_retry_backoff_ms" in error_paths
     assert "agent.max_concurrent_agents_by_state.review" in error_paths
     assert "agent.max_concurrent_agents_by_state.done" in error_paths
+    assert Enum.any?(errors, &(&1.path == "agent.max_concurrent_agents_by_state" and &1.message == "state name must be non-empty"))
     assert "hooks.timeout_ms" in error_paths
     assert "observability.dashboard_enabled" in error_paths
     assert "observability.refresh_ms" in error_paths

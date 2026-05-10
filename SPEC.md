@@ -551,7 +551,7 @@ Validation checks:
 - Non-positive timeout and concurrency values fail validation when explicitly configured.
 - `agent.max_concurrent_agents_by_state` entries are positive integers; invalid entries are
   reported with their field path.
-- `claude.permission_mode` is one of `default`, `plan`, or `bypassPermissions`.
+- `claude.permission_mode` is one of `default`, `plan`, `acceptEdits`, or `bypassPermissions`.
 - `tracker.kind` is present and supported.
 - `tracker.api_key` is present after `$` resolution.
 - `tracker.project_slug` is present when required by the selected tracker kind.
@@ -579,7 +579,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agent.max_retry_backoff_ms`: positive integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
 - `claude.command`: shell command string, default `claude`
-- `claude.permission_mode`: one of `default`, `plan`, `bypassPermissions`, default `bypassPermissions`
+- `claude.permission_mode`: one of `default`, `plan`, `acceptEdits`, `bypassPermissions`, default `bypassPermissions`
 - `claude.dangerously_skip_permissions`: boolean, default `true`
 - `claude.max_turns`: positive integer, default `50`
 - `claude.output_format`: `stream-json`, default `stream-json`

@@ -1536,7 +1536,7 @@ defmodule Rondo.Orchestrator do
   defp safe_atom(key, _allowed) when is_atom(key), do: key
 
   defp safe_atom(key, allowed) when is_binary(key) do
-    if key in allowed, do: String.to_atom(key), else: String.to_atom(key)
+    if key in allowed, do: String.to_atom(key), else: key
   end
 
   defp datetime_to_iso(%DateTime{} = dt), do: DateTime.to_iso8601(dt)
