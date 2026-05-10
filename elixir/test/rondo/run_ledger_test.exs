@@ -228,6 +228,8 @@ defmodule Rondo.RunLedgerTest do
                    "model" => "claude",
                    "name" => "Bash",
                    "role" => "assistant",
+                   "session_id" => "claude-session-1",
+                   "subtype" => "success",
                    "timestamp" => "2026-05-10T15:30:12Z",
                    "tool" => "bash",
                    "type" => "result",
@@ -267,6 +269,8 @@ defmodule Rondo.RunLedgerTest do
     assert decoded["raw"]["model"] == "claude"
     assert decoded["raw"]["name"] == "Bash"
     assert decoded["raw"]["role"] == "assistant"
+    assert decoded["raw"]["session_id"] == "claude-session-1"
+    assert decoded["raw"]["subtype"] == "success"
     assert decoded["raw"]["timestamp"] == "2026-05-10T15:30:12Z"
     assert decoded["raw"]["tool"] == "bash"
     assert decoded["raw"]["type"] == "result"

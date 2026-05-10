@@ -312,4 +312,288 @@ defmodule Rondo.Claude.CLITest do
       File.rm_rf(test_root)
     end
   end
+
+  test "ClaudeCLI.run preserves quoted claude.command shell strings" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-claude-cli-quoted-command-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-108")
+      bin_dir = Path.join(test_root, "bin with spaces")
+      claude_binary = Path.join(bin_dir, "fake claude")
+      File.mkdir_p!(workspace)
+      File.mkdir_p!(bin_dir)
+
+      File.write!(claude_binary, """
+      #!/bin/sh
+      echo '{"type":"system","subtype":"init","session_id":"quoted-command-session","tools":[]}'
+      echo '{"type":"result","subtype":"success","session_id":"quoted-command-session","usage":{"input_tokens":2,"output_tokens":3}}'
+      exit 0
+      """)
+
+      File.chmod!(claude_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        claude_command: "\"#{claude_binary}\""
+      )
+
+      assert {:ok, result} = ClaudeCLI.run("Quoted command test", workspace)
+      assert result.session_id == "quoted-command-session"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "ClaudeCLI.run expands env-backed claude.command in the launched shell" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-claude-cli-env-command-#{System.unique_integer([:positive])}"
+      )
+
+    env_var = "RONDO_TEST_CLAUDE_BIN_#{System.unique_integer([:positive])}"
+    previous_value = System.get_env(env_var)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-109")
+      claude_binary = Path.join(test_root, "fake-claude")
+      File.mkdir_p!(workspace)
+
+      File.write!(claude_binary, """
+      #!/bin/sh
+      echo '{"type":"system","subtype":"init","session_id":"env-command-session","tools":[]}'
+      echo '{"type":"result","subtype":"success","session_id":"env-command-session","usage":{"input_tokens":2,"output_tokens":3}}'
+      exit 0
+      """)
+
+      File.chmod!(claude_binary, 0o755)
+      System.put_env(env_var, claude_binary)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        claude_command: "$#{env_var}"
+      )
+
+      assert {:ok, result} = ClaudeCLI.run("Env command test", workspace)
+      assert result.session_id == "env-command-session"
+    after
+      restore_env(env_var, previous_value)
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "ClaudeCLI.run supports env assignment claude.command values" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-claude-cli-env-assignment-command-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-110")
+      claude_binary = Path.join(test_root, "fake-claude")
+      File.mkdir_p!(workspace)
+
+      File.write!(claude_binary, """
+      #!/bin/sh
+      if [ "$RONDO_TEST_FLAG" != "1" ]; then
+        exit 65
+      fi
+      echo '{"type":"system","subtype":"init","session_id":"env-assignment-command-session","tools":[]}'
+      echo '{"type":"result","subtype":"success","session_id":"env-assignment-command-session","usage":{"input_tokens":2,"output_tokens":3}}'
+      exit 0
+      """)
+
+      File.chmod!(claude_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        claude_command: "RONDO_TEST_FLAG=1 #{claude_binary}"
+      )
+
+      assert {:ok, result} = ClaudeCLI.run("Env assignment command test", workspace)
+      assert result.session_id == "env-assignment-command-session"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "ClaudeCLI.run supports wrapper claude.command values" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-claude-cli-wrapper-command-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-110")
+      bin_dir = Path.join(test_root, "bin")
+      mise_binary = Path.join(bin_dir, "mise")
+      claude_binary = Path.join(bin_dir, "claude")
+      trace_file = Path.join(test_root, "mise.trace")
+      File.mkdir_p!(workspace)
+      File.mkdir_p!(bin_dir)
+
+      File.write!(mise_binary, """
+      #!/bin/sh
+      printf 'MISE:%s\n' "$*" > "#{trace_file}"
+      if [ "$1" = "exec" ] && [ "$2" = "--" ]; then
+        shift 2
+        exec "$@"
+      fi
+      exit 64
+      """)
+
+      File.write!(claude_binary, """
+      #!/bin/sh
+      echo '{"type":"system","subtype":"init","session_id":"wrapper-command-session","tools":[]}'
+      echo '{"type":"result","subtype":"success","session_id":"wrapper-command-session","usage":{"input_tokens":2,"output_tokens":3}}'
+      exit 0
+      """)
+
+      File.chmod!(mise_binary, 0o755)
+      File.chmod!(claude_binary, 0o755)
+      System.put_env("PATH", bin_dir <> ":" <> (previous_path || ""))
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        claude_command: "mise exec -- claude"
+      )
+
+      assert {:ok, result} = ClaudeCLI.run("Wrapper command test", workspace)
+      assert result.session_id == "wrapper-command-session"
+      assert File.read!(trace_file) =~ "MISE:exec -- claude"
+    after
+      restore_env("PATH", previous_path)
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "ClaudeCLI.run rejects symlink workspaces that escape the configured root before launch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-claude-cli-symlink-escape-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      outside_root = Path.join(test_root, "outside")
+      workspace = Path.join(workspace_root, "MT-111")
+      claude_binary = Path.join(test_root, "fake-claude")
+      marker_file = Path.join(test_root, "launched")
+      File.mkdir_p!(workspace_root)
+      File.mkdir_p!(outside_root)
+      File.ln_s!(outside_root, workspace)
+
+      File.write!(claude_binary, """
+      #!/bin/sh
+      touch "#{marker_file}"
+      echo '{"type":"result","subtype":"success","session_id":"should-not-launch"}'
+      exit 0
+      """)
+
+      File.chmod!(claude_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        claude_command: claude_binary
+      )
+
+      assert {:error, {:invalid_workspace_cwd, :symlink_escape}} = ClaudeCLI.run("Escape test", workspace)
+      refute File.exists?(marker_file)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "ClaudeCLI.run rejects the workspace root itself before launch" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-claude-cli-root-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      claude_binary = Path.join(test_root, "fake-claude")
+      marker_file = Path.join(test_root, "launched")
+      File.mkdir_p!(workspace_root)
+
+      File.write!(claude_binary, """
+      #!/bin/sh
+      touch "#{marker_file}"
+      echo '{"type":"result","subtype":"success","session_id":"should-not-launch"}'
+      exit 0
+      """)
+
+      File.chmod!(claude_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        claude_command: claude_binary
+      )
+
+      assert {:error, {:invalid_workspace_cwd, :workspace_equals_root}} = ClaudeCLI.run("Root test", workspace_root)
+      refute File.exists?(marker_file)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "ClaudeCLI.resume includes configured model and allowed tools" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-claude-cli-resume-flags-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-112")
+      claude_binary = Path.join(test_root, "fake-claude")
+      trace_file = Path.join(test_root, "claude-resume-flags.trace")
+      File.mkdir_p!(workspace)
+
+      File.write!(claude_binary, """
+      #!/bin/sh
+      printf 'ARGV:%s\n' "$*" > "#{trace_file}"
+      echo '{"type":"system","subtype":"init","session_id":"resume-flags-session","tools":[]}'
+      echo '{"type":"result","subtype":"success","session_id":"resume-flags-session","usage":{"input_tokens":20,"output_tokens":10}}'
+      exit 0
+      """)
+
+      File.chmod!(claude_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        claude_command: claude_binary,
+        claude_model: "claude-sonnet-test",
+        claude_allowed_tools: ["Bash", "Edit"]
+      )
+
+      assert {:ok, result} = ClaudeCLI.resume("prev-session-id", "Continue working", workspace)
+      assert result.session_id == "resume-flags-session"
+
+      trace = File.read!(trace_file)
+      assert trace =~ "--resume"
+      assert trace =~ "prev-session-id"
+      assert trace =~ "--model claude-sonnet-test"
+      assert trace =~ "--allowedTools Bash"
+      assert trace =~ "--allowedTools Edit"
+      assert trace =~ "--permission-mode bypassPermissions"
+    after
+      File.rm_rf(test_root)
+    end
+  end
 end
