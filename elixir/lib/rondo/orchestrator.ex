@@ -1308,6 +1308,8 @@ defmodule Rondo.Orchestrator do
         Logger.warning("Run ledger agent event append failed #{ledger_context(ledger, session_id)} reason=#{inspect(reason)}")
     end
 
+    ledger = update_run_ledger_agent_metadata(ledger, update)
+
     ledger =
       case RunLedger.checkpoint_kind_for_agent_update(update) do
         nil ->
@@ -1326,6 +1328,19 @@ defmodule Rondo.Orchestrator do
   end
 
   defp record_ledger_claude_update(running_entry, _update), do: running_entry
+
+  defp update_run_ledger_agent_metadata(%RunLedger{} = ledger, update) do
+    metadata = RunLedger.agent_metadata_for_agent_update(update)
+
+    case RunLedger.update_agent_metadata(ledger, metadata) do
+      {:ok, ledger} ->
+        ledger
+
+      {:error, reason} ->
+        Logger.warning("Run ledger agent metadata update failed #{ledger_context(ledger)} reason=#{inspect(reason)}")
+        ledger
+    end
+  end
 
   defp session_id_for_update(_existing, %{session_id: session_id}) when is_binary(session_id),
     do: session_id

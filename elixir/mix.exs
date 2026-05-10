@@ -20,6 +20,8 @@ defmodule Rondo.MixProject do
           Rondo.SpecsCheck,
           Rondo.Orchestrator,
           Rondo.Orchestrator.State,
+          Rondo.Agent.Adapter,
+          Rondo.Agent.ClaudeCodeAdapter,
           Rondo.AgentRunner,
           Rondo.CLI,
           Rondo.Claude.CLI,

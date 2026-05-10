@@ -101,6 +101,29 @@ defmodule Rondo.RunLedger do
     end
   end
 
+  @spec update_agent_metadata(t(), map()) :: {:ok, t()} | {:error, term()}
+  def update_agent_metadata(%__MODULE__{} = ledger, metadata) when is_map(metadata) do
+    agent_metadata = metadata |> sanitize_value() |> drop_nil_values()
+
+    if agent_metadata == %{} do
+      {:ok, ledger}
+    else
+      timestamp = DateTime.utc_now() |> datetime_to_iso()
+
+      manifest =
+        ledger.manifest
+        |> update_in(["agent"], fn
+          agent when is_map(agent) -> Map.merge(agent, agent_metadata)
+          _other -> agent_metadata
+        end)
+        |> put_in(["timestamps", "updated_at"], timestamp)
+
+      with :ok <- write_json_file(ledger.manifest_path, manifest) do
+        {:ok, %{ledger | manifest: manifest}}
+      end
+    end
+  end
+
   @spec complete_run(t(), String.t() | atom(), map(), keyword()) :: {:ok, t()} | {:error, term()}
   def complete_run(%__MODULE__{} = ledger, status, payload, opts \\ []) when is_map(payload) do
     status_string = kind_to_string(status)
@@ -160,18 +183,38 @@ defmodule Rondo.RunLedger do
   def checkpoint_payload_for_agent_update(update) when is_map(update) do
     %{
       event: Map.get(update, :event, Map.get(update, "event")),
+      adapter: agent_update_value(update, :adapter),
+      run_ref: sanitize_value(agent_update_value(update, :run_ref)),
       session_id: Map.get(update, :session_id, Map.get(update, "session_id")),
       usage: sanitize_value(Map.get(update, :usage, Map.get(update, "usage"))),
+      capabilities: sanitize_value(agent_update_value(update, :capabilities)),
+      final_report: sanitize_value(agent_update_value(update, :final_report)),
+      diff_source: sanitize_value(agent_update_value(update, :diff_source)),
       raw: sanitize_agent_raw(Map.get(update, :raw, Map.get(update, "raw", %{})))
     }
+    |> drop_nil_values()
   end
 
   @spec checkpoint_source_for_agent_update(map()) :: map()
   def checkpoint_source_for_agent_update(update) when is_map(update) do
     %{
-      adapter: "claude_code",
+      adapter: agent_update_value(update, :adapter) || "claude_code",
       event: raw_method(update) || kind_to_string(Map.get(update, :event, Map.get(update, "event")))
     }
+  end
+
+  @spec agent_metadata_for_agent_update(map()) :: map()
+  def agent_metadata_for_agent_update(update) when is_map(update) do
+    %{
+      "adapter" => agent_update_value(update, :adapter),
+      "run_ref" => agent_update_value(update, :run_ref),
+      "session_id" => Map.get(update, :session_id, Map.get(update, "session_id")),
+      "usage" => Map.get(update, :usage, Map.get(update, "usage")),
+      "capabilities" => agent_update_value(update, :capabilities),
+      "final_report" => agent_update_value(update, :final_report),
+      "diff_source" => agent_update_value(update, :diff_source)
+    }
+    |> drop_nil_values()
   end
 
   @spec checkpoint_kind_for_agent_update(map()) :: String.t() | nil
@@ -198,6 +241,10 @@ defmodule Rondo.RunLedger do
   defp checkpoint_kind_for_event("session_started"), do: "turn_started"
   defp checkpoint_kind_for_event(:result), do: "turn_completed"
   defp checkpoint_kind_for_event("result"), do: "turn_completed"
+  defp checkpoint_kind_for_event(:invocation_completed), do: "turn_completed"
+  defp checkpoint_kind_for_event("invocation_completed"), do: "turn_completed"
+  defp checkpoint_kind_for_event(:invocation_failed), do: "turn_failed"
+  defp checkpoint_kind_for_event("invocation_failed"), do: "turn_failed"
   defp checkpoint_kind_for_event(_event), do: nil
 
   defp agent_event_payload(event, timestamp) do
@@ -225,8 +272,12 @@ defmodule Rondo.RunLedger do
       },
       "tracker" => %{"adapter" => Keyword.get(opts, :tracker_adapter, Config.tracker_kind())},
       "agent" => %{
-        "adapter" => Keyword.get(opts, :agent_adapter, "claude_code"),
-        "session_id" => Keyword.get(opts, :agent_session_id)
+        "adapter" => Keyword.get(opts, :agent_adapter, Config.agent_adapter()),
+        "session_id" => Keyword.get(opts, :agent_session_id),
+        "run_ref" => Keyword.get(opts, :agent_run_ref),
+        "capabilities" => Keyword.get(opts, :agent_capabilities),
+        "final_report" => Keyword.get(opts, :agent_final_report),
+        "diff_source" => Keyword.get(opts, :agent_diff_source)
       },
       "mode" => mode_snapshot(opts),
       "timestamps" => %{
@@ -344,6 +395,24 @@ defmodule Rondo.RunLedger do
 
   defp datetime_to_iso(value) when is_binary(value), do: value
   defp datetime_to_iso(_value), do: DateTime.utc_now() |> datetime_to_iso()
+
+  defp agent_update_value(update, key) when is_map(update) and is_atom(key) do
+    Map.get(update, key) ||
+      Map.get(update, Atom.to_string(key)) ||
+      update
+      |> Map.get(:raw, Map.get(update, "raw", %{}))
+      |> raw_agent_value(key)
+  end
+
+  defp raw_agent_value(raw, key) when is_map(raw) and is_atom(key) do
+    Map.get(raw, key) || Map.get(raw, Atom.to_string(key))
+  end
+
+  defp raw_agent_value(_raw, _key), do: nil
+
+  defp drop_nil_values(map) when is_map(map) do
+    Map.reject(map, fn {_key, value} -> is_nil(value) end)
+  end
 
   defp raw_method(%{raw: raw}), do: raw_method(raw)
   defp raw_method(%{"raw" => raw}), do: raw_method(raw)

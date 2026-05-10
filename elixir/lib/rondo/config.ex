@@ -26,6 +26,7 @@ defmodule Rondo.Config do
   @default_workspace_root Path.join(System.tmp_dir!(), "rondo_workspaces")
   @default_hook_timeout_ms 60_000
   @default_max_concurrent_agents 10
+  @default_agent_adapter "claude_code"
   @default_agent_max_turns 20
   @default_max_retry_backoff_ms 300_000
   @default_claude_command "claude"
@@ -89,6 +90,10 @@ defmodule Rondo.Config do
                                  max_concurrent_agents: [
                                    type: :integer,
                                    default: @default_max_concurrent_agents
+                                 ],
+                                 adapter: [
+                                   type: :string,
+                                   default: @default_agent_adapter
                                  ],
                                  max_turns: [
                                    type: :pos_integer,
@@ -276,6 +281,11 @@ defmodule Rondo.Config do
   @spec max_retry_backoff_ms() :: pos_integer()
   def max_retry_backoff_ms do
     get_in(validated_workflow_options(), [:agent, :max_retry_backoff_ms])
+  end
+
+  @spec agent_adapter() :: String.t()
+  def agent_adapter do
+    get_in(validated_workflow_options(), [:agent, :adapter])
   end
 
   @spec agent_max_turns() :: pos_integer()
@@ -639,6 +649,7 @@ defmodule Rondo.Config do
   defp extract_agent_options(section) do
     %{}
     |> put_if_present(:max_concurrent_agents, integer_value(Map.get(section, "max_concurrent_agents")))
+    |> put_if_present(:adapter, command_value(Map.get(section, "adapter")))
     |> put_if_present(:max_turns, positive_integer_value(Map.get(section, "max_turns")))
     |> put_if_present(:max_retry_backoff_ms, positive_integer_value(Map.get(section, "max_retry_backoff_ms")))
     |> put_if_present(
@@ -721,6 +732,7 @@ defmodule Rondo.Config do
       validate_positive_integer_field(polling, "polling.interval_ms"),
       validate_string_field(workspace, "workspace.root"),
       validate_positive_integer_field(agent, "agent.max_concurrent_agents"),
+      validate_non_empty_string_field(agent, "agent.adapter"),
       validate_positive_integer_field(agent, "agent.max_turns"),
       validate_positive_integer_field(agent, "agent.max_retry_backoff_ms"),
       validate_state_limits_field(agent, "agent.max_concurrent_agents_by_state"),
