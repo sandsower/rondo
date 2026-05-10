@@ -154,12 +154,15 @@ defmodule Rondo.GitHub.ClientTest do
 
         ["issue", "view", "4" | _] ->
           {Jason.encode!(%{"number" => 4, "title" => "Multiple states", "state" => "OPEN", "labels" => [%{"name" => "rondo"}, %{"name" => "status: Todo"}, %{"name" => "status: Done"}]}), 0}
+
+        ["issue", "view", "5" | _] ->
+          {"issue not found", 1}
       end
     end
 
     assert {:ok, [%Issue{identifier: "GH-1"}]} =
              GitHubClient.fetch_issue_states_by_ids(
-               ["#{@repo}#1", "#{@repo}#2", "#{@repo}#3", "#{@repo}#4"],
+               ["#{@repo}#1", "#{@repo}#2", "#{@repo}#3", "#{@repo}#4", "#{@repo}#5"],
                repo: @repo,
                runner: runner,
                label_filter: ["rondo"],

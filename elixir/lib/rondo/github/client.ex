@@ -140,7 +140,7 @@ defmodule Rondo.GitHub.Client do
            {:ok, raw_issue} <- view_raw_issue(context, number) do
         {:cont, {:ok, maybe_prepend_visible_issue(raw_issue, issues, context)}}
       else
-        {:error, reason} -> {:halt, {:error, reason}}
+        {:error, reason} -> maybe_skip_missing_issue(reason, issues)
       end
     end)
     |> case do
@@ -159,6 +159,22 @@ defmodule Rondo.GitHub.Client do
       issues
     end
   end
+
+  defp maybe_skip_missing_issue(reason, issues) do
+    if issue_missing_error?(reason) do
+      {:cont, {:ok, issues}}
+    else
+      {:halt, {:error, reason}}
+    end
+  end
+
+  defp issue_missing_error?({:github_cli_failed, _args, _status, output}) do
+    normalized = output |> to_string() |> String.downcase()
+
+    String.contains?(normalized, "not found") or String.contains?(normalized, "could not resolve to an issue")
+  end
+
+  defp issue_missing_error?(_reason), do: false
 
   defp remove_state_labels(context, number, labels) do
     Enum.reduce_while(labels, :ok, fn label, :ok ->
@@ -254,7 +270,7 @@ defmodule Rondo.GitHub.Client do
         {:github_auth_failed, output}
 
       String.contains?(normalized, "could not resolve to a repository") or
-        String.contains?(normalized, "repository not found") or String.contains?(normalized, "not found") ->
+          String.contains?(normalized, "repository not found") ->
         {:github_repo_unavailable, repo, output}
 
       true ->

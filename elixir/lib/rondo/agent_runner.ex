@@ -146,7 +146,7 @@ defmodule Rondo.AgentRunner do
     """
     Continuation guidance:
 
-    - The previous turn completed normally, but the Linear issue is still in an active state.
+    - The previous turn completed normally, but the tracker issue is still in an active state.
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Resume from the current workspace state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this session, so do not restate them before acting.
