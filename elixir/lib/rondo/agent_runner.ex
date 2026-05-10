@@ -146,7 +146,7 @@ defmodule Rondo.AgentRunner do
     """
     Continuation guidance:
 
-    - The previous turn completed normally, but the Linear issue is still in an active state.
+    - The previous turn completed normally, but the tracker issue is still in an active state.
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Resume from the current workspace state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this session, so do not restate them before acting.
@@ -176,7 +176,7 @@ defmodule Rondo.AgentRunner do
   defp active_issue_state?(state_name) when is_binary(state_name) do
     normalized_state = normalize_issue_state(state_name)
 
-    Config.linear_active_states()
+    Config.tracker_active_states()
     |> Enum.any?(fn active_state -> normalize_issue_state(active_state) == normalized_state end)
   end
 

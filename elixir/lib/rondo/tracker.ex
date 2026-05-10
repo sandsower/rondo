@@ -40,6 +40,7 @@ defmodule Rondo.Tracker do
   def adapter do
     case Config.tracker_kind() do
       "memory" -> Rondo.Tracker.Memory
+      "github" -> Rondo.GitHub.Adapter
       _ -> Rondo.Linear.Adapter
     end
   end
