@@ -73,7 +73,7 @@ defmodule Rondo.Agent.ClaudeCodeAdapter do
       {:ok, cli_result} ->
         run_ref = run_ref_from_cli_result(cli_result, previous_run_ref)
         usage = Map.get(cli_result, :usage)
-        final_report = final_report(cli_result)
+        final_report = Map.get(cli_result, :final_report) || Map.get(cli_result, :result)
         capabilities = capabilities()
 
         on_event.(
@@ -142,8 +142,4 @@ defmodule Rondo.Agent.ClaudeCodeAdapter do
   end
 
   defp run_ref_from_cli_result(_cli_result, previous_run_ref), do: previous_run_ref
-
-  defp final_report(%{final_report: final_report}) when is_binary(final_report), do: final_report
-  defp final_report(%{result: result}) when is_binary(result), do: result
-  defp final_report(_cli_result), do: nil
 end

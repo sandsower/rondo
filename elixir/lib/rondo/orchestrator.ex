@@ -1342,8 +1342,6 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  defp update_run_ledger_agent_metadata(ledger, _update), do: ledger
-
   defp session_id_for_update(_existing, %{session_id: session_id}) when is_binary(session_id),
     do: session_id
 

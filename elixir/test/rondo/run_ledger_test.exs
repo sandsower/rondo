@@ -153,6 +153,8 @@ defmodule Rondo.RunLedgerTest do
     assert RunLedger.checkpoint_kind_for_agent_update(%{event: :result}) == "turn_completed"
     assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "result"}) == "turn_completed"
     assert RunLedger.checkpoint_kind_for_agent_update(%{event: :invocation_completed}) == "turn_completed"
+    assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "invocation_completed"}) == "turn_completed"
+    assert RunLedger.checkpoint_kind_for_agent_update(%{event: :invocation_failed}) == "turn_failed"
     assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "invocation_failed"}) == "turn_failed"
     assert RunLedger.checkpoint_kind_for_agent_update(%{event: :unknown}) == nil
   end
@@ -222,6 +224,12 @@ defmodule Rondo.RunLedgerTest do
     assert manifest["agent"]["capabilities"] == %{"resume" => "thread_id", "usage" => "final"}
     assert manifest["agent"]["final_report"] == "finished"
     assert manifest["agent"]["diff_source"] == "fallback_git_diff"
+
+    bad_agent_ledger = %{ledger | manifest: Map.put(ledger.manifest, "agent", "not-a-map")}
+    assert {:ok, bad_agent_ledger} = RunLedger.update_agent_metadata(bad_agent_ledger, %{"adapter" => "fake"})
+    assert bad_agent_ledger.manifest["agent"] == %{"adapter" => "fake"}
+
+    assert RunLedger.agent_metadata_for_agent_update(%{raw: "not-a-map"}) == %{}
   end
 
   test "load_manifest accepts either run directory or manifest path" do
