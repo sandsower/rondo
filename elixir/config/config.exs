@@ -1,5 +1,9 @@
 import Config
 
+if config_env() == :test do
+  System.put_env("LINEAR_API_KEY", System.get_env("LINEAR_API_KEY") || "test-linear-api-key")
+end
+
 config :phoenix, :json_library, Jason
 
 config :rondo, RondoWeb.Endpoint,

@@ -499,6 +499,8 @@ Configuration precedence:
 
 Value coercion semantics:
 
+- Defaults apply only when a field is omitted or explicitly `null`.
+- Explicit malformed values fail validation; they must not be silently dropped to trigger defaults.
 - Path/command fields support:
   - `~` home expansion
   - `$VAR` expansion for env-backed path values
@@ -545,6 +547,11 @@ Per-tick dispatch validation:
 Validation checks:
 
 - Workflow file can be loaded and parsed.
+- Explicit configured values have valid types/ranges before defaults are applied.
+- Non-positive timeout and concurrency values fail validation when explicitly configured.
+- `agent.max_concurrent_agents_by_state` entries are positive integers; invalid entries are
+  reported with their field path.
+- `claude.permission_mode` is one of `default`, `plan`, `acceptEdits`, or `bypassPermissions`.
 - `tracker.kind` is present and supported.
 - `tracker.api_key` is present after `$` resolution.
 - `tracker.project_slug` is present when required by the selected tracker kind.
@@ -560,26 +567,26 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.project_slug`: string, required when `tracker.kind=linear`
 - `tracker.active_states`: list/string, default `Todo, In Progress`
 - `tracker.terminal_states`: list/string, default `Closed, Cancelled, Canceled, Duplicate, Done`
-- `polling.interval_ms`: integer, default `30000`
+- `polling.interval_ms`: positive integer, default `30000`
 - `workspace.root`: path, default `<system-temp>/rondo_workspaces`
 - `hooks.after_create`: shell script or null
 - `hooks.before_run`: shell script or null
 - `hooks.after_run`: shell script or null
 - `hooks.before_remove`: shell script or null
-- `hooks.timeout_ms`: integer, default `60000`
-- `agent.max_concurrent_agents`: integer, default `10`
-- `agent.max_turns`: integer, default `20`
-- `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
+- `hooks.timeout_ms`: positive integer, default `60000`
+- `agent.max_concurrent_agents`: positive integer, default `10`
+- `agent.max_turns`: positive integer, default `20`
+- `agent.max_retry_backoff_ms`: positive integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
 - `claude.command`: shell command string, default `claude`
-- `claude.permission_mode`: string, default `bypassPermissions`
+- `claude.permission_mode`: one of `default`, `plan`, `acceptEdits`, `bypassPermissions`, default `bypassPermissions`
 - `claude.dangerously_skip_permissions`: boolean, default `true`
-- `claude.max_turns`: integer, default `50`
-- `claude.output_format`: string, default `stream-json`
+- `claude.max_turns`: positive integer, default `50`
+- `claude.output_format`: `stream-json`, default `stream-json`
 - `claude.model`: string or null, default `null`
 - `claude.allowed_tools`: list of strings or null, default `null`
-- `claude.turn_timeout_ms`: integer, default `3600000`
-- `claude.stall_timeout_ms`: integer, default `300000`
+- `claude.turn_timeout_ms`: positive integer, default `3600000`
+- `claude.stall_timeout_ms`: positive integer, default `300000`
 - `server.port` (extension): integer, optional; enables the optional HTTP server, `0` may be used
   for ephemeral local bind, and CLI `--port` overrides it
 
@@ -774,7 +781,8 @@ Part A: Stall detection
   - `last_claude_timestamp` if any event has been seen, else
   - `started_at`
 - If `elapsed_ms > claude.stall_timeout_ms`, terminate the worker and queue a retry.
-- If `stall_timeout_ms <= 0`, skip stall detection entirely.
+- `stall_timeout_ms` must be a positive integer when configured; non-positive values fail workflow
+  validation instead of disabling stall detection.
 
 Part B: Tracker state refresh
 
@@ -1909,13 +1917,14 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Missing `WORKFLOW.md` returns typed error
 - Invalid YAML front matter returns typed error
 - Front matter non-map returns typed error
-- Config defaults apply when optional values are missing
+- Config defaults apply when optional values are missing or `null`; explicit malformed values fail
+  validation
 - `tracker.kind` validation enforces currently supported kind (`linear`)
 - `tracker.api_key` works (including `$VAR` indirection)
 - `$VAR` resolution works for tracker API key and path values
 - `~` path expansion works
 - `claude.command` is preserved as a shell command string
-- Per-state concurrency override map normalizes state names and ignores invalid values
+- Per-state concurrency override map normalizes state names and reports invalid values
 - Prompt template renders `issue` and `attempt`
 - Prompt rendering fails on unknown variables (strict mode)
 

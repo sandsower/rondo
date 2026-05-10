@@ -643,6 +643,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
     System.delete_env("LINEAR_API_KEY")
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
       workspace_root: nil,
       max_concurrent_agents: nil,
       claude_turn_timeout_ms: nil,
@@ -666,14 +667,31 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Config.claude_turn_timeout_ms() == 3_600_000
     assert Config.claude_stall_timeout_ms() == 300_000
 
+    write_workflow_file!(Workflow.workflow_file_path(), claude_permission_mode: "acceptEdits")
+    assert Config.claude_permission_mode() == "acceptEdits"
+
+    write_workflow_file!(Workflow.workflow_file_path(), claude_permission_mode: "YOLO")
+    assert {:error, {:invalid_workflow_config, _, [%{path: "claude.permission_mode"}]}} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(), claude_turn_timeout_ms: 0)
+    assert {:error, {:invalid_workflow_config, _, [%{path: "claude.turn_timeout_ms"}]}} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(), claude_stall_timeout_ms: -1)
+    assert {:error, {:invalid_workflow_config, _, [%{path: "claude.stall_timeout_ms"}]}} = Config.validate!()
+
     write_workflow_file!(Workflow.workflow_file_path(), claude_command: "claude --model opus")
     assert Config.claude_command() == "claude --model opus"
 
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ",")
-    assert Config.linear_active_states() == ["Todo", "In Progress"]
+    for invalid_active_states <- ["", ",", [], [""]] do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: invalid_active_states)
+      assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.active_states"}]}} = Config.validate!()
+    end
+
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_terminal_states: ",")
+    assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.terminal_states"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: "bad")
-    assert Config.max_concurrent_agents() == 10
+    assert {:error, {:invalid_workflow_config, _, [%{path: "agent.max_concurrent_agents"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_active_states: %{todo: true},
@@ -681,7 +699,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
       poll_interval_ms: %{bad: true},
       workspace_root: 123,
       max_retry_backoff_ms: 0,
-      max_concurrent_agents_by_state: %{"Todo" => "1", "Review" => 0, "Done" => "bad"},
+      max_concurrent_agents_by_state: %{"Todo" => "1", "Review" => 0, "Done" => "bad", "" => 1},
       hook_timeout_ms: 0,
       observability_enabled: "maybe",
       observability_refresh_ms: %{bad: true},
@@ -690,19 +708,22 @@ defmodule Rondo.WorkspaceAndConfigTest do
       server_host: 123
     )
 
-    assert Config.linear_active_states() == ["Todo", "In Progress"]
-    assert Config.linear_terminal_states() == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
-    assert Config.poll_interval_ms() == 30_000
-    assert Config.workspace_root() == Path.join(System.tmp_dir!(), "rondo_workspaces")
-    assert Config.max_retry_backoff_ms() == 300_000
-    assert Config.max_concurrent_agents_for_state("Todo") == 1
-    assert Config.max_concurrent_agents_for_state("Review") == 10
-    assert Config.hook_timeout_ms() == 60_000
-    assert Config.observability_enabled?()
-    assert Config.observability_refresh_ms() == 1_000
-    assert Config.observability_render_interval_ms() == 16
-    assert Config.server_port() == nil
-    assert Config.server_host() == "123"
+    assert {:error, {:invalid_workflow_config, _, errors}} = Config.validate!()
+    error_paths = Enum.map(errors, & &1.path)
+    assert "tracker.active_states" in error_paths
+    assert "tracker.terminal_states" in error_paths
+    assert "polling.interval_ms" in error_paths
+    assert "workspace.root" in error_paths
+    assert "agent.max_retry_backoff_ms" in error_paths
+    assert "agent.max_concurrent_agents_by_state.review" in error_paths
+    assert "agent.max_concurrent_agents_by_state.done" in error_paths
+    assert Enum.any?(errors, &(&1.path == "agent.max_concurrent_agents_by_state" and &1.message == "state name must be non-empty"))
+    assert "hooks.timeout_ms" in error_paths
+    assert "observability.dashboard_enabled" in error_paths
+    assert "observability.refresh_ms" in error_paths
+    assert "observability.render_interval_ms" in error_paths
+    assert "server.port" in error_paths
+    assert "server.host" in error_paths
 
     write_workflow_file!(Workflow.workflow_file_path(), claude_command: "claude")
     assert Config.claude_command() == "claude"
@@ -766,6 +787,8 @@ defmodule Rondo.WorkspaceAndConfigTest do
   test "config supports per-state max concurrent agent overrides" do
     workflow = """
     ---
+    tracker:
+      kind: memory
     agent:
       max_concurrent_agents: 10
       max_concurrent_agents_by_state:

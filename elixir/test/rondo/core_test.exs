@@ -18,13 +18,13 @@ defmodule Rondo.CoreTest do
     assert Config.agent_max_turns() == 20
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
-    assert Config.poll_interval_ms() == 30_000
+    assert {:error, {:invalid_workflow_config, _, [%{path: "polling.interval_ms"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 45_000)
     assert Config.poll_interval_ms() == 45_000
 
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 0)
-    assert Config.agent_max_turns() == 20
+    assert {:error, {:invalid_workflow_config, _, [%{path: "agent.max_turns"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 5)
     assert Config.agent_max_turns() == 5
@@ -37,20 +37,20 @@ defmodule Rondo.CoreTest do
       tracker_project_slug: nil
     )
 
-    assert {:error, :missing_linear_project_slug} = Config.validate!()
+    assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.project_slug"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_project_slug: "project",
       claude_command: ""
     )
 
-    assert :ok = Config.validate!()
+    assert {:error, {:invalid_workflow_config, _, [%{path: "claude.command"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), claude_command: "/usr/bin/claude")
     assert :ok = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: 123)
-    assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
+    assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.kind"}]}} = Config.validate!()
   end
 
   test "current WORKFLOW.md file is valid and complete" do
@@ -96,6 +96,17 @@ defmodule Rondo.CoreTest do
     assert Config.linear_api_token() == env_api_key
     assert Config.linear_project_slug() == "project"
     assert :ok = Config.validate!()
+
+    missing_api_key_env_var = "RONDO_MISSING_LINEAR_API_KEY_#{System.unique_integer([:positive])}"
+    System.delete_env(missing_api_key_env_var)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: "$#{missing_api_key_env_var}",
+      tracker_project_slug: "project",
+      claude_command: "/usr/bin/claude"
+    )
+
+    assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.api_key"}]}} = Config.validate!()
   end
 
   test "linear assignee resolves from LINEAR_ASSIGNEE env var" do

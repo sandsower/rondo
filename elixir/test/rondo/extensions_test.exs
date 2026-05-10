@@ -103,6 +103,31 @@ defmodule Rondo.ExtensionsTest do
     assert {:error, _reason} = WorkflowStore.force_reload()
     assert {:ok, %{prompt: "Second prompt"}} = Workflow.current()
 
+    invalid_config = """
+    ---
+    tracker:
+      kind: linear
+      api_key: token
+      project_slug: project
+    claude:
+      permission_mode: YOLO
+    ---
+    Invalid config prompt
+    """
+
+    File.write!(Workflow.workflow_file_path(), invalid_config)
+
+    log =
+      capture_log(fn ->
+        assert {:error, {:invalid_workflow_config, path, errors}} = WorkflowStore.force_reload()
+        assert path == Workflow.workflow_file_path()
+        assert Enum.map(errors, & &1.path) == ["claude.permission_mode"]
+      end)
+
+    assert log =~ "Failed to reload workflow path=#{Workflow.workflow_file_path()}"
+    assert log =~ "claude.permission_mode"
+    assert {:ok, %{prompt: "Second prompt"}} = Workflow.current()
+
     third_workflow = Path.join(Path.dirname(Workflow.workflow_file_path()), "THIRD_WORKFLOW.md")
     write_workflow_file!(third_workflow, prompt: "Third prompt")
     Workflow.set_workflow_file_path(third_workflow)
@@ -114,11 +139,59 @@ defmodule Rondo.ExtensionsTest do
     assert {:ok, _pid} = Supervisor.restart_child(Rondo.Supervisor, WorkflowStore)
   end
 
+  test "workflow store rejects reloads missing required workflow config" do
+    ensure_workflow_store_running()
+    assert {:ok, %{prompt: "You are an agent for this repository."}} = Workflow.current()
+
+    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
+
+    missing_api_key_env_var = "RONDO_MISSING_LINEAR_API_KEY_#{System.unique_integer([:positive])}"
+    System.delete_env(missing_api_key_env_var)
+
+    cases = [
+      {"---\ntracker:\n  api_key: token\n  project_slug: project\n---\nMissing kind\n", "tracker.kind", :keep_env},
+      {"---\ntracker:\n  kind: unknown\n  api_key: token\n  project_slug: project\n---\nBad kind\n", "tracker.kind", :keep_env},
+      {"---\ntracker:\n  kind: linear\n  project_slug: project\n---\nMissing token\n", "tracker.api_key", :clear_env},
+      {"---\ntracker:\n  kind: linear\n  api_key: \"$#{missing_api_key_env_var}\"\n  project_slug: project\n---\nMissing token env\n", "tracker.api_key", :keep_env},
+      {"---\ntracker:\n  kind: linear\n  api_key: token\n---\nMissing project\n", "tracker.project_slug", :keep_env}
+    ]
+
+    for {content, expected_path, env_mode} <- cases do
+      if env_mode == :clear_env, do: System.delete_env("LINEAR_API_KEY"), else: restore_env("LINEAR_API_KEY", previous_linear_api_key)
+      File.write!(Workflow.workflow_file_path(), content)
+
+      assert {:error, {:invalid_workflow_config, _, [%{path: ^expected_path}]}} = WorkflowStore.force_reload()
+      assert {:ok, %{prompt: "You are an agent for this repository."}} = Workflow.current()
+    end
+  end
+
   test "workflow store init stops on missing workflow file" do
     missing_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "MISSING_WORKFLOW.md")
     Workflow.set_workflow_file_path(missing_path)
 
     assert {:stop, {:missing_workflow_file, ^missing_path, :enoent}} = WorkflowStore.init([])
+  end
+
+  test "workflow store init stops on invalid workflow config" do
+    invalid_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "INVALID_CONFIG_WORKFLOW.md")
+
+    File.write!(invalid_path, """
+    ---
+    tracker:
+      kind: linear
+      api_key: token
+      project_slug: project
+    claude:
+      permission_mode: YOLO
+    ---
+    Prompt
+    """)
+
+    Workflow.set_workflow_file_path(invalid_path)
+
+    assert {:stop, {:invalid_workflow_config, ^invalid_path, [%{path: "claude.permission_mode"}]}} =
+             WorkflowStore.init([])
   end
 
   test "workflow store start_link and poll callback cover missing-file error paths" do
@@ -636,6 +709,7 @@ defmodule Rondo.ExtensionsTest do
 
           # Wait for the process to terminate
           ref = Process.monitor(pid)
+
           receive do
             {:DOWN, ^ref, :process, ^pid, _} -> :ok
           after

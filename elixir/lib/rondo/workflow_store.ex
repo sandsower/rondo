@@ -6,6 +6,7 @@ defmodule Rondo.WorkflowStore do
   use GenServer
   require Logger
 
+  alias Rondo.Config
   alias Rondo.Workflow
 
   @poll_interval_ms 1_000
@@ -130,6 +131,7 @@ defmodule Rondo.WorkflowStore do
 
   defp load_state(path) do
     with {:ok, workflow} <- Workflow.load(path),
+         :ok <- Config.validate_workflow(workflow, path),
          {:ok, stamp} <- current_stamp(path) do
       {:ok, %State{path: path, stamp: stamp, workflow: workflow}}
     else
@@ -148,6 +150,6 @@ defmodule Rondo.WorkflowStore do
   end
 
   defp log_reload_error(path, reason) do
-    Logger.error("Failed to reload workflow path=#{path} reason=#{inspect(reason)}; keeping last known good configuration")
+    Logger.error("Failed to reload workflow path=#{path} reason=#{Config.format_validation_error(reason)}; keeping last known good configuration")
   end
 end
