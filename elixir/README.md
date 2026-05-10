@@ -140,7 +140,9 @@ from exactly one label with the configured prefix, such as `status: Todo`; candi
 issues with no state label or multiple state labels. State transitions replace only prefixed state
 labels, create the target state label if missing, and leave all other labels untouched. Native
 GitHub `open`/`closed` state is used as an outer filter; label state is Rondo's workflow source of
-truth. See [`examples/github-WORKFLOW.md`](examples/github-WORKFLOW.md) for a fuller prompt.
+truth. Candidate and cleanup listing uses `gh issue list --limit 1000`; repos with more matching
+issues should narrow `label_filter` until a paginated adapter lands. See
+[`examples/github-WORKFLOW.md`](examples/github-WORKFLOW.md) for a fuller prompt.
 
 Notes:
 

@@ -78,7 +78,7 @@ defmodule Rondo.GitHub.ClientTest do
              "--state",
              "open",
              "--limit",
-             "100",
+             "1000",
              "--json",
              @json_fields,
              "--label",
@@ -135,7 +135,36 @@ defmodule Rondo.GitHub.ClientTest do
              )
 
     assert_received {:gh, args}
-    assert Enum.slice(args, 0, 8) == ["issue", "list", "--repo", @repo, "--state", "all", "--limit", "100"]
+    assert Enum.slice(args, 0, 8) == ["issue", "list", "--repo", @repo, "--state", "all", "--limit", "1000"]
+  end
+
+  test "fetch_issue_states_by_ids omits issues that are no longer visible or readable" do
+    runner = fn "gh", args, _opts ->
+      send(self(), {:gh, args})
+
+      case args do
+        ["issue", "view", "1" | _] ->
+          {Jason.encode!(%{"number" => 1, "title" => "Good", "state" => "OPEN", "labels" => [%{"name" => "rondo"}, %{"name" => "status: In Progress"}]}), 0}
+
+        ["issue", "view", "2" | _] ->
+          {Jason.encode!(%{"number" => 2, "title" => "Missing owner label", "state" => "OPEN", "labels" => [%{"name" => "status: In Progress"}]}), 0}
+
+        ["issue", "view", "3" | _] ->
+          {Jason.encode!(%{"number" => 3, "title" => "Missing state", "state" => "OPEN", "labels" => [%{"name" => "rondo"}]}), 0}
+
+        ["issue", "view", "4" | _] ->
+          {Jason.encode!(%{"number" => 4, "title" => "Multiple states", "state" => "OPEN", "labels" => [%{"name" => "rondo"}, %{"name" => "status: Todo"}, %{"name" => "status: Done"}]}), 0}
+      end
+    end
+
+    assert {:ok, [%Issue{identifier: "GH-1"}]} =
+             GitHubClient.fetch_issue_states_by_ids(
+               ["#{@repo}#1", "#{@repo}#2", "#{@repo}#3", "#{@repo}#4"],
+               repo: @repo,
+               runner: runner,
+               label_filter: ["rondo"],
+               state_label_prefix: "status:"
+             )
   end
 
   test "update_issue_state replaces prefixed state labels and creates missing target label" do

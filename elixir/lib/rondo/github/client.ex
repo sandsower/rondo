@@ -8,7 +8,7 @@ defmodule Rondo.GitHub.Client do
   alias Rondo.{Config, Linear.Issue}
 
   @json_fields "number,title,body,labels,url,state,createdAt,updatedAt"
-  @default_limit "100"
+  @default_limit "1000"
   @state_label_color "5319E7"
 
   @spec fetch_candidate_issues(keyword()) :: {:ok, [Issue.t()]} | {:error, term()}
@@ -137,8 +137,8 @@ defmodule Rondo.GitHub.Client do
     ids
     |> Enum.reduce_while({:ok, []}, fn issue_id, {:ok, issues} ->
       with {:ok, number} <- parse_issue_number(issue_id, context.repo),
-           {:ok, issue} <- view_issue(context, number) do
-        {:cont, {:ok, [issue | issues]}}
+           {:ok, raw_issue} <- view_raw_issue(context, number) do
+        {:cont, {:ok, maybe_prepend_visible_issue(raw_issue, issues, context)}}
       else
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -146,6 +146,17 @@ defmodule Rondo.GitHub.Client do
     |> case do
       {:ok, issues} -> {:ok, Enum.reverse(issues)}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp maybe_prepend_visible_issue(raw_issue, issues, context) do
+    if issue_has_required_labels?(raw_issue, context.label_filter) do
+      case normalize_issue(raw_issue, context.repo, context.state_label_prefix) do
+        %Issue{} = issue -> [issue | issues]
+        nil -> issues
+      end
+    else
+      issues
     end
   end
 
@@ -177,15 +188,6 @@ defmodule Rondo.GitHub.Client do
       {:ok, _payload} -> {:error, :github_unexpected_payload}
       {:error, %Jason.DecodeError{} = reason} -> {:error, {:github_decode_failed, reason}}
       {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp view_issue(context, number) do
-    with {:ok, raw_issue} <- view_raw_issue(context, number) do
-      case normalize_issue(raw_issue, context.repo, context.state_label_prefix) do
-        %Issue{} = issue -> {:ok, issue}
-        nil -> {:error, {:github_issue_state_unreadable, "#{context.repo}##{number}"}}
-      end
     end
   end
 
@@ -320,6 +322,15 @@ defmodule Rondo.GitHub.Client do
       _ -> nil
     end)
     |> Enum.reject(&is_nil/1)
+  end
+
+  defp issue_has_required_labels?(issue, required_labels) do
+    labels = issue |> label_names() |> MapSet.new()
+
+    required_labels
+    |> List.wrap()
+    |> Enum.filter(&is_binary/1)
+    |> Enum.all?(&MapSet.member?(labels, &1))
   end
 
   defp state_label?(label, prefix) when is_binary(label) and is_binary(prefix), do: String.starts_with?(label, prefix)
