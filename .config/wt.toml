@@ -1,0 +1,24 @@
+# Worktrunk project config for Rondo.
+# Keeps local task worktrees cheap while avoiding shared mutable build output.
+
+[pre-start]
+link-elixir-deps = """
+set -eu
+src="{{ primary_worktree_path }}/elixir/deps"
+dst="elixir/deps"
+if [ -d "$src" ] && [ ! -e "$dst" ]; then
+  ln -s "$src" "$dst"
+  echo "linked $dst -> $src"
+fi
+"""
+
+[step.copy-ignored]
+exclude = [
+  ".claude/",
+  ".rondo_runs/",
+  "elixir/.claude/",
+  "elixir/cover/",
+  "elixir/log/",
+  "elixir/logs/",
+  "elixir/tmp/",
+]

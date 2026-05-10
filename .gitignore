@@ -2,3 +2,6 @@
 .claude/
 .rondo_runs/
 docs/plans/
+
+# Worktree-local symlink to the primary checkout's deps cache.
+elixir/deps
