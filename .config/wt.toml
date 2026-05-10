@@ -4,8 +4,11 @@
 [pre-start]
 link-elixir-deps = """
 set -eu
-src="{{ primary_worktree_path }}/elixir/deps"
+src="{{ repo_path }}/elixir/deps"
 dst="elixir/deps"
+if [ -L "$dst" ] && [ ! -e "$dst" ]; then
+  rm "$dst"
+fi
 if [ -d "$src" ] && [ ! -e "$dst" ]; then
   ln -s "$src" "$dst"
   echo "linked $dst -> $src"
@@ -16,8 +19,10 @@ fi
 exclude = [
   ".claude/",
   ".rondo_runs/",
+  "elixir/_build/",
   "elixir/.claude/",
   "elixir/cover/",
+  "elixir/deps/",
   "elixir/log/",
   "elixir/logs/",
   "elixir/tmp/",
