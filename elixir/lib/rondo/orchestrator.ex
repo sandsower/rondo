@@ -84,13 +84,19 @@ defmodule Rondo.Orchestrator do
     running
     |> Map.values()
     |> Enum.each(fn running_entry ->
-      terminate_run_ledger_on_shutdown(running_entry, reason)
-      terminate_running_child(running_entry)
+      try do
+        terminate_run_ledger_on_shutdown(running_entry, reason)
+        terminate_running_child(running_entry)
+      rescue
+        error ->
+          Logger.error(
+            "Shutdown cleanup failed #{running_entry_context(running_entry)} " <>
+              "error=#{Exception.message(error)} stacktrace=#{inspect(__STACKTRACE__)}"
+          )
+      end
     end)
 
     :ok
-  rescue
-    _ -> :ok
   end
 
   def terminate(_reason, _state), do: :ok
@@ -108,7 +114,7 @@ defmodule Rondo.Orchestrator do
   defp terminate_run_ledger_on_shutdown(_running_entry, _reason), do: :ok
 
   defp terminate_running_child(%{pid: pid}) when is_pid(pid) do
-    Task.Supervisor.terminate_child(Rondo.TaskSupervisor, pid)
+    terminate_task(pid)
   end
 
   defp terminate_running_child(_running_entry), do: :ok
@@ -867,6 +873,9 @@ defmodule Rondo.Orchestrator do
 
   defp link_run_ledger_archive(nil, _archive_path), do: nil
 
+  defp link_run_ledger_archive(%RunLedger{} = ledger, archive_path) when not is_binary(archive_path),
+    do: ledger
+
   defp link_run_ledger_archive(%RunLedger{} = ledger, archive_path) do
     case RunLedger.link_archive(ledger, archive_path) do
       {:ok, ledger} ->
@@ -1115,6 +1124,15 @@ defmodule Rondo.Orchestrator do
 
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
+  end
+
+  defp running_entry_context(running_entry) do
+    issue = Map.get(running_entry, :issue) || %{}
+    issue_id = Map.get(issue, :id) || Map.get(running_entry, :issue_id) || "n/a"
+    issue_identifier = Map.get(issue, :identifier) || Map.get(running_entry, :identifier) || "n/a"
+    session_id = Map.get(running_entry, :session_id) || "n/a"
+
+    "issue_id=#{issue_id} issue_identifier=#{issue_identifier} session_id=#{session_id}"
   end
 
   defp ledger_context(%RunLedger{} = ledger, session_id_override \\ nil) do
@@ -1569,6 +1587,11 @@ defmodule Rondo.Orchestrator do
   # --- Per-run file persistence ---
   # Layout: <archive_root>/<IDENTIFIER>/<timestamp>.json
 
+  defp archived_run_context(entry) do
+    "issue_id=#{entry[:issue_id] || "n/a"} " <>
+      "issue_identifier=#{entry[:identifier] || "n/a"} session_id=#{entry[:session_id] || "n/a"}"
+  end
+
   defp persist_archived_run(entry) do
     identifier = entry[:identifier] || "unknown"
     timestamp = format_file_timestamp(entry[:started_at])
@@ -1590,12 +1613,14 @@ defmodule Rondo.Orchestrator do
         path
 
       {:error, reason} ->
-        Logger.warning("Failed to persist archived run for #{identifier}: #{inspect(reason)}")
+        Logger.warning("Failed to persist archived run #{archived_run_context(entry)} reason=#{inspect(reason)}")
+
         nil
     end
   rescue
     error ->
-      Logger.warning("Failed to persist archived run: #{Exception.message(error)}")
+      Logger.warning("Failed to persist archived run #{archived_run_context(entry)} error=#{Exception.message(error)}")
+
       nil
   end
 
