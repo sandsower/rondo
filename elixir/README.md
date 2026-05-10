@@ -138,7 +138,10 @@ Notes:
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `claude.command` stays a shell command string and any `$VAR` expansion there happens in the
-  launched shell.
+  launched shell on Unix-like hosts. Quoted commands and wrappers such as `mise exec -- claude` are
+  supported there; Rondo shell-escapes the prompt and generated CLI flags before appending them to
+  that command string. Native Windows shell-command support is tracked separately and fails safely
+  rather than routing prompt text through `cmd.exe`.
 
 ```yaml
 tracker:

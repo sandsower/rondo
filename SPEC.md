@@ -418,6 +418,14 @@ Fields:
 - `command` (string shell command)
   - Default: `claude`
   - The runtime launches this as the base command for Claude Code CLI invocations.
+  - The value is preserved as POSIX `sh` shell syntax on Unix-like hosts. Quoting, shell variable
+    expansion, env assignments, and wrapper commands such as `mise exec -- claude` are evaluated by
+    the launched shell. Implementation-generated prompt and CLI flag arguments MUST be appended
+    using POSIX `sh` quoting rules: wrap each generated argument in single quotes and represent
+    embedded single quotes with the standard `'\\''` sequence, or an equivalent transformation.
+    Implementations MUST NOT perform implicit
+    variable expansion, command substitution, glob expansion, or other shell interpretation on
+    generated arguments before quoting them.
 - `permission_mode` (string)
   - Default: `bypassPermissions`
   - Values: `default`, `plan`, `acceptEdits`, `bypassPermissions`
@@ -916,25 +924,29 @@ Compatibility profile:
 
 Subprocess launch parameters:
 
-- Base command: `claude.command` (default: `claude`)
+- Base command: `claude.command` (default: `claude`), interpreted as a shell command string.
 - First turn invocation:
-  ```
-  <claude.command> -p "<rendered prompt>" \
+  ```sh
+  <claude.command> -p <rendered prompt> \
+    --verbose \
     --output-format <claude.output_format> \
     --max-turns <claude.max_turns> \
     --permission-mode <claude.permission_mode> \
     [--dangerously-skip-permissions] \
     [--model <claude.model>] \
-    [--allowedTools <tool> ...] \
-    --cwd <workspace_path>
+    [--allowedTools <tool> ...]
   ```
 - Continuation invocation:
-  ```
+  ```sh
   <claude.command> --resume <session_id> \
-    -p "<continuation guidance>" \
+    -p <continuation guidance> \
+    --verbose \
     --output-format <claude.output_format> \
     --max-turns <claude.max_turns> \
-    --cwd <workspace_path>
+    --permission-mode <claude.permission_mode> \
+    [--dangerously-skip-permissions] \
+    [--model <claude.model>] \
+    [--allowedTools <tool> ...]
   ```
 - Working directory: workspace path
 - Stdout: newline-delimited JSON events (`stream-json` format)
@@ -943,6 +955,16 @@ Subprocess launch parameters:
 Notes:
 
 - The default command is `claude`.
+- `--verbose` is included so Claude Code emits streaming events with `--output-format stream-json`.
+- `claude.command` is preserved as POSIX `sh` shell syntax so quoted commands, `$VAR` expansion,
+  env assignments, and wrapper commands work on Unix-like hosts. Generated prompt/config flags are
+  appended only after POSIX `sh` quoting: each generated argument is single-quoted, and embedded
+  single quotes are encoded as `'\\''` or an equivalent transformation. Generated arguments are
+  data, not shell syntax: implementations
+  must not perform variable expansion, command substitution, glob expansion, or other shell
+  interpretation on them before quoting. Native Windows shell-command support is tracked separately;
+  implementations must fail safely rather than route generated prompt text through an unsafe shell
+  escape.
 - `--dangerously-skip-permissions` is included when `claude.dangerously_skip_permissions` is `true`.
 - `--model` is included only when `claude.model` is set.
 - `--allowedTools` entries are included only when `claude.allowed_tools` is set.
@@ -1099,6 +1121,8 @@ Error mapping (recommended normalized categories):
 - `invalid_workspace_cwd`
 - `invalid_permission_mode`
 - `turn_timeout`
+- `unsupported_platform` (for example `windows_shell_command` when native Windows shell-command
+  support is not implemented safely)
 - `subprocess_exit` (non-zero exit code)
 - `turn_failed`
 - `stalled_session`

@@ -5,7 +5,7 @@ defmodule Rondo.Claude.CLI do
 
   require Logger
   alias Rondo.Claude.StreamParser
-  alias Rondo.Config
+  alias Rondo.{Config, PathSafety}
 
   @port_line_bytes 1_048_576
   @max_log_bytes 1_000
@@ -41,7 +41,6 @@ defmodule Rondo.Claude.CLI do
 
     with :ok <- validate_workspace(workspace) do
       command = Config.claude_command()
-      {cmd, cmd_args} = parse_command(command, args)
 
       # Erlang ports cannot read stdout and stderr as separate streams, so we
       # merge them with :stderr_to_stdout. The spec says stderr is diagnostics
@@ -51,52 +50,40 @@ defmodule Rondo.Claude.CLI do
       # Code ever emits JSON-shaped diagnostics on stderr this could be a
       # problem, but in practice its stderr is plain text.
       #
-      # We wrap the command via /bin/sh so the child runs in a new process
-      # group. safe_port_close/1 sends SIGTERM to the entire group via
-      # `kill -- -$PID`, preventing orphan Claude processes when Rondo
-      # exits or the agent is terminated.
-      {spawn_target, spawn_args} =
-        case :os.type() do
-          {:win32, _} ->
-            # On Windows, skip the /bin/sh wrapper entirely. Erlang Port handles
-            # argv → CreateProcess command-line quoting natively, which avoids
-            # the multiline-prompt + single-quote escaping problems that break
-            # bash's `-c` parser.
-            cmd_path = System.find_executable(cmd) || cmd
-            {cmd_path, cmd_args}
+      # On Unix, we wrap the command via a shell so configured shell syntax is
+      # preserved. safe_port_close/1 sends SIGTERM to the spawned process group
+      # via `kill -- -$PID`, preventing orphan Claude processes when Rondo exits
+      # or the agent is terminated.
+      with {:ok, spawn_target, spawn_args} <- spawn_invocation(command, args) do
+        port =
+          Port.open(
+            {:spawn_executable, spawn_target},
+            [
+              :binary,
+              :exit_status,
+              :stderr_to_stdout,
+              {:line, @port_line_bytes},
+              {:cd, Path.expand(workspace)},
+              {:args, spawn_args},
+              {:env, [{~c"CLAUDECODE", false}]}
+            ]
+          )
 
-          _ ->
-            {"/bin/sh", ["-c", build_wrapper_script(cmd, cmd_args)]}
+        now = System.monotonic_time(:millisecond)
+        deadline = now + turn_timeout_ms
+        stall_deadline = now + stall_timeout_ms
+
+        try do
+          stream_loop(port, deadline, stall_deadline, stall_timeout_ms, on_event, %{
+            session_id: nil,
+            usage: nil,
+            buffer: ""
+          })
+        catch
+          :exit, reason ->
+            safe_port_close(port)
+            {:error, {:subprocess_exit, reason}}
         end
-
-      port =
-        Port.open(
-          {:spawn_executable, spawn_target},
-          [
-            :binary,
-            :exit_status,
-            :stderr_to_stdout,
-            {:line, @port_line_bytes},
-            {:cd, Path.expand(workspace)},
-            {:args, spawn_args},
-            {:env, [{~c"CLAUDECODE", false}]}
-          ]
-        )
-
-      now = System.monotonic_time(:millisecond)
-      deadline = now + turn_timeout_ms
-      stall_deadline = now + stall_timeout_ms
-
-      try do
-        stream_loop(port, deadline, stall_deadline, stall_timeout_ms, on_event, %{
-          session_id: nil,
-          usage: nil,
-          buffer: ""
-        })
-      catch
-        :exit, reason ->
-          safe_port_close(port)
-          {:error, {:subprocess_exit, reason}}
       end
     end
   end
@@ -203,6 +190,8 @@ defmodule Rondo.Claude.CLI do
 
     base
     |> maybe_add_flag(Config.claude_dangerously_skip_permissions?(), "--dangerously-skip-permissions")
+    |> maybe_add_option(Config.claude_model(), "--model")
+    |> maybe_add_allowed_tools(Config.claude_allowed_tools())
   end
 
   defp maybe_add_flag(args, true, flag), do: args ++ [flag]
@@ -218,27 +207,32 @@ defmodule Rondo.Claude.CLI do
     Enum.reduce(tools, args, fn tool, acc -> acc ++ ["--allowedTools", tool] end)
   end
 
-  defp parse_command(command, extra_args) do
-    parts = String.split(command, ~r/\s+/, trim: true)
-
-    {cmd, cmd_args} =
-      case parts do
-        [cmd | rest] -> {cmd, rest ++ extra_args}
-        [] -> {"claude", extra_args}
-      end
-
-    resolved_cmd = System.find_executable(cmd) || cmd
-    {resolved_cmd, cmd_args}
-  end
-
   defp validate_workspace(workspace) do
     expanded = Path.expand(workspace)
     root = Path.expand(Config.workspace_root())
 
-    cond do
-      !File.dir?(expanded) -> {:error, {:invalid_workspace_cwd, :not_a_directory}}
-      !String.starts_with?(expanded, root) -> {:error, {:invalid_workspace_cwd, :outside_root}}
-      true -> :ok
+    with true <- File.dir?(expanded),
+         {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded),
+         {:ok, canonical_root} <- PathSafety.canonicalize(root) do
+      canonical_root_prefix = canonical_root <> "/"
+      expanded_root_prefix = root <> "/"
+
+      cond do
+        canonical_workspace == canonical_root ->
+          {:error, {:invalid_workspace_cwd, :workspace_equals_root}}
+
+        String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
+          :ok
+
+        String.starts_with?(expanded <> "/", expanded_root_prefix) ->
+          {:error, {:invalid_workspace_cwd, :symlink_escape}}
+
+        true ->
+          {:error, {:invalid_workspace_cwd, :outside_root}}
+      end
+    else
+      false -> {:error, {:invalid_workspace_cwd, :not_a_directory}}
+      {:error, {:path_canonicalize_failed, _path, reason}} -> {:error, {:invalid_workspace_cwd, reason}}
     end
   end
 
@@ -267,27 +261,56 @@ defmodule Rondo.Claude.CLI do
     :error, :badarg -> :ok
   end
 
-  defp build_wrapper_script(cmd, args) do
-    # Shell-escape each argument, then exec the command.
-    # exec replaces the shell so the process inherits the shell's PID/PGID,
-    # making `kill -- -$PID` reach the entire tree.
-    #
-    # We wrap with `script -qfec` to allocate a PTY. Without this, Node.js
-    # (which powers the Claude CLI) fully buffers stdout when writing to a pipe,
-    # and stream-json events only appear when the internal buffer fills (~64KB)
-    # or the process exits. The PTY tricks Node into line-buffering.
-    escaped_args =
-      Enum.map_join([cmd | args], " ", fn arg ->
-        "'" <> String.replace(arg, "'", "'\\''") <> "'"
-      end)
-
+  defp spawn_invocation(command, args) do
     case :os.type() do
       {:win32, _} ->
-        "exec " <> escaped_args
+        # Windows shell-command support is tracked separately in #9. Do not
+        # route prompt text through cmd.exe: generated args would no longer be
+        # argv-safe. Until a Windows-native adapter lands, fail before launch
+        # instead of risking shell expansion of ticket content.
+        {:error, {:unsupported_platform, :windows_shell_command}}
 
       _ ->
-        "exec script -qfec #{shell_escape(escaped_args)} /dev/null"
+        {spawn_target, spawn_args} = unix_shell_invocation(build_wrapper_script(command, args))
+        {:ok, spawn_target, spawn_args}
     end
+  end
+
+  defp unix_shell_invocation(script) do
+    case System.find_executable("bash") do
+      nil -> {"/bin/sh", ["-c", script]}
+      bash -> {bash, ["-c", script]}
+    end
+  end
+
+  defp build_wrapper_script(command, args) do
+    # claude.command is a shell command string. Preserve its quoting,
+    # expansion, and wrappers, while shell-escaping only Rondo-generated args.
+    # The outer exec replaces the shell with script(1), preserving the wrapper
+    # PID for process-group cleanup. Do not prepend exec to the inner command:
+    # assignment forms like `FOO=bar claude` are valid shell command strings.
+    #
+    # We wrap with script(1) to allocate a PTY. Without this, Node.js (which
+    # powers the Claude CLI) fully buffers stdout when writing to a pipe, and
+    # stream-json events only appear when the internal buffer fills (~64KB) or
+    # the process exits. The PTY tricks Node into line-buffering.
+    inner_command = shell_command_with_args(command, args)
+
+    case :os.type() do
+      {:unix, :linux} ->
+        "exec script -qfec #{shell_escape(inner_command)} /dev/null"
+
+      {:unix, _} ->
+        "exec script -q /dev/null /bin/sh -c #{shell_escape(inner_command)}"
+    end
+  end
+
+  defp shell_command_with_args(command, args) do
+    escaped_args = Enum.map_join(args, " ", &shell_escape/1)
+
+    [command, escaped_args]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join(" ")
   end
 
   defp shell_escape(str) do
