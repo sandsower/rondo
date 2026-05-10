@@ -418,9 +418,14 @@ Fields:
 - `command` (string shell command)
   - Default: `claude`
   - The runtime launches this as the base command for Claude Code CLI invocations.
-  - The value is preserved as shell syntax. Quoting, shell variable expansion, and wrapper commands
-    such as `mise exec -- claude` are evaluated by the launched shell; implementation-generated
-    prompt and CLI flag arguments are shell-escaped before being appended.
+  - The value is preserved as POSIX `sh` shell syntax on Unix-like hosts. Quoting, shell variable
+    expansion, env assignments, and wrapper commands such as `mise exec -- claude` are evaluated by
+    the launched shell. Implementation-generated prompt and CLI flag arguments MUST be appended
+    using POSIX `sh` quoting rules: wrap each generated argument in single quotes and represent
+    embedded single quotes with the standard `'\\''` sequence, or an equivalent transformation.
+    Implementations MUST NOT perform implicit
+    variable expansion, command substitution, glob expansion, or other shell interpretation on
+    generated arguments before quoting them.
 - `permission_mode` (string)
   - Default: `bypassPermissions`
   - Values: `default`, `plan`, `acceptEdits`, `bypassPermissions`
@@ -951,10 +956,15 @@ Notes:
 
 - The default command is `claude`.
 - `--verbose` is included so Claude Code emits streaming events with `--output-format stream-json`.
-- `claude.command` is preserved as shell syntax so quoted commands, `$VAR` expansion, and wrapper
-  commands work on Unix-like hosts. Generated prompt/config flags are escaped before being appended.
-  Native Windows shell-command support is tracked separately; implementations must fail safely rather
-  than route generated prompt text through an unsafe shell escape.
+- `claude.command` is preserved as POSIX `sh` shell syntax so quoted commands, `$VAR` expansion,
+  env assignments, and wrapper commands work on Unix-like hosts. Generated prompt/config flags are
+  appended only after POSIX `sh` quoting: each generated argument is single-quoted, and embedded
+  single quotes are encoded as `'\\''` or an equivalent transformation. Generated arguments are
+  data, not shell syntax: implementations
+  must not perform variable expansion, command substitution, glob expansion, or other shell
+  interpretation on them before quoting. Native Windows shell-command support is tracked separately;
+  implementations must fail safely rather than route generated prompt text through an unsafe shell
+  escape.
 - `--dangerously-skip-permissions` is included when `claude.dangerously_skip_permissions` is `true`.
 - `--model` is included only when `claude.model` is set.
 - `--allowedTools` entries are included only when `claude.allowed_tools` is set.
