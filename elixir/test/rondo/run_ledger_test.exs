@@ -195,6 +195,8 @@ defmodule Rondo.RunLedgerTest do
              "capabilities" => %{"resume" => "thread_id"},
              "final_report" => "done"
            }
+
+    assert RunLedger.agent_metadata_for_agent_update(%{adapter: "atom-key-adapter"}) == %{"adapter" => "atom-key-adapter"}
   end
 
   test "update_agent_metadata records adapter run ref capabilities and final report in manifest" do

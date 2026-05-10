@@ -12,6 +12,7 @@ defmodule Rondo.Agent.ClaudeCodeAdapter do
 
   alias Rondo.Agent.Adapter
   alias Rondo.Claude.{CLI, StreamParser}
+  alias Rondo.{Config, PathSafety}
 
   @id "claude_code"
 
@@ -35,8 +36,10 @@ defmodule Rondo.Agent.ClaudeCodeAdapter do
 
   @impl true
   def probe(_opts \\ []) do
-    Adapter.probe_result(:ok, %{
-      command: :ok,
+    command_status = command_probe_status(Config.claude_command())
+
+    Adapter.probe_result(aggregate_probe_status([command_status, :ok, :ok]), %{
+      command: command_status,
       stream_parser: :ok,
       resume: :ok
     })
@@ -55,7 +58,10 @@ defmodule Rondo.Agent.ClaudeCodeAdapter do
           handle_stream_event(raw_event, stream_state_key, on_event, capabilities)
         end)
 
-      result = invoke_cli(prompt, workspace, previous_run_ref, cli_opts)
+      result =
+        with :ok <- validate_workspace(workspace) do
+          invoke_cli(prompt, workspace, previous_run_ref, cli_opts)
+        end
 
       case result do
         {:ok, cli_result} ->
@@ -89,6 +95,64 @@ defmodule Rondo.Agent.ClaudeCodeAdapter do
       end
     after
       Process.delete(stream_state_key)
+    end
+  end
+
+  defp command_probe_status(command) when is_binary(command) do
+    command
+    |> String.trim()
+    |> case do
+      "" -> :missing
+      trimmed -> command_binary_status(trimmed)
+    end
+  end
+
+  defp command_binary_status(command) do
+    command
+    |> String.split(~r/\s+/, parts: 2)
+    |> List.first()
+    |> System.find_executable()
+    |> case do
+      nil -> :missing
+      _path -> :ok
+    end
+  end
+
+  defp aggregate_probe_status(statuses) do
+    cond do
+      Enum.any?(statuses, &(&1 == :missing)) -> :missing
+      Enum.any?(statuses, &(&1 == :degraded)) -> :degraded
+      Enum.any?(statuses, &(&1 == :unsupported)) -> :degraded
+      true -> :ok
+    end
+  end
+
+  defp validate_workspace(workspace) do
+    expanded = Path.expand(workspace)
+    root = Path.expand(Config.workspace_root())
+
+    with true <- File.dir?(expanded),
+         {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded),
+         {:ok, canonical_root} <- PathSafety.canonicalize(root) do
+      canonical_root_prefix = canonical_root <> "/"
+      expanded_root_prefix = root <> "/"
+
+      cond do
+        canonical_workspace == canonical_root ->
+          {:error, {:invalid_workspace_cwd, :workspace_equals_root}}
+
+        String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
+          :ok
+
+        String.starts_with?(expanded <> "/", expanded_root_prefix) ->
+          {:error, {:invalid_workspace_cwd, :symlink_escape}}
+
+        true ->
+          {:error, {:invalid_workspace_cwd, :outside_root}}
+      end
+    else
+      false -> {:error, {:invalid_workspace_cwd, :not_a_directory}}
+      {:error, {:path_canonicalize_failed, _path, reason}} -> {:error, {:invalid_workspace_cwd, reason}}
     end
   end
 

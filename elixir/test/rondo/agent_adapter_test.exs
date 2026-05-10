@@ -118,6 +118,51 @@ defmodule Rondo.AgentAdapterTest do
     assert Config.agent_adapter() == "fake"
   end
 
+  test "claude code adapter probe reports missing command" do
+    write_workflow_file!(Workflow.workflow_file_path(), claude_command: "rondo-missing-claude-#{System.unique_integer([:positive])}")
+
+    assert %{status: :missing, checks: %{command: :missing, stream_parser: :ok, resume: :ok}} = ClaudeCodeAdapter.probe()
+  end
+
+  test "claude code adapter rejects workspaces outside configured root before invoking CLI" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-claude-code-adapter-workspace-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      outside_workspace = Path.join(test_root, "outside")
+      claude_binary = Path.join(test_root, "fake-claude")
+
+      File.mkdir_p!(workspace_root)
+      File.mkdir_p!(outside_workspace)
+
+      File.write!(claude_binary, """
+      #!/bin/sh
+      echo should-not-run > #{Path.join(test_root, "invoked")}
+      exit 0
+      """)
+
+      File.chmod!(claude_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        claude_command: claude_binary
+      )
+
+      assert {:error, {:invalid_workspace_cwd, :outside_root}} =
+               ClaudeCodeAdapter.invoke(%{
+                 prompt: "do work",
+                 workspace: outside_workspace,
+                 previous_run_ref: nil,
+                 on_event: fn _event -> :ok end,
+                 opts: []
+               })
+
+      refute File.exists?(Path.join(test_root, "invoked"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "claude code adapter wraps Claude CLI and returns a provider-neutral run ref" do
     test_root = Path.join(System.tmp_dir!(), "rondo-claude-code-adapter-#{System.unique_integer([:positive])}")
 
