@@ -39,6 +39,38 @@ defmodule Rondo.Pi.CLITest do
     end
   end
 
+  test "PiCLI.run flushes final buffered JSON without a trailing newline" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-elixir-pi-cli-noeol-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-204")
+      pi_binary = Path.join(test_root, "fake-pi")
+      File.mkdir_p!(workspace)
+
+      File.write!(pi_binary, """
+      #!/bin/sh
+      printf '{"type":"session","version":3,"id":"noeol-pi-session","usage":{"input":1,"output":2}}'
+      exit 0
+      """)
+
+      File.chmod!(pi_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        agent_adapter: "pi",
+        pi_command: pi_binary
+      )
+
+      assert {:ok, result} = PiCLI.run("No newline test", workspace)
+      assert result.session_id == "noeol-pi-session"
+      assert result.usage.input_tokens == 1
+      assert result.usage.output_tokens == 2
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "PiCLI.run invokes on_event callback for each parsed event" do
     test_root = Path.join(System.tmp_dir!(), "rondo-elixir-pi-cli-events-#{System.unique_integer([:positive])}")
 

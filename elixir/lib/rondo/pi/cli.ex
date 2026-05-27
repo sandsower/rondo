@@ -64,7 +64,9 @@ defmodule Rondo.Pi.CLI do
           stream_loop(port, deadline, stall_deadline, stall_timeout_ms, on_event, %{
             session_id: nil,
             usage: nil,
-            buffer: ""
+            buffer: "",
+            issue_id: Keyword.get(opts, :issue_id),
+            issue_identifier: Keyword.get(opts, :issue_identifier)
           })
         catch
           :exit, reason ->
@@ -100,6 +102,8 @@ defmodule Rondo.Pi.CLI do
             stream_loop(port, deadline, new_stall_deadline, stall_timeout_ms, on_event, %{state | buffer: state.buffer <> chunk})
 
           {^port, {:exit_status, 0}} ->
+            state = flush_buffer(on_event, drain_port_data(port, on_event, state))
+
             {:ok,
              %{
                session_id: state.session_id,
@@ -108,6 +112,7 @@ defmodule Rondo.Pi.CLI do
              }}
 
           {^port, {:exit_status, code}} ->
+            _state = flush_buffer(on_event, drain_port_data(port, on_event, state))
             {:error, {:subprocess_exit, code}}
         after
           remaining_ms ->
@@ -134,11 +139,36 @@ defmodule Rondo.Pi.CLI do
         %{state | session_id: session_id, usage: usage}
 
       {:error, reason} ->
+        Logger.metadata(parse_error_metadata(state))
         Logger.debug("Unparseable pi stream line: #{inspect(reason)} line=#{String.slice(full_line, 0, @max_log_bytes)}")
 
         state
     end
   end
+
+  defp parse_error_metadata(state) do
+    [
+      adapter: "pi",
+      session_id: state.session_id,
+      issue_id: Map.get(state, :issue_id),
+      issue_identifier: Map.get(state, :issue_identifier)
+    ]
+  end
+
+  defp drain_port_data(port, on_event, state) do
+    receive do
+      {^port, {:data, {:eol, line}}} ->
+        drain_port_data(port, on_event, handle_line(line, on_event, state))
+
+      {^port, {:data, {:noeol, chunk}}} ->
+        drain_port_data(port, on_event, %{state | buffer: state.buffer <> chunk})
+    after
+      0 -> state
+    end
+  end
+
+  defp flush_buffer(_on_event, %{buffer: ""} = state), do: state
+  defp flush_buffer(on_event, state), do: handle_line("", on_event, state)
 
   defp build_first_turn_args(prompt), do: ["--mode", "json", prompt]
   defp build_resume_args(session_id, prompt), do: ["--mode", "json", "--session", session_id, prompt]

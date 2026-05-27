@@ -599,9 +599,14 @@ defmodule Rondo.Config do
 
   defp require_agent_command(options, path) do
     case get_in(options, [:agent, :adapter]) do
+      "claude_code" -> require_claude_command(options, path)
       "pi" -> require_pi_command(options, path)
-      _adapter -> require_claude_command(options, path)
+      adapter -> {:error, invalid_workflow_config(path, [unsupported_adapter_error(adapter)])}
     end
+  end
+
+  defp unsupported_adapter_error(adapter) do
+    config_error("agent.adapter", adapter, "unsupported agent adapter; must be claude_code or pi")
   end
 
   defp require_claude_command(options, path) do

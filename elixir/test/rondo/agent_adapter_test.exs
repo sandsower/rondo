@@ -117,7 +117,9 @@ defmodule Rondo.AgentAdapterTest do
     assert :ok = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), agent_adapter: "fake")
-    assert Config.agent_adapter() == "fake"
+
+    assert {:error, {:invalid_workflow_config, _, [%{path: "agent.adapter", value: "fake"}]}} =
+             Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), agent_adapter: "pi", claude_command: "", pi_command: "pi")
     assert Config.agent_adapter() == "pi"
