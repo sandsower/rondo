@@ -99,12 +99,13 @@ defmodule Rondo.WorkspaceAndConfigTest do
     try do
       stale_workspace = Path.join(workspace_root, "MT-STALE")
       File.mkdir_p!(workspace_root)
+      expected_workspace = Path.join(expected_canonical_path(workspace_root), "MT-STALE")
       File.write!(stale_workspace, "old state\n")
 
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
       assert {:ok, workspace} = Workspace.create_for_issue("MT-STALE")
-      assert workspace == stale_workspace
+      assert workspace == expected_workspace
       assert File.dir?(workspace)
     after
       File.rm_rf(workspace_root)
@@ -145,9 +146,10 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
     try do
       File.mkdir_p!(workspace_root)
+      expected_root = expected_canonical_path(workspace_root)
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
-      assert {:error, {:workspace_equals_root, ^workspace_root, ^workspace_root}, ""} =
+      assert {:error, {:workspace_equals_root, ^expected_root, ^expected_root}, ""} =
                Workspace.remove(workspace_root)
     after
       File.rm_rf(workspace_root)
@@ -203,9 +205,10 @@ defmodule Rondo.WorkspaceAndConfigTest do
       )
 
     try do
+      File.mkdir_p!(workspace_root)
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
-      workspace = Path.join(workspace_root, "MT-608")
+      workspace = Path.join(expected_canonical_path(workspace_root), "MT-608")
 
       assert {:ok, ^workspace} = Workspace.create_for_issue("MT-608")
       assert File.dir?(workspace)
@@ -990,5 +993,11 @@ defmodule Rondo.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp expected_canonical_path(path) do
+    path
+    |> Path.expand()
+    |> String.replace_prefix("/var/", "/private/var/")
   end
 end

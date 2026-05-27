@@ -79,7 +79,7 @@ Optional flags:
 - `--port` also starts the HTTP observability service (default: disabled)
 
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
-Claude Code session prompt.
+configured agent session prompt.
 
 Minimal example:
 
@@ -103,6 +103,11 @@ claude:
   dangerously_skip_permissions: true
   max_turns: 50
   output_format: stream-json
+# Or set agent.adapter: pi and configure:
+# pi:
+#   command: pi
+#   turn_timeout_ms: 3600000
+#   stall_timeout_ms: 300000
 ---
 
 You are working on a Linear issue {{ issue.identifier }}.
@@ -162,7 +167,13 @@ Notes:
 - `claude.allowed_tools` optionally restricts which tools Claude Code may use (list of tool names).
 - `claude.turn_timeout_ms` maximum wall-clock time per turn in milliseconds.
 - `claude.stall_timeout_ms` maximum time without output before a turn is considered stalled.
-- `agent.max_turns` caps how many back-to-back Claude Code turns Rondo will run in a single agent
+- `agent.adapter` selects the provider adapter. Supported first-class values are `claude_code`
+  (default) and `pi`.
+- When `agent.adapter: pi`, `pi.command` launches `pi --mode json`; `pi.turn_timeout_ms` and
+  `pi.stall_timeout_ms` mirror the Claude timeout settings. Resume uses pi `--session <id>` when a
+  stable session id is available; usage/rate-limit/sandbox metadata is best-effort/degraded based on
+  pi JSON-mode events.
+- `agent.max_turns` caps how many back-to-back agent turns Rondo will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Rondo uses a default prompt template that includes the issue
   identifier, title, and body.
@@ -175,10 +186,11 @@ Notes:
 - `tracker.state_label_prefix` defaults to `status:` for GitHub label-emulated workflow states.
 - For path values, `~` is expanded to the home directory.
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
-  while `claude.command` stays a shell command string and any `$VAR` expansion there happens in the
-  launched shell on Unix-like hosts. Quoted commands and wrappers such as `mise exec -- claude` are
-  supported there; Rondo shell-escapes the prompt and generated CLI flags before appending them to
-  that command string. Native Windows shell-command support is tracked separately and fails safely
+  while `claude.command` and `pi.command` stay shell command strings and any `$VAR` expansion there
+  happens in the launched shell on Unix-like hosts. Quoted commands and wrappers such as
+  `mise exec -- claude` or `mise exec -- pi` are supported there; Rondo shell-escapes the prompt and
+  generated CLI flags before appending them to that command string. Native Windows shell-command
+  support is tracked separately and fails safely
   rather than routing prompt text through `cmd.exe`.
 
 ```yaml

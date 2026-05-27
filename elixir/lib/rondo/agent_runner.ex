@@ -6,6 +6,7 @@ defmodule Rondo.AgentRunner do
   require Logger
   alias Rondo.Agent.Adapter
   alias Rondo.Agent.ClaudeCodeAdapter
+  alias Rondo.Agent.PiAdapter
   alias Rondo.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
@@ -200,6 +201,8 @@ defmodule Rondo.AgentRunner do
   defp resolve_adapter_module(module) when is_atom(module), do: {:ok, module}
   defp resolve_adapter_module("claude_code"), do: {:ok, ClaudeCodeAdapter}
   defp resolve_adapter_module(:claude_code), do: {:ok, ClaudeCodeAdapter}
+  defp resolve_adapter_module("pi"), do: {:ok, PiAdapter}
+  defp resolve_adapter_module(:pi), do: {:ok, PiAdapter}
   defp resolve_adapter_module(other), do: {:error, {:unsupported_agent_adapter, other}}
 
   defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)

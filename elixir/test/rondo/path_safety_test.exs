@@ -9,7 +9,7 @@ defmodule Rondo.PathSafetyTest do
 
     try do
       assert {:ok, canonical} = PathSafety.canonicalize(test_root)
-      assert canonical == Path.expand(test_root)
+      assert canonical == expected_canonical_path(test_root)
     after
       File.rm_rf(test_root)
     end
@@ -25,7 +25,7 @@ defmodule Rondo.PathSafetyTest do
 
     try do
       assert {:ok, canonical} = PathSafety.canonicalize(link_path)
-      assert canonical == Path.expand(real_dir)
+      assert canonical == expected_canonical_path(real_dir)
     after
       File.rm_rf(test_root)
     end
@@ -43,7 +43,7 @@ defmodule Rondo.PathSafetyTest do
     try do
       # canonicalize link/child should resolve to real/child
       assert {:ok, canonical} = PathSafety.canonicalize(Path.join(link_path, "child"))
-      assert canonical == Path.expand(child)
+      assert canonical == expected_canonical_path(child)
     after
       File.rm_rf(test_root)
     end
@@ -55,8 +55,10 @@ defmodule Rondo.PathSafetyTest do
 
     try do
       nonexistent = Path.join(test_root, "does-not-exist/deeply/nested")
+      expected = Path.join(expected_canonical_path(test_root), "does-not-exist/deeply/nested")
+
       assert {:ok, canonical} = PathSafety.canonicalize(nonexistent)
-      assert canonical == Path.expand(nonexistent)
+      assert canonical == expected
     after
       File.rm_rf(test_root)
     end
@@ -92,9 +94,15 @@ defmodule Rondo.PathSafetyTest do
     try do
       assert {:ok, canonical} = PathSafety.canonicalize(escape_link)
       # The canonical path should point to the real target (outside), not the symlink
-      assert canonical == Path.expand(outside)
+      assert canonical == expected_canonical_path(outside)
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp expected_canonical_path(path) do
+    path
+    |> Path.expand()
+    |> String.replace_prefix("/var/", "/private/var/")
   end
 end
