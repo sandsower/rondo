@@ -149,16 +149,31 @@ defmodule Rondo.RunLedger do
   def link_archive(%__MODULE__{} = ledger, nil), do: {:ok, ledger}
 
   def link_archive(%__MODULE__{} = ledger, archive_path) when is_binary(archive_path) do
-    artifact = %{"kind" => "archive", "path" => archive_path}
-    timestamp = DateTime.utc_now() |> datetime_to_iso()
+    link_artifacts(ledger, [%{"kind" => "archive", "path" => archive_path}])
+  end
 
-    manifest =
-      ledger.manifest
-      |> Map.update("artifacts", [artifact], &upsert_artifact(&1, artifact))
-      |> put_in(["timestamps", "updated_at"], timestamp)
+  @spec link_artifacts(t(), [map()]) :: {:ok, t()} | {:error, term()}
+  def link_artifacts(%__MODULE__{} = ledger, artifacts) when is_list(artifacts) do
+    normalized_artifacts =
+      artifacts
+      |> Enum.filter(&valid_artifact?/1)
+      |> Enum.map(&sanitize_value/1)
 
-    with :ok <- write_json_file(ledger.manifest_path, manifest) do
-      {:ok, %{ledger | manifest: manifest}}
+    if normalized_artifacts == [] do
+      {:ok, ledger}
+    else
+      timestamp = DateTime.utc_now() |> datetime_to_iso()
+
+      manifest =
+        ledger.manifest
+        |> Map.update("artifacts", normalized_artifacts, fn existing ->
+          Enum.reduce(normalized_artifacts, existing, &upsert_artifact(&2, &1))
+        end)
+        |> put_in(["timestamps", "updated_at"], timestamp)
+
+      with :ok <- write_json_file(ledger.manifest_path, manifest) do
+        {:ok, %{ledger | manifest: manifest}}
+      end
     end
   end
 
@@ -245,6 +260,8 @@ defmodule Rondo.RunLedger do
   defp checkpoint_kind_for_event("invocation_completed"), do: "turn_completed"
   defp checkpoint_kind_for_event(:invocation_failed), do: "turn_failed"
   defp checkpoint_kind_for_event("invocation_failed"), do: "turn_failed"
+  defp checkpoint_kind_for_event(:gates_completed), do: "gates_completed"
+  defp checkpoint_kind_for_event("gates_completed"), do: "gates_completed"
   defp checkpoint_kind_for_event(_event), do: nil
 
   defp agent_event_payload(event, timestamp) do
@@ -368,6 +385,10 @@ defmodule Rondo.RunLedger do
   end
 
   defp upsert_artifact(_artifacts, artifact), do: [artifact]
+
+  defp valid_artifact?(%{"kind" => kind, "path" => path}) when is_binary(kind) and is_binary(path), do: true
+  defp valid_artifact?(%{kind: kind, path: path}) when is_binary(kind) and is_binary(path), do: true
+  defp valid_artifact?(_artifact), do: false
 
   defp issue_identifier(issue), do: issue_value(issue, :identifier) || issue_value(issue, :id) || "issue"
 

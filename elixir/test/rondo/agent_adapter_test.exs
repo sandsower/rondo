@@ -413,6 +413,88 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  test "agent runner runs configured gates after successful turns" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-gates-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-GATES/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        gates: [%{name: "proof", command: "pwd > gate-pwd.txt", timeout_ms: 1_000}]
+      )
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-gates",
+        identifier: "MT-GATES",
+        title: "Gate adapter proof",
+        description: "Exercise gate boundary",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 run_dir: run_dir,
+                 test_pid: parent
+               )
+
+      {:ok, workspace} = Rondo.PathSafety.canonicalize(Path.join(workspace_root, "MT-GATES"))
+      assert File.read!(Path.join(workspace, "gate-pwd.txt")) == workspace <> "\n"
+      assert_receive {:claude_worker_update, "issue-gates", %{event: :gates_completed, raw: %{status: :pass}}}, 500
+      assert File.exists?(Path.join(run_dir, "artifacts/gates/results.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner fails the run when a configured gate fails" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-gate-fail-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-GATE-FAIL/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        gates: [%{name: "proof", command: "exit 3", timeout_ms: 1_000}]
+      )
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-gate-fail",
+        identifier: "MT-GATE-FAIL",
+        title: "Gate fail proof",
+        description: "Exercise gate failure",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert_raise RuntimeError, ~r/gate_failed/, fn ->
+        AgentRunner.run(issue, parent,
+          agent_adapter: FakeAdapter,
+          issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+          run_dir: run_dir,
+          test_pid: parent
+        )
+      end
+
+      assert_receive {:claude_worker_update, "issue-gate-fail", %{event: :gates_completed, raw: %{status: :fail}}}, 500
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "pi adapter wraps pi CLI and returns normalized events" do
     test_root = Path.join(System.tmp_dir!(), "rondo-pi-adapter-#{System.unique_integer([:positive])}")
 

@@ -25,6 +25,7 @@ defmodule Rondo.Config do
   @default_poll_interval_ms 30_000
   @default_workspace_root Path.join(System.tmp_dir!(), "rondo_workspaces")
   @default_hook_timeout_ms 60_000
+  @default_gate_timeout_ms 60_000
   @default_max_concurrent_agents 10
   @default_agent_adapter "claude_code"
   @default_agent_max_turns 20
@@ -150,6 +151,10 @@ defmodule Rondo.Config do
                                  timeout_ms: [type: :pos_integer, default: @default_hook_timeout_ms]
                                ]
                              ],
+                             gates: [
+                               type: {:list, :map},
+                               default: []
+                             ],
                              observability: [
                                type: :map,
                                default: %{},
@@ -185,6 +190,11 @@ defmodule Rondo.Config do
           before_run: String.t() | nil,
           after_run: String.t() | nil,
           before_remove: String.t() | nil,
+          timeout_ms: pos_integer()
+        }
+  @type gate :: %{
+          name: String.t(),
+          command: String.t(),
           timeout_ms: pos_integer()
         }
 
@@ -283,6 +293,19 @@ defmodule Rondo.Config do
   @spec hook_timeout_ms() :: pos_integer()
   def hook_timeout_ms do
     get_in(validated_workflow_options(), [:hooks, :timeout_ms])
+  end
+
+  @spec gates() :: [gate()]
+  def gates do
+    validated_workflow_options()
+    |> Map.get(:gates, [])
+    |> Enum.map(fn gate ->
+      %{
+        name: Map.fetch!(gate, :name),
+        command: Map.fetch!(gate, :command),
+        timeout_ms: Map.get(gate, :timeout_ms, @default_gate_timeout_ms)
+      }
+    end)
   end
 
   @spec max_concurrent_agents() :: pos_integer()
@@ -683,6 +706,7 @@ defmodule Rondo.Config do
       claude: extract_claude_options(section_map(config, "claude")),
       pi: extract_pi_options(section_map(config, "pi")),
       hooks: extract_hooks_options(section_map(config, "hooks")),
+      gates: extract_gates_options(Map.get(config, "gates")),
       observability: extract_observability_options(section_map(config, "observability")),
       server: extract_server_options(section_map(config, "server"))
     }
@@ -759,6 +783,21 @@ defmodule Rondo.Config do
     |> put_if_present(:timeout_ms, positive_integer_value(Map.get(section, "timeout_ms")))
   end
 
+  defp extract_gates_options(gates) when is_list(gates) do
+    Enum.map(gates, fn
+      gate when is_map(gate) ->
+        %{}
+        |> put_if_present(:name, scalar_string_value(Map.get(gate, "name")))
+        |> put_if_present(:command, command_value(Map.get(gate, "command")))
+        |> put_if_present(:timeout_ms, positive_integer_value(Map.get(gate, "timeout_ms")))
+
+      _other ->
+        %{}
+    end)
+  end
+
+  defp extract_gates_options(_gates), do: []
+
   defp extract_observability_options(section) do
     %{}
     |> put_if_present(:dashboard_enabled, boolean_value(Map.get(section, "dashboard_enabled")))
@@ -780,6 +819,7 @@ defmodule Rondo.Config do
     claude = section_map(config, "claude")
     pi = section_map(config, "pi")
     hooks = section_map(config, "hooks")
+    gates = Map.get(config, "gates")
     observability = section_map(config, "observability")
     server = section_map(config, "server")
 
@@ -791,6 +831,7 @@ defmodule Rondo.Config do
       validate_section_map(config, "claude"),
       validate_section_map(config, "pi"),
       validate_section_map(config, "hooks"),
+      validate_gates_field(gates),
       validate_section_map(config, "observability"),
       validate_section_map(config, "server"),
       validate_string_field(tracker, "tracker.kind"),
@@ -1003,6 +1044,52 @@ defmodule Rondo.Config do
       {:ok, parsed} when parsed > 0 -> []
       _ -> [config_error(entry_path, limit, "must be a positive integer")]
     end
+  end
+
+  defp validate_gates_field(nil), do: []
+
+  defp validate_gates_field(gates) when is_list(gates) do
+    gates
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {gate, index} -> validate_gate_entry(gate, index) end)
+  end
+
+  defp validate_gates_field(gates), do: [config_error("gates", gates, "must be a list of gate maps")]
+
+  defp validate_gate_entry(gate, index) when is_map(gate) do
+    path = "gates.#{index}"
+
+    [
+      validate_required_string_field(gate, "#{path}.name", "name"),
+      validate_required_string_field(gate, "#{path}.command", "command"),
+      validate_gate_timeout_field(gate, path)
+    ]
+    |> List.flatten()
+  end
+
+  defp validate_gate_entry(gate, index), do: [config_error("gates.#{index}", gate, "must be a map")]
+
+  defp validate_required_string_field(section, path, key) do
+    case Map.fetch(section, key) do
+      {:ok, value} when is_binary(value) ->
+        if String.trim(value) == "" do
+          [config_error(path, value, "must be a non-empty string")]
+        else
+          []
+        end
+
+      {:ok, value} ->
+        [config_error(path, value, "must be a string")]
+
+      :error ->
+        [config_error(path, nil, "is required")]
+    end
+  end
+
+  defp validate_gate_timeout_field(gate, path) do
+    validate_present_value(gate, "#{path}.timeout_ms", fn value ->
+      validate_integer_value(value, "#{path}.timeout_ms", &(&1 > 0), "must be a positive integer")
+    end)
   end
 
   defp validate_present_value(section, path, validator) do

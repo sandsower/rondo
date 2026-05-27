@@ -597,7 +597,7 @@ defmodule Rondo.StatusDashboard do
     turn_count = Map.get(running_entry, :turn_count, 0)
     age = format_cell(format_runtime_and_turns(runtime_seconds, turn_count), @running_age_width)
     event = running_entry.last_claude_event || "none"
-    event_label = format_cell(summarize_message(running_entry.last_claude_message), running_event_width)
+    event_label = format_cell(running_event_label(running_entry), running_event_width)
 
     tokens = format_count(total_tokens) |> format_cell(@running_tokens_width, :right)
 
@@ -606,6 +606,7 @@ defmodule Rondo.StatusDashboard do
         :none -> @ansi_red
         "claude/event/token_count" -> @ansi_yellow
         "claude/event/task_started" -> @ansi_green
+        :gates_completed -> gate_status_color(running_entry)
         "turn_completed" -> @ansi_magenta
         _ -> @ansi_blue
       end
@@ -643,6 +644,25 @@ defmodule Rondo.StatusDashboard do
   @doc false
   @spec tps_graph_for_test([{integer(), integer()}], integer(), integer()) :: String.t()
   def tps_graph_for_test(samples, now_ms, current_tokens), do: tps_graph(samples, now_ms, current_tokens)
+
+  defp running_event_label(running_entry) do
+    case Map.get(running_entry, :latest_gate) do
+      %{status: status} = gate when not is_nil(status) -> gate_summary(gate)
+      _ -> summarize_message(running_entry.last_claude_message)
+    end
+  end
+
+  defp gate_summary(%{status: status, failed: failed}) when is_list(failed) and failed != [] do
+    names = failed |> Enum.map_join(",", &(Map.get(&1, :name) || "gate")) |> truncate(48)
+    "gates: #{status} #{names}"
+  end
+
+  defp gate_summary(%{status: status}), do: "gates: #{status}"
+
+  defp gate_status_color(%{latest_gate: %{status: status}}) when status in [:pass, "pass"], do: @ansi_green
+  defp gate_status_color(%{latest_gate: %{status: status}}) when status in [:fail, "fail"], do: @ansi_red
+  defp gate_status_color(%{latest_gate: %{status: status}}) when status in [:error, "error", :timeout, "timeout"], do: @ansi_orange
+  defp gate_status_color(_running_entry), do: @ansi_blue
 
   defp format_retry_rows(retrying) do
     if retrying == [] do

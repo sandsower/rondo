@@ -127,6 +127,21 @@ defmodule Rondo.RunLedgerTest do
     assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "terminated"))
     assert Enum.count(manifest["artifacts"], &(&1["kind"] == "archive")) == 1
 
+    assert {:ok, ledger} =
+             RunLedger.link_artifacts(ledger, [
+               %{kind: "gate_results", path: "artifacts/gates/results.json"},
+               %{"kind" => "gate_stdout", "path" => "artifacts/gates/unit-stdout.log"},
+               %{kind: "invalid"},
+               %{"path" => "missing-kind"}
+             ])
+
+    artifact_manifest = decode_json!(ledger.manifest_path)
+    assert Enum.any?(artifact_manifest["artifacts"], &(&1["kind"] == "gate_results"))
+    assert Enum.any?(artifact_manifest["artifacts"], &(&1["kind"] == "gate_stdout"))
+
+    assert {:ok, ledger} = RunLedger.link_artifacts(ledger, [%{kind: "invalid"}])
+    assert ledger.manifest == artifact_manifest
+
     assert {:ok, failed_ledger} =
              RunLedger.create_run(issue,
                workspace_root: workspace_root,
@@ -156,6 +171,7 @@ defmodule Rondo.RunLedgerTest do
     assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "invocation_completed"}) == "turn_completed"
     assert RunLedger.checkpoint_kind_for_agent_update(%{event: :invocation_failed}) == "turn_failed"
     assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "invocation_failed"}) == "turn_failed"
+    assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "gates_completed"}) == "gates_completed"
     assert RunLedger.checkpoint_kind_for_agent_update(%{event: :unknown}) == nil
   end
 
