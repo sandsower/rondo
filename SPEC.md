@@ -766,7 +766,23 @@ Sorting order (stable intent):
 2. `created_at` oldest first
 3. `identifier` lexicographic tie-breaker
 
-### 8.3 Concurrency Control
+### 8.3 Single-Issue `run-once` Dispatch
+
+Implementations may expose a bounded one-shot CLI mode for CI/CD or operator-driven triggers, for
+example `rondo run-once <WORKFLOW.md> --issue <id>`. This mode:
+
+- Loads and validates the supplied workflow file using the same config contract as daemon mode.
+- Fetches exactly one issue by tracker ID/number through the configured tracker visibility boundary.
+- Fails clearly when the issue is missing, filtered/non-visible, terminal, inactive, blocked, or not
+  routable to this worker.
+- Reuses normal workspace creation and `after_create`, `before_run`, and `after_run` hooks.
+- Transitions `Todo` issues to `In Progress` before starting the agent, matching normal dispatch
+  semantics.
+- Runs the configured agent adapter synchronously for that issue and exits zero on completion or
+  non-zero on config, tracker, workspace, hook, or agent failure.
+- Does not start the long-running polling loop, dashboard, multi-issue scheduler, or retry queue.
+
+### 8.4 Concurrency Control
 
 Global limit:
 
@@ -779,7 +795,7 @@ Per-state limit:
 
 The runtime counts issues by their current tracked state in the `running` map.
 
-### 8.4 Retry and Backoff
+### 8.5 Retry and Backoff
 
 Retry entry creation:
 
@@ -809,7 +825,7 @@ Note:
 - Retry handling mainly operates on active candidates and releases claims when the issue is absent,
   rather than performing terminal cleanup itself.
 
-### 8.5 Active Run Reconciliation
+### 8.6 Active Run Reconciliation
 
 Reconciliation runs every tick and has two parts.
 
@@ -831,7 +847,7 @@ Part B: Tracker state refresh
   - If tracker state is neither active nor terminal: terminate worker without workspace cleanup.
 - If state refresh fails, keep workers running and try again on the next tick.
 
-### 8.6 Startup Terminal Workspace Cleanup
+### 8.7 Startup Terminal Workspace Cleanup
 
 When the service starts:
 
@@ -2074,6 +2090,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - CLI accepts an optional positional workflow path argument (`path-to-WORKFLOW.md`)
 - CLI uses `./WORKFLOW.md` when no workflow path argument is provided
 - CLI errors on nonexistent explicit workflow path or missing default `./WORKFLOW.md`
+- CLI supports `run-once <path-to-WORKFLOW.md> --issue <id>` for one selected visible tracker issue
+- CLI `run-once` exits zero when the one-shot run completes and non-zero for validation, tracker,
+  visibility, workspace, or agent failures
 - CLI surfaces startup failure cleanly
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally
@@ -2106,6 +2125,7 @@ Use the same validation profiles as Section 17:
 - Typed config layer with defaults and `$` resolution
 - Dynamic `WORKFLOW.md` watch/reload/re-apply for config and prompt
 - Polling orchestrator with single-authority mutable state
+- Single-issue `run-once` mode for bounded CI/operator-triggered runs
 - Issue tracker client with candidate fetch + state refresh + terminal fetch
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
