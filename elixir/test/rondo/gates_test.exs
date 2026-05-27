@@ -82,7 +82,7 @@ defmodule Rondo.GatesTest do
 
     assert {:error, summary} =
              Gates.run(
-               [%{name: "slow", command: "printf 7 > #{inspect(exit_path)}; sleep 1", timeout_ms: 10}],
+               [%{name: "slow", command: "printf 7 > #{inspect(exit_path)}; sleep 1", timeout_ms: 100}],
                workspace,
                run_dir: run_dir
              )
