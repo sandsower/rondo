@@ -63,15 +63,28 @@ mise exec -- mix build
 mise exec -- ./bin/rondo ./WORKFLOW.md
 ```
 
+For CI/CD or one-off operator runs where another system has already selected an issue, use
+`run-once` to fetch exactly one visible tracker issue, run the configured agent, and exit:
+
+```bash
+mise exec -- ./bin/rondo run-once ./WORKFLOW.md --issue 123
+```
+
+`run-once` uses the same workflow file, tracker visibility/filtering, workspace lifecycle hooks, and
+agent adapter as the polling service. Todo issues are transitioned to `In Progress` before the agent
+runs. The command exits zero when the issue run completes and non-zero for config, tracker,
+visibility/filter, workspace, or agent failures.
+
 ## Configuration
 
-Pass a custom workflow file path to `./bin/rondo` when starting the service:
+Pass a custom workflow file path to `./bin/rondo` when starting the long-running service:
 
 ```bash
 ./bin/rondo /path/to/custom/WORKFLOW.md
 ```
 
-If no path is passed, Rondo defaults to `./WORKFLOW.md`.
+If no path is passed in long-running mode, Rondo defaults to `./WORKFLOW.md`. In `run-once` mode,
+pass the workflow path explicitly before `--issue`.
 
 Optional flags:
 

@@ -3,18 +3,21 @@ defmodule Rondo.CLI do
   Escript entrypoint for running Rondo with an explicit WORKFLOW.md path.
   """
 
-  alias Rondo.LogFile
+  alias Rondo.{LogFile, RunOnce}
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer, debug: :boolean]
+  @run_once_switches @switches ++ [issue: :string]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
+  @type evaluate_result :: :ok | :run_once_completed | {:error, String.t()}
   @type deps :: %{
           file_regular?: (String.t() -> boolean()),
           set_workflow_file_path: (String.t() -> :ok | {:error, term()}),
           set_logs_root: (String.t() -> :ok | {:error, term()}),
           set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
-          ensure_all_started: (-> ensure_started_result())
+          ensure_all_started: (-> ensure_started_result()),
+          run_once: (String.t() -> :ok | {:error, term()})
         }
 
   @spec main([String.t()]) :: no_return()
@@ -23,15 +26,18 @@ defmodule Rondo.CLI do
       :ok ->
         wait_for_shutdown()
 
+      :run_once_completed ->
+        System.halt(0)
+
       {:error, message} ->
         IO.puts(:stderr, message)
         System.halt(1)
     end
   end
 
-  @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}
+  @spec evaluate([String.t()], deps()) :: evaluate_result()
   def evaluate(args, deps \\ runtime_deps()) do
-    case OptionParser.parse(args, strict: @switches) do
+    case parse_args(args) do
       {opts, [], []} ->
         with :ok <- require_guardrails_acknowledgement(opts),
              :ok <- maybe_set_logs_root(opts, deps),
@@ -48,10 +54,32 @@ defmodule Rondo.CLI do
           run(workflow_path, deps)
         end
 
+      {:run_once, opts, [workflow_path]} ->
+        with :ok <- require_guardrails_acknowledgement(opts),
+             :ok <- require_issue(opts),
+             :ok <- maybe_set_logs_root(opts, deps),
+             :ok <- maybe_set_debug(opts),
+             :ok <- run_once(workflow_path, Keyword.fetch!(opts, :issue), deps) do
+          :run_once_completed
+        end
+
       _ ->
         {:error, usage_message()}
     end
   end
+
+  @type parse_result ::
+          {keyword(), [String.t()], [{String.t(), String.t() | nil}]} | {:run_once, keyword(), [String.t()]}
+
+  @spec parse_args([String.t()]) :: parse_result()
+  defp parse_args(["run-once" | rest]) do
+    case OptionParser.parse(rest, strict: @run_once_switches) do
+      {opts, argv, []} -> {:run_once, opts, argv}
+      {_opts, _argv, invalid} -> {[], [], invalid}
+    end
+  end
+
+  defp parse_args(args), do: OptionParser.parse(args, strict: @switches)
 
   @spec run(String.t(), deps()) :: :ok | {:error, String.t()}
   def run(workflow_path, deps) do
@@ -72,9 +100,25 @@ defmodule Rondo.CLI do
     end
   end
 
+  @spec run_once(String.t(), String.t(), deps()) :: :ok | {:error, String.t()}
+  defp run_once(workflow_path, issue_id, deps) do
+    expanded_path = Path.expand(workflow_path)
+
+    if deps.file_regular?.(expanded_path) do
+      :ok = deps.set_workflow_file_path.(expanded_path)
+
+      case Map.get(deps, :run_once, &RunOnce.run/1).(issue_id) do
+        :ok -> :ok
+        {:error, reason} -> {:error, "run-once failed for issue #{issue_id}: #{inspect(reason)}"}
+      end
+    else
+      {:error, "Workflow file not found: #{expanded_path}"}
+    end
+  end
+
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: rondo [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
+    "Usage: rondo [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]\n       rondo run-once [--logs-root <path>] <path-to-WORKFLOW.md> --issue <id>"
   end
 
   @spec runtime_deps() :: deps()
@@ -84,7 +128,8 @@ defmodule Rondo.CLI do
       set_workflow_file_path: &Rondo.Workflow.set_workflow_file_path/1,
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
-      ensure_all_started: fn -> Application.ensure_all_started(:rondo) end
+      ensure_all_started: fn -> Application.ensure_all_started(:rondo) end,
+      run_once: &RunOnce.run/1
     }
   end
 
@@ -101,6 +146,17 @@ defmodule Rondo.CLI do
         else
           :ok = deps.set_logs_root.(Path.expand(logs_root))
         end
+    end
+  end
+
+  @spec require_issue(keyword()) :: :ok | {:error, String.t()}
+  defp require_issue(opts) do
+    case Keyword.get(opts, :issue) do
+      issue when is_binary(issue) ->
+        if String.trim(issue) == "", do: {:error, usage_message()}, else: :ok
+
+      _ ->
+        {:error, usage_message()}
     end
   end
 

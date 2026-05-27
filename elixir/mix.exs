@@ -25,6 +25,7 @@ defmodule Rondo.MixProject do
           Rondo.Agent.PiAdapter,
           Rondo.AgentRunner,
           Rondo.CLI,
+          Rondo.RunOnce,
           Rondo.Claude.CLI,
           Rondo.Claude.StreamParser,
           Rondo.Pi.CLI,

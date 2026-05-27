@@ -62,6 +62,48 @@ defmodule Rondo.Linear.PaginationTest do
              end)
   end
 
+  test "fetch by ids constrains results to configured project visibility" do
+    graphql_fun = fn query, variables ->
+      send(self(), {:graphql_query, query, variables})
+      {:ok, mock_issues_response(variables.ids)}
+    end
+
+    assert {:ok, [_issue]} =
+             Client.fetch_issue_states_by_ids_for_test(["id-1"], graphql_fun, project_slug: "project-a")
+
+    assert_received {:graphql_query, query, %{ids: ["id-1"], projectSlug: "project-a"}}
+    assert query =~ "project: {slugId: {eq: $projectSlug}}"
+  end
+
+  test "fetch by ids applies configured label visibility when present" do
+    graphql_fun = fn query, variables ->
+      send(self(), {:graphql_query, query, variables})
+      {:ok, mock_issues_response(variables.ids)}
+    end
+
+    assert {:ok, [_issue]} =
+             Client.fetch_issue_states_by_ids_for_test(["id-1"], graphql_fun,
+               project_slug: "project-a",
+               label_filter: ["rondo"]
+             )
+
+    assert_received {:graphql_query, query, %{ids: ["id-1"], projectSlug: "project-a", labelNames: ["rondo"]}}
+
+    assert query =~ "labels: {name: {in: $labelNames}}"
+  end
+
+  test "fetch by ids omits issues filtered out by tracker visibility" do
+    graphql_fun = fn _query, _variables ->
+      {:ok, mock_issues_response([])}
+    end
+
+    assert {:ok, []} =
+             Client.fetch_issue_states_by_ids_for_test(["id-1"], graphql_fun,
+               project_slug: "project-a",
+               label_filter: ["rondo"]
+             )
+  end
+
   test "propagates error from first batch" do
     ids = Enum.map(1..60, &"id-#{&1}")
 
