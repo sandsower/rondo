@@ -35,7 +35,7 @@ defmodule Rondo.Gates do
 
     with {:ok, workspace} <- validate_workspace(workspace),
          :ok <- File.mkdir_p(gates_dir(run_dir)) do
-      results = Enum.map(gates, &run_gate(&1, workspace, run_dir))
+      results = gates |> Enum.with_index(1) |> Enum.map(fn {gate, index} -> run_gate(gate, index, workspace, run_dir) end)
       summary = build_summary(results, @results_path)
 
       case write_results(run_dir, summary) do
@@ -69,11 +69,11 @@ defmodule Rondo.Gates do
     path == root or String.starts_with?(path, root <> "/")
   end
 
-  defp run_gate(gate, workspace, run_dir) do
+  defp run_gate(gate, index, workspace, run_dir) do
     name = Map.fetch!(gate, :name)
     command = Map.fetch!(gate, :command)
     timeout_ms = Map.fetch!(gate, :timeout_ms)
-    safe_name = safe_name(name)
+    safe_name = indexed_safe_name(name, index)
     stdout_path = Path.join("artifacts/gates", "#{safe_name}-stdout.log")
     stderr_path = Path.join("artifacts/gates", "#{safe_name}-stderr.log")
     stdout_abs = Path.join(run_dir, stdout_path)
@@ -189,6 +189,11 @@ defmodule Rondo.Gates do
   end
 
   defp gates_dir(run_dir), do: Path.join(run_dir, "artifacts/gates")
+
+  defp indexed_safe_name(name, index) when is_integer(index) and index > 0 do
+    index_prefix = index |> Integer.to_string() |> String.pad_leading(4, "0")
+    "#{index_prefix}-#{safe_name(name)}"
+  end
 
   defp safe_name(name) do
     name

@@ -25,8 +25,8 @@ defmodule Rondo.GatesTest do
 
     assert summary.status == :pass
     assert [%{status: :pass, name: "unit"} = result] = summary.results
-    assert result.stdout_path == "artifacts/gates/unit-stdout.log"
-    assert result.stderr_path == "artifacts/gates/unit-stderr.log"
+    assert result.stdout_path == "artifacts/gates/0001-unit-stdout.log"
+    assert result.stderr_path == "artifacts/gates/0001-unit-stderr.log"
     assert File.read!(Path.join(run_dir, result.stdout_path)) == "workspace input\n"
     assert File.read!(Path.join(run_dir, result.stderr_path)) == "err\n"
 
@@ -74,7 +74,7 @@ defmodule Rondo.GatesTest do
     workspace_root = Path.join(test_root, "workspaces")
     workspace = Path.join(workspace_root, "MT-3B")
     run_dir = Path.join(workspace_root, ".rondo_runs/MT-3B/run-1")
-    exit_path = Path.join(run_dir, "artifacts/gates/slow-exit-status")
+    exit_path = Path.join(run_dir, "artifacts/gates/0001-slow-exit-status")
 
     File.mkdir_p!(workspace)
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
@@ -109,6 +109,33 @@ defmodule Rondo.GatesTest do
     assert [%{status: :error, exit_status: 127, retryable: true, environment_failure: true}] = summary.results
   end
 
+  test "keeps artifact paths distinct when gate names collide" do
+    test_root = tmp_dir("gates-colliding-names")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-COLLIDE")
+    run_dir = Path.join(workspace_root, ".rondo_runs/MT-COLLIDE/run-1")
+
+    File.mkdir_p!(workspace)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert {:ok, summary} =
+             Gates.run(
+               [
+                 %{name: "unit/test", command: "echo first", timeout_ms: 1_000},
+                 %{name: "unit test", command: "echo second", timeout_ms: 1_000}
+               ],
+               workspace,
+               run_dir: run_dir
+             )
+
+    assert [%{stdout_path: first_path}, %{stdout_path: second_path}] = summary.results
+    assert first_path == "artifacts/gates/0001-unit-test-stdout.log"
+    assert second_path == "artifacts/gates/0002-unit-test-stdout.log"
+    assert File.read!(Path.join(run_dir, first_path)) == "first\n"
+    assert File.read!(Path.join(run_dir, second_path)) == "second\n"
+  end
+
   test "supports workspace root as the gate cwd" do
     test_root = tmp_dir("gates-root-workspace")
     workspace_root = Path.join(test_root, "workspaces")
@@ -121,7 +148,7 @@ defmodule Rondo.GatesTest do
     assert {:ok, summary} =
              Gates.run([%{name: "", command: "echo root", timeout_ms: 1_000}], workspace_root, run_dir: run_dir)
 
-    assert [%{stdout_path: "artifacts/gates/gate-stdout.log"}] = summary.results
+    assert [%{stdout_path: "artifacts/gates/0001-gate-stdout.log"}] = summary.results
     assert Gates.summary_to_json(summary)["missing"] == nil
     assert Gates.summary_to_json(summary).status == :pass
   end
