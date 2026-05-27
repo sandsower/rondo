@@ -37,6 +37,9 @@ defmodule Rondo.Config do
   @default_claude_output_format "stream-json"
   @default_claude_turn_timeout_ms 3_600_000
   @default_claude_stall_timeout_ms 300_000
+  @default_pi_command "pi"
+  @default_pi_turn_timeout_ms 3_600_000
+  @default_pi_stall_timeout_ms 300_000
   @default_debug false
   @default_observability_enabled true
   @default_observability_refresh_ms 1_000
@@ -125,6 +128,15 @@ defmodule Rondo.Config do
                                  allowed_tools: [type: {:or, [{:list, :string}, nil]}, default: nil],
                                  turn_timeout_ms: [type: :integer, default: @default_claude_turn_timeout_ms],
                                  stall_timeout_ms: [type: :integer, default: @default_claude_stall_timeout_ms]
+                               ]
+                             ],
+                             pi: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 command: [type: :string, default: @default_pi_command],
+                                 turn_timeout_ms: [type: :integer, default: @default_pi_turn_timeout_ms],
+                                 stall_timeout_ms: [type: :integer, default: @default_pi_stall_timeout_ms]
                                ]
                              ],
                              hooks: [
@@ -349,6 +361,23 @@ defmodule Rondo.Config do
     get_in(validated_workflow_options(), [:claude, :allowed_tools])
   end
 
+  @spec pi_command() :: String.t()
+  def pi_command do
+    get_in(validated_workflow_options(), [:pi, :command])
+  end
+
+  @spec pi_turn_timeout_ms() :: pos_integer()
+  def pi_turn_timeout_ms do
+    get_in(validated_workflow_options(), [:pi, :turn_timeout_ms])
+  end
+
+  @spec pi_stall_timeout_ms() :: non_neg_integer()
+  def pi_stall_timeout_ms do
+    validated_workflow_options()
+    |> get_in([:pi, :stall_timeout_ms])
+    |> max(0)
+  end
+
   @spec workflow_prompt() :: String.t()
   def workflow_prompt do
     case current_workflow() do
@@ -417,7 +446,7 @@ defmodule Rondo.Config do
          :ok <- require_linear_token(options, path),
          :ok <- require_linear_project(options, path),
          :ok <- require_github_repo(options, path) do
-      require_claude_command(options, path)
+      require_agent_command(options, path)
     end
   end
 
@@ -500,16 +529,24 @@ defmodule Rondo.Config do
   defp valid_github_repo?(_repo), do: false
 
   defp require_claude_command(options) do
-    case get_in(options, [:claude, :command]) do
+    require_command(options, [:claude, :command], :missing_claude_command)
+  end
+
+  defp require_pi_command(options) do
+    require_command(options, [:pi, :command], :missing_pi_command)
+  end
+
+  defp require_command(options, path, error) do
+    case get_in(options, path) do
       command when is_binary(command) ->
         if byte_size(String.trim(command)) > 0 do
           :ok
         else
-          {:error, :missing_claude_command}
+          {:error, error}
         end
 
       _ ->
-        {:error, :missing_claude_command}
+        {:error, error}
     end
   end
 
@@ -560,10 +597,37 @@ defmodule Rondo.Config do
     end
   end
 
+  defp require_agent_command(options, path) do
+    case get_in(options, [:agent, :adapter]) do
+      "claude_code" -> require_claude_command(options, path)
+      "pi" -> require_pi_command(options, path)
+      adapter -> {:error, invalid_workflow_config(path, [unsupported_adapter_error(adapter)])}
+    end
+  end
+
+  defp unsupported_adapter_error(adapter) do
+    config_error("agent.adapter", adapter, "unsupported agent adapter; must be claude_code or pi")
+  end
+
   defp require_claude_command(options, path) do
     case require_claude_command(options) do
-      :ok -> :ok
-      {:error, :missing_claude_command} -> {:error, invalid_workflow_config(path, [config_error("claude.command", nil, "is required")])}
+      :ok ->
+        :ok
+
+      {:error, :missing_claude_command} ->
+        error = config_error("claude.command", nil, "is required")
+        {:error, invalid_workflow_config(path, [error])}
+    end
+  end
+
+  defp require_pi_command(options, path) do
+    case require_pi_command(options) do
+      :ok ->
+        :ok
+
+      {:error, :missing_pi_command} ->
+        error = config_error("pi.command", nil, "is required")
+        {:error, invalid_workflow_config(path, [error])}
     end
   end
 
@@ -617,6 +681,7 @@ defmodule Rondo.Config do
       workspace: extract_workspace_options(section_map(config, "workspace")),
       agent: extract_agent_options(section_map(config, "agent")),
       claude: extract_claude_options(section_map(config, "claude")),
+      pi: extract_pi_options(section_map(config, "pi")),
       hooks: extract_hooks_options(section_map(config, "hooks")),
       observability: extract_observability_options(section_map(config, "observability")),
       server: extract_server_options(section_map(config, "server"))
@@ -671,6 +736,13 @@ defmodule Rondo.Config do
     |> put_if_present(:stall_timeout_ms, integer_value(Map.get(section, "stall_timeout_ms")))
   end
 
+  defp extract_pi_options(section) do
+    %{}
+    |> put_if_present(:command, command_value(Map.get(section, "command")))
+    |> put_if_present(:turn_timeout_ms, integer_value(Map.get(section, "turn_timeout_ms")))
+    |> put_if_present(:stall_timeout_ms, integer_value(Map.get(section, "stall_timeout_ms")))
+  end
+
   defp tools_list_value(values) when is_list(values) do
     filtered = Enum.filter(values, &is_binary/1) |> Enum.reject(&(String.trim(&1) == ""))
     if filtered == [], do: :omit, else: filtered
@@ -706,6 +778,7 @@ defmodule Rondo.Config do
     workspace = section_map(config, "workspace")
     agent = section_map(config, "agent")
     claude = section_map(config, "claude")
+    pi = section_map(config, "pi")
     hooks = section_map(config, "hooks")
     observability = section_map(config, "observability")
     server = section_map(config, "server")
@@ -716,6 +789,7 @@ defmodule Rondo.Config do
       validate_section_map(config, "workspace"),
       validate_section_map(config, "agent"),
       validate_section_map(config, "claude"),
+      validate_section_map(config, "pi"),
       validate_section_map(config, "hooks"),
       validate_section_map(config, "observability"),
       validate_section_map(config, "server"),
@@ -736,7 +810,7 @@ defmodule Rondo.Config do
       validate_positive_integer_field(agent, "agent.max_turns"),
       validate_positive_integer_field(agent, "agent.max_retry_backoff_ms"),
       validate_state_limits_field(agent, "agent.max_concurrent_agents_by_state"),
-      validate_non_empty_string_field(claude, "claude.command"),
+      validate_string_field(claude, "claude.command", allow_empty: true),
       validate_inclusion_field(claude, "claude.permission_mode", @valid_claude_permission_modes),
       validate_boolean_field(claude, "claude.dangerously_skip_permissions"),
       validate_positive_integer_field(claude, "claude.max_turns"),
@@ -745,6 +819,9 @@ defmodule Rondo.Config do
       validate_optional_string_list_field(claude, "claude.allowed_tools"),
       validate_positive_integer_field(claude, "claude.turn_timeout_ms"),
       validate_positive_integer_field(claude, "claude.stall_timeout_ms"),
+      validate_string_field(pi, "pi.command", allow_empty: true),
+      validate_positive_integer_field(pi, "pi.turn_timeout_ms"),
+      validate_positive_integer_field(pi, "pi.stall_timeout_ms"),
       validate_string_field(hooks, "hooks.after_create"),
       validate_string_field(hooks, "hooks.before_run"),
       validate_string_field(hooks, "hooks.after_run"),
@@ -981,12 +1058,7 @@ defmodule Rondo.Config do
 
   defp binary_value(_value, _opts), do: :omit
 
-  defp command_value(value) when is_binary(value) do
-    case String.trim(value) do
-      "" -> :omit
-      trimmed -> trimmed
-    end
-  end
+  defp command_value(value) when is_binary(value), do: String.trim(value)
 
   defp command_value(_value), do: :omit
 

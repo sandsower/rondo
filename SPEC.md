@@ -322,6 +322,7 @@ Top-level keys:
 - `hooks`
 - `agent`
 - `claude`
+- `pi`
 
 Unknown keys should be ignored for forward compatibility.
 
@@ -410,6 +411,14 @@ Fields:
   - Default: empty map.
   - State keys are normalized (`trim` + `lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
+- `adapter` (string)
+  - Default: `claude_code`.
+  - Supported first-class values: `claude_code`, `pi`.
+  - Adapter-specific command validation applies to the selected adapter (`claude.command` for
+    `claude_code`, `pi.command` for `pi`).
+- `max_turns` (integer)
+  - Default: `20`.
+  - Caps back-to-back adapter turns for an active issue.
 
 #### 5.3.6 `claude` (object)
 
@@ -453,6 +462,22 @@ Fields:
   - Default: `300000` (5 minutes)
   - No stdout activity timeout.
   - If `<= 0`, stall detection is disabled.
+
+#### 5.3.7 `pi` (object)
+
+Fields:
+
+- `command` (string shell command)
+  - Default: `pi`.
+  - The runtime launches this as the base command for `pi --mode json` invocations.
+  - The value is preserved as POSIX `sh` shell syntax on Unix-like hosts using the same generated
+    argument quoting requirements as `claude.command`.
+- `turn_timeout_ms` (integer)
+  - Default: `3600000` (1 hour).
+  - Overall subprocess timeout.
+- `stall_timeout_ms` (integer)
+  - Default: `300000` (5 minutes).
+  - No stdout activity timeout.
 
 ### 5.4 Prompt Template Contract
 
@@ -563,7 +588,8 @@ Validation checks:
 - `tracker.kind` is present and supported.
 - `tracker.api_key` is present after `$` resolution.
 - `tracker.project_slug` is present when required by the selected tracker kind.
-- `claude.command` is present and non-empty.
+- Selected adapter command is present and non-empty (`claude.command` for `claude_code`,
+  `pi.command` for `pi`).
 
 ### 6.4 Config Fields Summary (Cheat Sheet)
 
@@ -586,6 +612,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agent.max_turns`: positive integer, default `20`
 - `agent.max_retry_backoff_ms`: positive integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
+- `agent.adapter`: string, default `claude_code`; supported first-class values `claude_code`, `pi`
 - `claude.command`: shell command string, default `claude`
 - `claude.permission_mode`: one of `default`, `plan`, `acceptEdits`, `bypassPermissions`, default `bypassPermissions`
 - `claude.dangerously_skip_permissions`: boolean, default `true`
@@ -595,6 +622,9 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `claude.allowed_tools`: list of strings or null, default `null`
 - `claude.turn_timeout_ms`: positive integer, default `3600000`
 - `claude.stall_timeout_ms`: positive integer, default `300000`
+- `pi.command`: shell command string, default `pi`
+- `pi.turn_timeout_ms`: positive integer, default `3600000`
+- `pi.stall_timeout_ms`: positive integer, default `300000`
 - `server.port` (extension): integer, optional; enables the optional HTTP server, `0` may be used
   for ephemeral local bind, and CLI `--port` overrides it
 

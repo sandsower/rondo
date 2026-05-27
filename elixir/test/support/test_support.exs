@@ -119,6 +119,9 @@ defmodule Rondo.TestSupport do
           claude_allowed_tools: nil,
           claude_turn_timeout_ms: 3_600_000,
           claude_stall_timeout_ms: 300_000,
+          pi_command: "pi",
+          pi_turn_timeout_ms: 3_600_000,
+          pi_stall_timeout_ms: 300_000,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -160,6 +163,9 @@ defmodule Rondo.TestSupport do
     claude_allowed_tools = Keyword.get(config, :claude_allowed_tools)
     claude_turn_timeout_ms = Keyword.get(config, :claude_turn_timeout_ms)
     claude_stall_timeout_ms = Keyword.get(config, :claude_stall_timeout_ms)
+    pi_command = Keyword.get(config, :pi_command)
+    pi_turn_timeout_ms = Keyword.get(config, :pi_turn_timeout_ms)
+    pi_stall_timeout_ms = Keyword.get(config, :pi_stall_timeout_ms)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -206,6 +212,10 @@ defmodule Rondo.TestSupport do
         "  allowed_tools: #{yaml_value(claude_allowed_tools)}",
         "  turn_timeout_ms: #{yaml_value(claude_turn_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(claude_stall_timeout_ms)}",
+        "pi:",
+        "  command: #{yaml_value(pi_command)}",
+        "  turn_timeout_ms: #{yaml_value(pi_turn_timeout_ms)}",
+        "  stall_timeout_ms: #{yaml_value(pi_stall_timeout_ms)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),

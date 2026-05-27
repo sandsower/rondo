@@ -3,6 +3,7 @@ defmodule Rondo.AgentAdapterTest do
 
   alias Rondo.Agent.Adapter
   alias Rondo.Agent.ClaudeCodeAdapter
+  alias Rondo.Agent.PiAdapter
 
   defmodule FakeAdapter do
     @behaviour Rondo.Agent.Adapter
@@ -109,13 +110,34 @@ defmodule Rondo.AgentAdapterTest do
     assert Adapter.probe_result(:degraded, %{binary: :missing}).status == :degraded
   end
 
-  test "config exposes agent.adapter with claude_code default" do
+  test "config exposes agent.adapter with claude_code default and pi config" do
     write_workflow_file!(Workflow.workflow_file_path(), agent_adapter: nil)
     assert Config.agent_adapter() == "claude_code"
+    assert Config.pi_command() == "pi"
     assert :ok = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), agent_adapter: "fake")
-    assert Config.agent_adapter() == "fake"
+
+    assert {:error, {:invalid_workflow_config, _, [%{path: "agent.adapter", value: "fake"}]}} =
+             Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(), agent_adapter: "pi", claude_command: "", pi_command: "pi")
+    assert Config.agent_adapter() == "pi"
+    assert Config.pi_command() == "pi"
+    assert :ok = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(), agent_adapter: "claude_code", claude_command: "claude", pi_command: "")
+    assert Config.agent_adapter() == "claude_code"
+    assert :ok = Config.validate!()
+  end
+
+  test "pi adapter probe reports missing command" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      agent_adapter: "pi",
+      pi_command: "rondo-missing-pi-#{System.unique_integer([:positive])}"
+    )
+
+    assert %{status: :missing, checks: %{command: :missing, stream_parser: :ok, resume: :degraded}} = PiAdapter.probe()
   end
 
   test "claude code adapter probe reports missing command" do
@@ -377,7 +399,7 @@ defmodule Rondo.AgentAdapterTest do
                  test_pid: parent
                )
 
-      workspace = Path.join(workspace_root, "MT-FAKE")
+      {:ok, workspace} = Rondo.PathSafety.canonicalize(Path.join(workspace_root, "MT-FAKE"))
       assert_receive {:fake_adapter_invoked, 1, first_prompt, ^workspace, nil}, 500
       assert first_prompt =~ "You are an agent for this repository."
 
@@ -386,6 +408,122 @@ defmodule Rondo.AgentAdapterTest do
       assert previous_run_ref == Adapter.run_ref("fake", "fake-run-1", "fake_run_id", true)
 
       assert_receive {:claude_worker_update, "issue-fake", %{event: :session_started, session_id: nil, raw: %{adapter: "fake"}}}, 500
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "pi adapter wraps pi CLI and returns normalized events" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-pi-adapter-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "S-PI")
+      pi_binary = Path.join(test_root, "fake-pi")
+      File.mkdir_p!(workspace)
+
+      File.write!(pi_binary, """
+      #!/bin/sh
+      echo '{"type":"session","version":3,"id":"pi-adapter-session"}'
+      echo '{"type":"agent_start"}'
+      echo '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"ignored streaming"}}'
+      echo '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"assistant fallback"}],"usage":{"input":4,"output":6}}}'
+      echo '{"type":"tool_execution_start","toolCallId":"tool-1","toolName":"bash","args":{"command":"mix test"}}'
+      echo '{"type":"agent_end","result":"explicit pi result","messages":[{"role":"assistant","content":[{"type":"text","text":"final from pi"}]}]}'
+      exit 0
+      """)
+
+      File.chmod!(pi_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        agent_adapter: "pi",
+        pi_command: pi_binary
+      )
+
+      parent = self()
+
+      assert {:ok, result} =
+               PiAdapter.invoke(%{
+                 prompt: "do work",
+                 workspace: workspace,
+                 previous_run_ref: nil,
+                 on_event: fn event -> send(parent, {:adapter_event, event}) end,
+                 opts: []
+               })
+
+      assert result.run_ref == Adapter.run_ref("pi", "pi-adapter-session", "session_id", true)
+      assert result.usage == %{input_tokens: 4, output_tokens: 6, cache_read_tokens: 0, cache_write_tokens: 0, total_tokens: 10, cost: nil}
+      assert result.final_report == "explicit pi result"
+      assert result.capabilities.resume == :session_id
+      assert result.capabilities.stop == :degraded_process_termination
+      assert result.capabilities.approval == :degraded
+      assert result.capabilities.final_report == :explicit_result_or_last_assistant_message
+
+      assert_receive {:adapter_event, %{event_type: :session_started, adapter: "pi", run_ref: %{provider_ref: "pi-adapter-session"}}}, 500
+      assert_receive {:adapter_event, %{event_type: :assistant_message, adapter: "pi", message: "assistant fallback"}}, 500
+      assert_receive {:adapter_event, %{event_type: :tool_started, adapter: "pi", message: "bash"}}, 500
+      assert_receive {:adapter_event, %{event_type: :invocation_completed, adapter: "pi", final_report: "explicit pi result"}}, 500
+      refute_receive {:adapter_event, %{raw: %{"type" => "message_update"}}}, 100
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner can resolve pi adapter from config and preserve compatibility envelope" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-pi-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      pi_binary = Path.join(test_root, "fake-pi")
+      File.mkdir_p!(workspace_root)
+
+      File.write!(pi_binary, """
+      #!/bin/sh
+      echo '{"type":"session","version":3,"id":"runner-pi-session"}'
+      echo '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Working"}]}}'
+      echo '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"runner final"}]}]}'
+      exit 0
+      """)
+
+      File.chmod!(pi_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        agent_adapter: "pi",
+        pi_command: pi_binary
+      )
+
+      issue = %Issue{
+        id: "issue-pi",
+        identifier: "MT-PI",
+        title: "Pi adapter",
+        description: "Run through pi",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+
+      assert :ok =
+               AgentRunner.run(issue, parent, issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end)
+
+      assert_receive {:claude_worker_update, "issue-pi",
+                      %{
+                        event: :assistant_message,
+                        adapter: "pi",
+                        run_ref: %{provider_ref: "runner-pi-session"},
+                        session_id: "runner-pi-session"
+                      }},
+                     500
+
+      assert_receive {:claude_worker_update, "issue-pi",
+                      %{
+                        event: :invocation_completed,
+                        final_report: "runner final",
+                        raw: %{adapter: "pi"}
+                      }},
+                     500
     after
       File.rm_rf(test_root)
     end

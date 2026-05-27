@@ -38,6 +38,10 @@ claude:
   dangerously_skip_permissions: true
   max_turns: 50
   output_format: stream-json
+pi:
+  command: pi
+  turn_timeout_ms: 3600000
+  stall_timeout_ms: 300000
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`
