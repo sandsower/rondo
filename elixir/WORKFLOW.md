@@ -28,6 +28,10 @@ hooks:
     fi
   before_remove: |
     cd elixir && mise exec -- mix workspace.before_remove
+gates:
+  - name: elixir-ci
+    command: cd elixir && make all
+    timeout_ms: 600000
 agent:
   adapter: claude_code
   max_concurrent_agents: 10

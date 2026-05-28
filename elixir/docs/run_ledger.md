@@ -15,6 +15,11 @@ Ledgers live under the configured `workspace.root`:
     ...
   artifacts/
     agent-events.ndjson
+    gates/
+      turn-0001/
+        results.json
+        0001-unit-stdout.log
+        0001-unit-stderr.log
 ```
 
 `run_id` is generated per dispatch attempt using the safe issue identifier, a UTC timestamp, and a short random suffix:
@@ -56,6 +61,7 @@ Current checkpoint kinds include:
 - `turn_failed`
 - `turn_cancelled`
 - `edit_batch`
+- `gates_completed`
 - `completed`
 - `failed`
 - `terminated`
@@ -65,6 +71,18 @@ Ledger write failures are logged as warnings and do not stop the run.
 ## Agent event artifact
 
 `artifacts/agent-events.ndjson` stores sanitized agent event summaries. Values are size-capped and secret-looking keys are redacted. Usage token counts are preserved, but full prompts, file contents, auth headers, cookies, API keys, and secret-looking values should not be treated as captured source of truth.
+
+## Gate artifacts
+
+When workflow gates are configured, Rondo stores structured gate summaries and raw command output under `artifacts/gates/`. Agent-turn gate runs are namespaced by turn, for example `artifacts/gates/turn-0001/results.json`, so later continuation turns do not overwrite earlier evidence.
+
+Gate artifact links use these kinds in the manifest:
+
+- `gate_results` for the structured JSON summary
+- `gate_stdout` for a gate command's raw stdout log
+- `gate_stderr` for a gate command's raw stderr log
+
+Each gate completion also records a `gates_completed` checkpoint with the sanitized summary payload.
 
 ## Archive relationship
 

@@ -918,8 +918,8 @@ defmodule Rondo.OrchestratorStatusTest do
       end
     end)
 
-    worker_pid =
-      spawn(fn ->
+    {:ok, worker_pid} =
+      Task.Supervisor.start_child(Rondo.TaskSupervisor, fn ->
         receive do
           :done -> :ok
         end
@@ -1275,6 +1275,26 @@ defmodule Rondo.OrchestratorStatusTest do
     assert is_list(disk_config.file)
     assert disk_config.max_no_bytes > 0
     assert disk_config.max_no_files > 0
+  end
+
+  test "status dashboard renders latest gate status in EVENT column" do
+    row =
+      StatusDashboard.format_running_summary_for_test(
+        %{
+          identifier: "MT-GATE",
+          state: "In Progress",
+          session_id: "session-gate-status",
+          last_claude_event: :gates_completed,
+          last_claude_message: %{event: :gates_completed},
+          latest_gate: %{status: :fail, failed: [%{name: "unit", status: :fail, exit_status: 2}]},
+          runtime_seconds: 12,
+          turn_count: 1,
+          claude_total_tokens: 42
+        },
+        140
+      )
+
+    assert row =~ "gates: fail unit"
   end
 
   test "status dashboard renders last claude message in EVENT column" do
@@ -1908,6 +1928,160 @@ defmodule Rondo.OrchestratorStatusTest do
 
     artifact_path = Path.join(ledger.run_dir, "artifacts/agent-events.ndjson")
     assert File.read!(artifact_path) =~ "turn/completed"
+  end
+
+  test "orchestrator retries and marks run ledger failed when configured gates fail" do
+    workspace_root = tmp_dir("orchestrator-gate-failure-retry")
+    claude_bin = fake_claude_script(workspace_root, "gate-failure-session", 0)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: claude_bin,
+      max_turns: 1,
+      gates: [%{name: "proof", command: "echo nope; exit 3", timeout_ms: 1_000}]
+    )
+
+    issue = %Issue{
+      id: "issue-orchestrator-gate-failure",
+      identifier: "MT-GATE-FAIL-ORCH",
+      title: "Gate failure retry test",
+      description: "Fail a configured gate in orchestrator path",
+      state: "Todo",
+      url: "https://example.org/issues/MT-GATE-FAIL-ORCH"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :GateFailureRetryOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    state = :sys.get_state(pid)
+    state = %{state | max_concurrent_agents: 1, poll_interval_ms: 60_000}
+    :sys.replace_state(pid, fn _ -> state end)
+
+    send(pid, {:tick, state.tick_token})
+
+    retry_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).retrying do
+          [entry | _] -> entry
+          _ -> nil
+        end
+      end)
+
+    assert retry_entry.identifier == "MT-GATE-FAIL-ORCH"
+    assert retry_entry.attempt == 1
+    assert retry_entry.error =~ "agent exited:"
+    assert retry_entry.error =~ "gate_failed"
+
+    archived_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).archived do
+          [entry | _] -> entry
+          _ -> nil
+        end
+      end)
+
+    assert archived_entry.exit_reason =~ "gate_failed"
+    assert archived_entry.latest_gate.status == :fail
+
+    [manifest_path] = Path.wildcard(Path.join([workspace_root, ".rondo_runs", "MT-GATE-FAIL-ORCH", "*", "manifest.json"]))
+    manifest = manifest_path |> File.read!() |> Jason.decode!()
+    assert manifest["status"] == "failed"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "gates_completed"))
+    assert Enum.any?(manifest["artifacts"], &(&1["kind"] == "gate_results"))
+  end
+
+  test "gate worker updates append run ledger checkpoints and artifacts" do
+    workspace_root = tmp_dir("orchestrator-ledger-gates")
+    issue_id = "issue-ledger-gates"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-LEDGER-GATES",
+      title: "Ledger gate test",
+      description: "Capture gate updates",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-LEDGER-GATES"
+    }
+
+    assert {:ok, ledger} = Rondo.RunLedger.create_run(issue, workspace_root: workspace_root, random_suffix: "decafbad")
+
+    orchestrator_name = Module.concat(__MODULE__, :LedgerGateOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      turn_count: 0,
+      last_claude_message: nil,
+      last_claude_timestamp: nil,
+      last_claude_event: nil,
+      started_at: DateTime.utc_now(),
+      run_id: ledger.run_id,
+      run_dir: ledger.run_dir,
+      ledger: ledger
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:claude_worker_update, issue_id,
+       %{
+         event: :gates_completed,
+         timestamp: DateTime.utc_now(),
+         raw: %{
+           status: :fail,
+           results_path: "artifacts/gates/results.json",
+           results: [
+             %{
+               name: "unit",
+               status: :fail,
+               exit_status: 2,
+               stdout_path: "artifacts/gates/unit-stdout.log",
+               stderr_path: "artifacts/gates/unit-stderr.log"
+             }
+           ]
+         }
+       }}
+    )
+
+    manifest =
+      wait_until(fn ->
+        manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+
+        if Enum.any?(manifest["checkpoints"], &(&1["kind"] == "gates_completed")) do
+          manifest
+        end
+      end)
+
+    assert Enum.any?(manifest["artifacts"], &(&1["kind"] == "gate_results"))
+    assert Enum.any?(manifest["artifacts"], &(&1["kind"] == "gate_stdout" and &1["name"] == "unit"))
+
+    [snapshot_entry] = GenServer.call(pid, :snapshot).running
+    assert snapshot_entry.latest_gate.status == :fail
   end
 
   test "orchestrator shutdown marks active run ledgers terminated" do

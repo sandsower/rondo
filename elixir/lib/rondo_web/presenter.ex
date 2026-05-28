@@ -113,6 +113,7 @@ defmodule RondoWeb.Presenter do
       last_message: summarize_message(entry.last_claude_message),
       started_at: iso8601(entry.started_at),
       last_event_at: iso8601(entry.last_claude_timestamp),
+      latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       tokens: %{
         input_tokens: entry.claude_input_tokens,
         output_tokens: entry.claude_output_tokens,
@@ -141,6 +142,7 @@ defmodule RondoWeb.Presenter do
       last_event: running.last_claude_event,
       last_message: summarize_message(running.last_claude_message),
       last_event_at: iso8601(running.last_claude_timestamp),
+      latest_gate: gate_payload(Map.get(running, :latest_gate)),
       tokens: %{
         input_tokens: running.claude_input_tokens,
         output_tokens: running.claude_output_tokens,
@@ -156,6 +158,34 @@ defmodule RondoWeb.Presenter do
       error: retry.error
     }
   end
+
+  defp gate_payload(nil), do: nil
+
+  defp gate_payload(gate) when is_map(gate) do
+    failed =
+      case Map.get(gate, :failed, Map.get(gate, "failed", [])) do
+        failures when is_list(failures) -> Enum.map(failures, &gate_failure_payload/1)
+        _other -> []
+      end
+
+    %{
+      status: Map.get(gate, :status) || Map.get(gate, "status"),
+      results_path: Map.get(gate, :results_path) || Map.get(gate, "results_path"),
+      failed: failed
+    }
+  end
+
+  defp gate_payload(_gate), do: nil
+
+  defp gate_failure_payload(failure) when is_map(failure) do
+    %{
+      name: Map.get(failure, :name) || Map.get(failure, "name"),
+      status: Map.get(failure, :status) || Map.get(failure, "status"),
+      exit_status: Map.get(failure, :exit_status) || Map.get(failure, "exit_status")
+    }
+  end
+
+  defp gate_failure_payload(failure), do: %{name: to_string(failure), status: nil, exit_status: nil}
 
   defp recent_events_payload(running) do
     [
@@ -200,6 +230,7 @@ defmodule RondoWeb.Presenter do
       finished_at: iso8601(entry.finished_at) || to_string(entry.finished_at),
       exit_reason: entry.exit_reason,
       turn_count: entry.turn_count,
+      latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       tokens: entry.tokens,
       filename: run_filename(entry.started_at)
     }

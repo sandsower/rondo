@@ -320,6 +320,7 @@ Top-level keys:
 - `polling`
 - `workspace`
 - `hooks`
+- `gates`
 - `agent`
 - `claude`
 - `pi`
@@ -397,7 +398,25 @@ Fields:
   - Non-positive values should be treated as invalid and fall back to the default.
   - Changes should be re-applied at runtime for future hook executions.
 
-#### 5.3.5 `agent` (object)
+#### 5.3.5 `gates` (list)
+
+Flat deterministic validation gates run by Rondo after each successful agent turn.
+
+Each entry contains:
+
+- `name` (string, required)
+  - Stable display/artifact name for the gate.
+- `command` (shell command string, required)
+  - Runs with cwd set to the issue workspace.
+- `timeout_ms` (positive integer, optional)
+  - Default: `60000`.
+
+Gate stdout/stderr and a structured `results.json` are persisted under the run ledger. Any gate
+failure, error, or timeout makes the current run attempt fail/retry; gate evidence must not rely on
+agent transcript self-report. This flat shape is intentionally compatible with simple external
+workflow gate definitions while keeping `WORKFLOW.md` as Rondo's runtime source of truth.
+
+#### 5.3.6 `agent` (object)
 
 Fields:
 
@@ -659,7 +678,10 @@ Important nuance:
 
 - A successful worker exit does not mean the issue is done forever.
 - The worker may continue through multiple back-to-back coding-agent turns before it exits.
-- After each normal turn completion, the worker re-checks the tracker issue state.
+- After each normal turn completion, the worker runs configured deterministic `gates` before it
+  re-checks the tracker issue state.
+- If a gate fails, errors, or times out, the worker exits abnormally so retry logic can preserve the
+  failure with ledger artifacts instead of relying on agent self-report.
 - If the issue is still in an active state, the worker should start another turn using
   `claude --resume <session_id>` in the same workspace, up to `agent.max_turns`.
 - The first turn should use the full rendered task prompt.
@@ -707,7 +729,7 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Schedule exponential-backoff retry.
 
 - `Claude Update Event`
-  - Update live session fields, token counters, and rate limits.
+  - Update live session fields, token counters, rate limits, and latest gate status.
 
 - `Retry Timer Fired`
   - Re-fetch active candidates and attempt re-dispatch, or release claim if no longer eligible.

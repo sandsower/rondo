@@ -106,6 +106,10 @@ workspace:
 hooks:
   after_create: |
     git clone git@github.com:your-org/your-repo.git .
+gates:
+  - name: test
+    command: mix test
+    timeout_ms: 600000
 agent:
   adapter: claude_code
   max_concurrent_agents: 10
@@ -194,6 +198,11 @@ Notes:
   `git clone ... .` there, along with any other setup commands you need.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
+- Use top-level `gates` for deterministic validation commands Rondo runs after each successful
+  agent turn. Gates run in the issue workspace, persist stdout/stderr and `results.json` under the
+  run ledger, and cause the run to fail/retry when any gate fails, errors, or times out.
+- Gate entries use a flat Beislið-compatible shape: `name`, `command`, and optional `timeout_ms`
+  (default: 60000).
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
 - `tracker.repo` is required for `tracker.kind: github` and uses `owner/repo` syntax.
 - `tracker.state_label_prefix` defaults to `status:` for GitHub label-emulated workflow states.

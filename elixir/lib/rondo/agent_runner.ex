@@ -7,7 +7,7 @@ defmodule Rondo.AgentRunner do
   alias Rondo.Agent.Adapter
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.PiAdapter
-  alias Rondo.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias Rondo.{Config, Gates, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, claude_update_recipient \\ nil, opts \\ []) do
@@ -108,7 +108,9 @@ defmodule Rondo.AgentRunner do
         opts: opts,
         issue_state_fetcher: Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1),
         adapter: adapter,
-        max_turns: Keyword.get(opts, :max_turns, Config.agent_max_turns())
+        max_turns: Keyword.get(opts, :max_turns, Config.agent_max_turns()),
+        gates: Keyword.get(opts, :gates, Config.gates()),
+        run_dir: Keyword.get(opts, :run_dir)
       }
 
       do_run_agent_turns(context, issue, 1, nil)
@@ -151,7 +153,9 @@ defmodule Rondo.AgentRunner do
           completion_observed?
         )
 
-        continue_agent_turns(context, issue, turn_number, effective_run_ref)
+        with :ok <- run_gates(context, issue, turn_number) do
+          continue_agent_turns(context, issue, turn_number, effective_run_ref)
+        end
 
       {:error, reason} ->
         {:error, reason}
@@ -172,6 +176,57 @@ defmodule Rondo.AgentRunner do
       raw: Map.get(invocation_result, :raw, %{})
     )
     |> claude_event_handler(recipient, issue).()
+  end
+
+  defp run_gates(%{gates: []}, _issue, _turn_number), do: :ok
+
+  defp run_gates(%{run_dir: nil}, _issue, _turn_number), do: {:error, :missing_run_ledger_for_gates}
+
+  defp run_gates(context, issue, turn_number) do
+    case Gates.run(context.gates, context.workspace, run_dir: context.run_dir, execution_id: gate_execution_id(turn_number)) do
+      {:ok, summary} ->
+        send_gate_update(context.claude_update_recipient, issue, summary)
+        :ok
+
+      {:error, summary} when is_map(summary) ->
+        send_gate_update(context.claude_update_recipient, issue, summary)
+        {:error, {:gate_failed, gate_error_summary(summary)}}
+
+      {:error, reason} ->
+        {:error, {:gate_error, reason}}
+    end
+  end
+
+  defp gate_execution_id(turn_number) when is_integer(turn_number) and turn_number > 0 do
+    "turn-" <> (turn_number |> Integer.to_string() |> String.pad_leading(4, "0"))
+  end
+
+  defp gate_execution_id(_turn_number), do: "turn-unknown"
+
+  defp send_gate_update(recipient, %Issue{id: issue_id}, summary)
+       when is_pid(recipient) and is_binary(issue_id) and is_map(summary) do
+    send(
+      recipient,
+      {:claude_worker_update, issue_id,
+       %{
+         event: :gates_completed,
+         timestamp: DateTime.utc_now(),
+         session_id: nil,
+         usage: nil,
+         raw: Gates.summary_to_json(summary)
+       }}
+    )
+
+    :ok
+  end
+
+  defp send_gate_update(_recipient, _issue, _summary), do: :ok
+
+  defp gate_error_summary(summary) do
+    %{
+      status: summary.status,
+      failed: Enum.map(summary.results, &Map.take(&1, [:name, :status, :exit_status, :retryable, :environment_failure]))
+    }
   end
 
   defp continue_agent_turns(context, issue, turn_number, effective_run_ref) do

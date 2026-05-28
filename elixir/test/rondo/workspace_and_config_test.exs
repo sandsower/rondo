@@ -732,6 +732,34 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Config.claude_command() == "claude"
   end
 
+  test "config reads flat gate definitions" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      gates: [
+        %{name: "unit", command: "mix test", timeout_ms: 120_000},
+        %{name: "format", command: "mix format --check-formatted"}
+      ]
+    )
+
+    assert Config.gates() == [
+             %{name: "unit", command: "mix test", timeout_ms: 120_000},
+             %{name: "format", command: "mix format --check-formatted", timeout_ms: 60_000}
+           ]
+  end
+
+  test "config validates flat gate definitions" do
+    write_workflow_file!(Workflow.workflow_file_path(), gates: "mix test")
+    assert {:error, {:invalid_workflow_config, _, [%{path: "gates"}]}} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(), gates: [%{name: "", command: "mix test"}])
+    assert {:error, {:invalid_workflow_config, _, [%{path: "gates.0.name"}]}} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(), gates: [%{name: "unit", command: "", timeout_ms: 0}])
+    assert {:error, {:invalid_workflow_config, _, errors}} = Config.validate!()
+    error_paths = Enum.map(errors, & &1.path)
+    assert "gates.0.command" in error_paths
+    assert "gates.0.timeout_ms" in error_paths
+  end
+
   test "config resolves $VAR references for env-backed secret and path values" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
     api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"

@@ -767,7 +767,7 @@ defmodule Rondo.Orchestrator do
     ledger = write_run_ledger_checkpoint(ledger, :dispatch, dispatch_payload)
 
     case Task.Supervisor.start_child(Rondo.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt)
+           AgentRunner.run(issue, recipient, attempt: attempt, run_dir: run_ledger_dir(ledger))
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -804,6 +804,7 @@ defmodule Rondo.Orchestrator do
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
             started_at: DateTime.utc_now(),
+            latest_gate: nil,
             event_log: []
           })
 
@@ -886,6 +887,62 @@ defmodule Rondo.Orchestrator do
         ledger
     end
   end
+
+  defp link_run_ledger_gate_artifacts(%RunLedger{} = ledger, %{event: :gates_completed, raw: raw}) when is_map(raw) do
+    artifacts = gate_artifacts(raw)
+
+    case RunLedger.link_artifacts(ledger, artifacts) do
+      {:ok, ledger} ->
+        ledger
+
+      {:error, reason} ->
+        Logger.warning("Run ledger gate artifact link failed #{ledger_context(ledger)} reason=#{inspect(reason)}")
+        ledger
+    end
+  end
+
+  defp link_run_ledger_gate_artifacts(ledger, _update), do: ledger
+
+  defp gate_artifacts(raw) when is_map(raw) do
+    results_artifact = artifact_from_path("gate_results", map_value(raw, :results_path))
+
+    result_artifacts =
+      raw
+      |> map_value(:results)
+      |> case do
+        results when is_list(results) -> Enum.flat_map(results, &gate_result_artifacts/1)
+        _ -> []
+      end
+
+    [results_artifact | result_artifacts]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp gate_result_artifacts(result) when is_map(result) do
+    name = map_value(result, :name) || "gate"
+
+    [
+      artifact_from_path("gate_stdout", map_value(result, :stdout_path), name),
+      artifact_from_path("gate_stderr", map_value(result, :stderr_path), name)
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp gate_result_artifacts(_result), do: []
+
+  defp artifact_from_path(_kind, nil), do: nil
+  defp artifact_from_path(kind, path) when is_binary(path), do: %{"kind" => kind, "path" => path}
+
+  defp artifact_from_path(kind, path, name) when is_binary(path),
+    do: %{"kind" => kind, "path" => path, "name" => to_string(name)}
+
+  defp artifact_from_path(_kind, _path, _name), do: nil
+
+  defp map_value(map, key) when is_map(map) and is_atom(key) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  end
+
+  defp map_value(_map, _key), do: nil
 
   defp run_ledger_id(%RunLedger{run_id: run_id}), do: run_id
   defp run_ledger_id(_ledger), do: nil
@@ -1208,6 +1265,7 @@ defmodule Rondo.Orchestrator do
           last_claude_timestamp: metadata.last_claude_timestamp,
           last_claude_message: metadata.last_claude_message,
           last_claude_event: metadata.last_claude_event,
+          latest_gate: Map.get(metadata, :latest_gate),
           runtime_seconds: running_seconds(metadata.started_at, now),
           event_log: Map.get(metadata, :event_log, [])
         }
@@ -1292,6 +1350,7 @@ defmodule Rondo.Orchestrator do
         claude_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         claude_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
         turn_count: turn_count_for_update(turn_count, running_entry.session_id, update),
+        latest_gate: latest_gate_for_update(running_entry, update),
         event_log: event_log
       }),
       token_delta
@@ -1324,6 +1383,8 @@ defmodule Rondo.Orchestrator do
           )
       end
 
+    ledger = link_run_ledger_gate_artifacts(ledger, update)
+
     Map.merge(running_entry, %{ledger: ledger, run_id: run_ledger_id(ledger), run_dir: run_ledger_dir(ledger)})
   end
 
@@ -1346,6 +1407,30 @@ defmodule Rondo.Orchestrator do
     do: session_id
 
   defp session_id_for_update(existing, _update), do: existing
+
+  defp latest_gate_for_update(_running_entry, %{event: :gates_completed, raw: raw}) when is_map(raw) do
+    %{
+      status: map_value(raw, :status),
+      results_path: map_value(raw, :results_path),
+      failed: gate_failed_results(map_value(raw, :results))
+    }
+  end
+
+  defp latest_gate_for_update(running_entry, _update), do: Map.get(running_entry, :latest_gate)
+
+  defp gate_failed_results(results) when is_list(results) do
+    results
+    |> Enum.reject(fn result -> map_value(result, :status) in [:pass, "pass"] end)
+    |> Enum.map(fn result ->
+      %{
+        name: map_value(result, :name),
+        status: map_value(result, :status),
+        exit_status: map_value(result, :exit_status)
+      }
+    end)
+  end
+
+  defp gate_failed_results(_results), do: []
 
   defp turn_count_for_update(existing_count, existing_session_id, %{
          event: :session_started,
@@ -1569,6 +1654,7 @@ defmodule Rondo.Orchestrator do
         output_tokens: Map.get(running_entry, :claude_output_tokens, 0),
         total_tokens: Map.get(running_entry, :claude_total_tokens, 0)
       },
+      latest_gate: Map.get(running_entry, :latest_gate),
       event_log: Map.get(running_entry, :event_log, [])
     }
 
@@ -1711,7 +1797,7 @@ defmodule Rondo.Orchestrator do
     File.write!("/tmp/rondo_workspaces/rondo_debug.log", line, [:append])
   end
 
-  @archive_keys ~w(issue_id identifier session_id state started_at finished_at exit_reason turn_count tokens event_log)
+  @archive_keys ~w(issue_id identifier session_id state started_at finished_at exit_reason turn_count tokens latest_gate event_log)
   @token_keys ~w(input_tokens output_tokens total_tokens)
   @event_keys ~w(at event message tokens)
 

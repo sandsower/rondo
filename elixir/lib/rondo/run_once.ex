@@ -5,13 +5,13 @@ defmodule Rondo.RunOnce do
 
   require Logger
 
-  alias Rondo.{AgentRunner, Config, Linear.Issue, Tracker}
+  alias Rondo.{AgentRunner, Config, Linear.Issue, RunLedger, Tracker}
 
   @type run_result :: :ok | {:error, term()}
   @type deps :: %{
           fetch_issue_states_by_ids: ([String.t()] -> {:ok, [Issue.t()]} | {:error, term()}),
           update_issue_state: (String.t(), String.t() -> :ok | {:error, term()}),
-          agent_runner: (Issue.t(), keyword() -> :ok | no_return())
+          agent_runner: (Issue.t(), keyword() -> run_result() | no_return())
         }
 
   @spec run(String.t()) :: run_result()
@@ -38,7 +38,7 @@ defmodule Rondo.RunOnce do
     %{
       fetch_issue_states_by_ids: &Tracker.fetch_issue_states_by_ids/1,
       update_issue_state: &Tracker.update_issue_state/2,
-      agent_runner: fn issue, agent_opts -> AgentRunner.run(issue, nil, agent_opts) end
+      agent_runner: fn issue, agent_opts -> AgentRunner.run(issue, self(), agent_opts) end
     }
   end
 
@@ -104,13 +104,123 @@ defmodule Rondo.RunOnce do
 
   @spec run_agent(Issue.t(), deps(), keyword()) :: run_result()
   defp run_agent(issue, deps, agent_opts) do
-    deps.agent_runner.(issue, agent_opts)
+    case RunLedger.create_run(issue) do
+      {:ok, ledger} ->
+        do_run_agent_with_ledger(issue, deps, agent_opts, ledger)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_run_agent_with_ledger(issue, deps, agent_opts, ledger) do
+    result = deps.agent_runner.(issue, Keyword.put_new(agent_opts, :run_dir, ledger.run_dir))
+    ledger = record_queued_updates(ledger, issue.id)
+    complete_run_once_ledger_result(ledger, result)
   rescue
     error ->
-      {:error, {:agent_run_failed, Exception.message(error)}}
+      reason = {:agent_run_failed, Exception.message(error)}
+      ledger = record_queued_updates(ledger, issue.id)
+      complete_run_once_ledger_result(ledger, {:error, reason})
   catch
-    :exit, reason -> {:error, {:agent_run_failed, {:exit, reason}}}
-    kind, reason -> {:error, {:agent_run_failed, {kind, reason}}}
+    :exit, reason ->
+      reason = {:agent_run_failed, {:exit, reason}}
+      ledger = record_queued_updates(ledger, issue.id)
+      complete_run_once_ledger_result(ledger, {:error, reason})
+
+    kind, reason ->
+      reason = {:agent_run_failed, {kind, reason}}
+      ledger = record_queued_updates(ledger, issue.id)
+      complete_run_once_ledger_result(ledger, {:error, reason})
+  end
+
+  defp complete_run_once_ledger_result(ledger, result) do
+    case complete_run_once_ledger(ledger, result) do
+      {:ok, _ledger} ->
+        result
+
+      {:error, reason} ->
+        {:error, {:run_once_ledger_completion_failed, reason, original_result(result)}}
+    end
+  end
+
+  defp complete_run_once_ledger(ledger, :ok), do: RunLedger.complete_run(ledger, :completed, %{mode: "run_once"})
+  defp complete_run_once_ledger(ledger, {:error, reason}), do: RunLedger.complete_run(ledger, :failed, %{mode: "run_once", reason: inspect(reason)})
+
+  defp original_result(:ok), do: :ok
+  defp original_result({:error, reason}), do: reason
+
+  defp record_queued_updates(ledger, issue_id) do
+    collect_queued_updates(issue_id)
+    |> Enum.reduce(ledger, &record_update(&2, &1))
+  end
+
+  defp collect_queued_updates(issue_id), do: collect_queued_updates(issue_id, [])
+
+  defp collect_queued_updates(issue_id, acc) do
+    receive do
+      {:claude_worker_update, ^issue_id, update} when is_map(update) ->
+        collect_queued_updates(issue_id, [update | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp record_update(ledger, update) do
+    case RunLedger.append_agent_event(ledger, update) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("Failed to append run-once ledger agent event #{ledger_context(ledger)} reason=#{inspect(reason)}")
+    end
+
+    ledger
+    |> write_update_checkpoint(update)
+    |> link_gate_artifacts(update)
+  end
+
+  defp write_update_checkpoint(ledger, update) do
+    case RunLedger.checkpoint_kind_for_agent_update(update) do
+      nil ->
+        ledger
+
+      kind ->
+        payload = RunLedger.checkpoint_payload_for_agent_update(update)
+        source = RunLedger.checkpoint_source_for_agent_update(update)
+
+        case RunLedger.write_checkpoint(ledger, kind, payload, source: source) do
+          {:ok, ledger} -> ledger
+          {:error, _reason} -> ledger
+        end
+    end
+  end
+
+  defp link_gate_artifacts(ledger, %{event: :gates_completed, raw: raw}) when is_map(raw) do
+    artifacts = gate_artifacts(raw)
+
+    case RunLedger.link_artifacts(ledger, artifacts) do
+      {:ok, ledger} -> ledger
+      {:error, _reason} -> ledger
+    end
+  end
+
+  defp link_gate_artifacts(ledger, _update), do: ledger
+
+  defp gate_artifacts(raw) do
+    results_path = Map.get(raw, :results_path) || Map.get(raw, "results_path")
+    results = Map.get(raw, :results) || Map.get(raw, "results") || []
+
+    [%{kind: "gate_results", path: results_path}]
+    |> Kernel.++(
+      Enum.flat_map(results, fn result ->
+        stdout_path = Map.get(result, :stdout_path) || Map.get(result, "stdout_path")
+        stderr_path = Map.get(result, :stderr_path) || Map.get(result, "stderr_path")
+
+        [
+          %{kind: "gate_stdout", path: stdout_path},
+          %{kind: "gate_stderr", path: stderr_path}
+        ]
+      end)
+    )
+    |> Enum.reject(&is_nil(&1.path))
   end
 
   @spec complete_issue_shape?(Issue.t()) :: boolean()
@@ -148,6 +258,18 @@ defmodule Rondo.RunOnce do
   @spec normalize_state(term()) :: String.t()
   defp normalize_state(state) when is_binary(state), do: state |> String.trim() |> String.downcase()
   defp normalize_state(_state), do: ""
+
+  defp ledger_context(ledger) do
+    issue = Map.get(ledger.manifest, "issue", %{})
+
+    [
+      "issue_identifier=#{Map.get(issue, "identifier") || "unknown"}",
+      "issue_id=#{Map.get(issue, "id") || "unknown"}",
+      "run_id=#{ledger.run_id}",
+      "run_dir=#{ledger.run_dir}"
+    ]
+    |> Enum.join(" ")
+  end
 
   @spec issue_context(Issue.t()) :: String.t()
   defp issue_context(%Issue{identifier: identifier, id: id}) do
