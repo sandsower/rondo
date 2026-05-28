@@ -1114,7 +1114,9 @@ defmodule Rondo.Config do
     [
       validate_required_string_field(gate, "#{path}.name", "name"),
       validate_required_string_field(gate, "#{path}.command", "command"),
-      validate_gate_timeout_field(gate, path)
+      validate_gate_timeout_field(gate, path),
+      validate_optional_gate_action_id_field(gate, path),
+      validate_optional_gate_action_classes_field(gate, path)
     ]
     |> List.flatten()
   end
@@ -1141,6 +1143,30 @@ defmodule Rondo.Config do
   defp validate_gate_timeout_field(gate, path) do
     validate_present_value(gate, "#{path}.timeout_ms", fn value ->
       validate_integer_value(value, "#{path}.timeout_ms", &(&1 > 0), "must be a positive integer")
+    end)
+  end
+
+  defp validate_optional_gate_action_id_field(gate, path) do
+    validate_present_value(gate, "#{path}.action_id", fn
+      value when is_binary(value) ->
+        if String.trim(value) == "", do: [config_error("#{path}.action_id", value, "must be a non-empty string")], else: []
+
+      value ->
+        [config_error("#{path}.action_id", value, "must be a string")]
+    end)
+  end
+
+  defp validate_optional_gate_action_classes_field(gate, path) do
+    validate_present_value(gate, "#{path}.action_classes", fn
+      values when is_list(values) and values != [] ->
+        if Enum.all?(values, &(is_binary(&1) and String.trim(&1) != "")) do
+          []
+        else
+          [config_error("#{path}.action_classes", values, "must be a non-empty list of non-empty strings")]
+        end
+
+      value ->
+        [config_error("#{path}.action_classes", value, "must be a non-empty list of non-empty strings")]
     end)
   end
 

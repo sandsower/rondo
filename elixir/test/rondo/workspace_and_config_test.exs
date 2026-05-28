@@ -788,6 +788,17 @@ defmodule Rondo.WorkspaceAndConfigTest do
     error_paths = Enum.map(errors, & &1.path)
     assert "gates.0.command" in error_paths
     assert "gates.0.timeout_ms" in error_paths
+
+    for invalid_classes <- [[], [""], [123], ["workspace-write", ""]] do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        gates: [%{name: "unit", command: "mix test", action_classes: invalid_classes}]
+      )
+
+      assert {:error, {:invalid_workflow_config, _, [%{path: "gates.0.action_classes"}]}} = Config.validate!()
+    end
+
+    write_workflow_file!(Workflow.workflow_file_path(), gates: [%{name: "unit", command: "mix test", action_id: ""}])
+    assert {:error, {:invalid_workflow_config, _, [%{path: "gates.0.action_id"}]}} = Config.validate!()
   end
 
   test "config resolves $VAR references for env-backed secret and path values" do
