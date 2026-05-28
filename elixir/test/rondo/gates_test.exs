@@ -153,6 +153,132 @@ defmodule Rondo.GatesTest do
     assert Gates.summary_to_json(summary).status == :pass
   end
 
+  test "evaluates action policy before executing gates" do
+    test_root = tmp_dir("gates-action-policy-allow")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-POLICY")
+    run_dir = Path.join(workspace_root, ".rondo_runs/MT-POLICY/run-1")
+
+    File.mkdir_p!(workspace)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert {:ok, summary} =
+             Gates.run([%{name: "unit", command: "echo ran", timeout_ms: 1_000}], workspace,
+               run_dir: run_dir,
+               action_policy: true,
+               action_policy_command: fake_action_policy("allow")
+             )
+
+    assert [%{policy_decision: %{"decision" => "allow"}}] = summary.results
+    assert File.read!(Path.join(run_dir, "artifacts/gates/0001-unit-stdout.log")) == "ran\n"
+
+    results_json = run_dir |> Path.join("artifacts/gates/results.json") |> File.read!() |> Jason.decode!()
+    assert [%{"policy_decision" => %{"decision" => "allow"}}] = results_json["results"]
+  end
+
+  test "blocks gates when action policy denies or requires approval" do
+    test_root = tmp_dir("gates-action-policy-block")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-POLICY-BLOCK")
+    run_dir = Path.join(workspace_root, ".rondo_runs/MT-POLICY-BLOCK/run-1")
+
+    File.mkdir_p!(workspace)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert {:error, denied_summary} =
+             Gates.run([%{name: "deny", command: "touch should-not-run", timeout_ms: 1_000}], workspace,
+               run_dir: run_dir,
+               execution_id: "deny",
+               action_policy: true,
+               action_policy_command: fake_action_policy("deny")
+             )
+
+    assert [
+             %{
+               status: :error,
+               retryable: false,
+               environment_failure: false,
+               policy_decision: %{"decision" => "deny", "side_effect_status" => "blocked"}
+             }
+           ] = denied_summary.results
+
+    refute File.exists?(Path.join(workspace, "should-not-run"))
+
+    assert {:error, ask_summary} =
+             Gates.run([%{name: "ask", command: "touch should-not-run-either", timeout_ms: 1_000}], workspace,
+               run_dir: run_dir,
+               execution_id: "ask",
+               action_policy: true,
+               action_policy_command: fake_action_policy("ask")
+             )
+
+    assert [%{policy_decision: %{"decision" => "ask", "side_effect_status" => "blocked"}}] = ask_summary.results
+    refute File.exists?(Path.join(workspace, "should-not-run-either"))
+  end
+
+  test "passes configured gate action metadata to action policy" do
+    test_root = tmp_dir("gates-action-policy-metadata")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-POLICY-META")
+    run_dir = Path.join(workspace_root, ".rondo_runs/MT-POLICY-META/run-1")
+
+    File.mkdir_p!(workspace)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert {:error, summary} =
+             Gates.run(
+               [
+                 %{
+                   name: "deps",
+                   command: "touch should-not-run",
+                   timeout_ms: 1_000,
+                   action_id: "dependency.install",
+                   action_classes: ["workspace-write", "dependency-install"]
+                 }
+               ],
+               workspace,
+               run_dir: run_dir,
+               action_policy: true,
+               action_policy_command: fake_action_policy("deny")
+             )
+
+    assert [
+             %{
+               policy_decision: %{
+                 "action" => "dependency.install",
+                 "classes" => ["workspace-write", "dependency-install"],
+                 "side_effect_status" => "blocked"
+               }
+             }
+           ] = summary.results
+
+    refute File.exists?(Path.join(workspace, "should-not-run"))
+  end
+
+  test "blocks gates when action policy evaluation fails closed" do
+    test_root = tmp_dir("gates-action-policy-failure")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-POLICY-FAIL")
+    run_dir = Path.join(workspace_root, ".rondo_runs/MT-POLICY-FAIL/run-1")
+
+    File.mkdir_p!(workspace)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert {:error, summary} =
+             Gates.run([%{name: "policy fail", command: "touch should-not-run", timeout_ms: 1_000}], workspace,
+               run_dir: run_dir,
+               action_policy: true,
+               action_policy_command: fake_action_policy("invalid-json")
+             )
+
+    assert [%{policy_decision: %{side_effect_status: :blocked}}] = summary.results
+    refute File.exists?(Path.join(workspace, "should-not-run"))
+  end
+
   test "requires a run_dir option" do
     test_root = tmp_dir("gates-run-dir-required")
     workspace_root = Path.join(test_root, "workspaces")
@@ -204,6 +330,34 @@ defmodule Rondo.GatesTest do
 
     assert {:error, {:invalid_workspace_cwd, :outside_root}} =
              Gates.run([%{name: "unit", command: "true", timeout_ms: 1_000}], outside_workspace, run_dir: run_dir)
+  end
+
+  defp fake_action_policy(decision) do
+    path = Path.join(tmp_dir("fake-action-policy"), "beislid-fake")
+    File.mkdir_p!(Path.dirname(path))
+
+    File.write!(path, """
+    #!/bin/sh
+    case #{decision} in
+      invalid-json) echo not-json; exit 0 ;;
+    esac
+    action=""
+    mode=""
+    classes=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --action) action="$2"; shift 2 ;;
+        --mode) mode="$2"; shift 2 ;;
+        --class) classes="$classes${classes:+,}$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    classes_json=$(printf '%s' "$classes" | awk 'BEGIN{FS=","; printf "["} {for(i=1;i<=NF;i++){if(i>1)printf ","; printf "\\\"" $i "\\\""}} END{printf "]"}')
+    printf '{"decision":"#{decision}","action":"%s","mode":"%s","classes":%s,"matched_rules":[],"sandbox_status":{"baseline":"separate-worktree"},"requires_human":false,"log_level":"info","reason":"test","remediation":[]}' "$action" "$mode" "$classes_json"
+    """)
+
+    File.chmod!(path, 0o755)
+    path
   end
 
   defp tmp_dir(name) do

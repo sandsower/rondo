@@ -41,6 +41,9 @@ defmodule Rondo.Config do
   @default_pi_command "pi"
   @default_pi_turn_timeout_ms 3_600_000
   @default_pi_stall_timeout_ms 300_000
+  @default_action_policy_command "beislid"
+  @default_action_policy_run_mode "unattended-auto"
+  @valid_action_policy_run_modes ["supervised-auto", "unattended-auto"]
   @default_debug false
   @default_observability_enabled true
   @default_observability_refresh_ms 1_000
@@ -140,6 +143,14 @@ defmodule Rondo.Config do
                                  stall_timeout_ms: [type: :integer, default: @default_pi_stall_timeout_ms]
                                ]
                              ],
+                             action_policy: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 command: [type: :string, default: @default_action_policy_command],
+                                 run_mode: [type: :string, default: @default_action_policy_run_mode]
+                               ]
+                             ],
                              hooks: [
                                type: :map,
                                default: %{},
@@ -195,7 +206,13 @@ defmodule Rondo.Config do
   @type gate :: %{
           name: String.t(),
           command: String.t(),
-          timeout_ms: pos_integer()
+          timeout_ms: pos_integer(),
+          action_id: String.t() | nil,
+          action_classes: [String.t()]
+        }
+  @type action_policy :: %{
+          command: String.t(),
+          run_mode: String.t()
         }
 
   @spec current_workflow() :: {:ok, workflow_payload()} | {:error, term()}
@@ -303,7 +320,9 @@ defmodule Rondo.Config do
       %{
         name: Map.fetch!(gate, :name),
         command: Map.fetch!(gate, :command),
-        timeout_ms: Map.get(gate, :timeout_ms, @default_gate_timeout_ms)
+        timeout_ms: Map.get(gate, :timeout_ms, @default_gate_timeout_ms),
+        action_id: Map.get(gate, :action_id),
+        action_classes: Map.get(gate, :action_classes, ["read"])
       }
     end)
   end
@@ -387,6 +406,26 @@ defmodule Rondo.Config do
   @spec pi_command() :: String.t()
   def pi_command do
     get_in(validated_workflow_options(), [:pi, :command])
+  end
+
+  @spec action_policy() :: action_policy()
+  def action_policy do
+    policy = get_in(validated_workflow_options(), [:action_policy])
+
+    %{
+      command: Map.get(policy, :command),
+      run_mode: Map.get(policy, :run_mode)
+    }
+  end
+
+  @spec action_policy_command() :: String.t()
+  def action_policy_command do
+    get_in(validated_workflow_options(), [:action_policy, :command])
+  end
+
+  @spec action_policy_run_mode() :: String.t()
+  def action_policy_run_mode do
+    get_in(validated_workflow_options(), [:action_policy, :run_mode])
   end
 
   @spec pi_turn_timeout_ms() :: pos_integer()
@@ -705,6 +744,7 @@ defmodule Rondo.Config do
       agent: extract_agent_options(section_map(config, "agent")),
       claude: extract_claude_options(section_map(config, "claude")),
       pi: extract_pi_options(section_map(config, "pi")),
+      action_policy: extract_action_policy_options(section_map(config, "action_policy")),
       hooks: extract_hooks_options(section_map(config, "hooks")),
       gates: extract_gates_options(Map.get(config, "gates")),
       observability: extract_observability_options(section_map(config, "observability")),
@@ -767,6 +807,12 @@ defmodule Rondo.Config do
     |> put_if_present(:stall_timeout_ms, integer_value(Map.get(section, "stall_timeout_ms")))
   end
 
+  defp extract_action_policy_options(section) do
+    %{}
+    |> put_if_present(:command, command_value(Map.get(section, "command")))
+    |> put_if_present(:run_mode, scalar_string_value(Map.get(section, "run_mode")))
+  end
+
   defp tools_list_value(values) when is_list(values) do
     filtered = Enum.filter(values, &is_binary/1) |> Enum.reject(&(String.trim(&1) == ""))
     if filtered == [], do: :omit, else: filtered
@@ -790,6 +836,8 @@ defmodule Rondo.Config do
         |> put_if_present(:name, scalar_string_value(Map.get(gate, "name")))
         |> put_if_present(:command, command_value(Map.get(gate, "command")))
         |> put_if_present(:timeout_ms, positive_integer_value(Map.get(gate, "timeout_ms")))
+        |> put_if_present(:action_id, scalar_string_value(Map.get(gate, "action_id")))
+        |> put_if_present(:action_classes, tools_list_value(Map.get(gate, "action_classes")))
 
       _other ->
         %{}
@@ -818,6 +866,7 @@ defmodule Rondo.Config do
     agent = section_map(config, "agent")
     claude = section_map(config, "claude")
     pi = section_map(config, "pi")
+    action_policy = section_map(config, "action_policy")
     hooks = section_map(config, "hooks")
     gates = Map.get(config, "gates")
     observability = section_map(config, "observability")
@@ -830,6 +879,7 @@ defmodule Rondo.Config do
       validate_section_map(config, "agent"),
       validate_section_map(config, "claude"),
       validate_section_map(config, "pi"),
+      validate_section_map(config, "action_policy"),
       validate_section_map(config, "hooks"),
       validate_gates_field(gates),
       validate_section_map(config, "observability"),
@@ -863,6 +913,8 @@ defmodule Rondo.Config do
       validate_string_field(pi, "pi.command", allow_empty: true),
       validate_positive_integer_field(pi, "pi.turn_timeout_ms"),
       validate_positive_integer_field(pi, "pi.stall_timeout_ms"),
+      validate_string_field(action_policy, "action_policy.command"),
+      validate_inclusion_field(action_policy, "action_policy.run_mode", @valid_action_policy_run_modes),
       validate_string_field(hooks, "hooks.after_create"),
       validate_string_field(hooks, "hooks.before_run"),
       validate_string_field(hooks, "hooks.after_run"),
@@ -1062,7 +1114,9 @@ defmodule Rondo.Config do
     [
       validate_required_string_field(gate, "#{path}.name", "name"),
       validate_required_string_field(gate, "#{path}.command", "command"),
-      validate_gate_timeout_field(gate, path)
+      validate_gate_timeout_field(gate, path),
+      validate_optional_gate_action_id_field(gate, path),
+      validate_optional_gate_action_classes_field(gate, path)
     ]
     |> List.flatten()
   end
@@ -1089,6 +1143,30 @@ defmodule Rondo.Config do
   defp validate_gate_timeout_field(gate, path) do
     validate_present_value(gate, "#{path}.timeout_ms", fn value ->
       validate_integer_value(value, "#{path}.timeout_ms", &(&1 > 0), "must be a positive integer")
+    end)
+  end
+
+  defp validate_optional_gate_action_id_field(gate, path) do
+    validate_present_value(gate, "#{path}.action_id", fn
+      value when is_binary(value) ->
+        if String.trim(value) == "", do: [config_error("#{path}.action_id", value, "must be a non-empty string")], else: []
+
+      value ->
+        [config_error("#{path}.action_id", value, "must be a string")]
+    end)
+  end
+
+  defp validate_optional_gate_action_classes_field(gate, path) do
+    validate_present_value(gate, "#{path}.action_classes", fn
+      values when is_list(values) and values != [] ->
+        if Enum.all?(values, &(is_binary(&1) and String.trim(&1) != "")) do
+          []
+        else
+          [config_error("#{path}.action_classes", values, "must be a non-empty list of non-empty strings")]
+        end
+
+      value ->
+        [config_error("#{path}.action_classes", value, "must be a non-empty list of non-empty strings")]
     end)
   end
 

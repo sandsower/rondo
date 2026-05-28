@@ -410,6 +410,11 @@ Each entry contains:
   - Runs with cwd set to the issue workspace.
 - `timeout_ms` (positive integer, optional)
   - Default: `60000`.
+- `action_id` (string, optional)
+  - Stable Beislið action id for policy evaluation.
+- `action_classes` (list of strings, optional)
+  - Beislið action classes for policy evaluation.
+  - Defaults to `["read"]` for legacy flat sensor gates.
 
 Gate stdout/stderr and a structured `results.json` are persisted under the run ledger. Any gate
 failure, error, or timeout makes the current run attempt fail/retry; gate evidence must not rely on
@@ -497,6 +502,25 @@ Fields:
 - `stall_timeout_ms` (integer)
   - Default: `300000` (5 minutes).
   - No stdout activity timeout.
+
+#### 5.3.8 `action_policy` (object)
+
+Fields:
+
+- `command` (string executable)
+  - Default: `beislid`.
+  - Invoked as `beislid action-policy evaluate ...` unless overridden.
+  - This is an executable path/name, not a shell command string.
+- `run_mode` (string)
+  - Default: `unattended-auto`.
+  - Values: `supervised-auto`, `unattended-auto`.
+
+Beislið owns the canonical run-mode/action-risk vocabulary and deterministic policy table. Rondo
+MUST NOT duplicate that table. Rondo evaluates policy at Rondo-owned side-effect boundaries, maps
+workspace state into Beislið sandbox-status inputs, fails closed when the evaluator cannot produce a
+valid envelope, and persists evaluator envelopes in run artifacts. Host permission flags such as
+`claude.permission_mode` and `claude.dangerously_skip_permissions` are not substitutes for this
+external policy enforcement.
 
 ### 5.4 Prompt Template Contract
 
@@ -604,6 +628,7 @@ Validation checks:
 - `agent.max_concurrent_agents_by_state` entries are positive integers; invalid entries are
   reported with their field path.
 - `claude.permission_mode` is one of `default`, `plan`, `acceptEdits`, or `bypassPermissions`.
+- `action_policy.run_mode` is one of `supervised-auto` or `unattended-auto`.
 - `tracker.kind` is present and supported.
 - `tracker.api_key` is present after `$` resolution.
 - `tracker.project_slug` is present when required by the selected tracker kind.
@@ -644,6 +669,10 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `pi.command`: shell command string, default `pi`
 - `pi.turn_timeout_ms`: positive integer, default `3600000`
 - `pi.stall_timeout_ms`: positive integer, default `300000`
+- `gates[].action_id`: optional Beislið action id for gate policy evaluation
+- `gates[].action_classes`: optional Beislið action classes, default `["read"]`
+- `action_policy.command`: executable path/name, default `beislid`
+- `action_policy.run_mode`: one of `supervised-auto`, `unattended-auto`; default `unattended-auto`
 - `server.port` (extension): integer, optional; enables the optional HTTP server, `0` may be used
   for ephemeral local bind, and CLI `--port` overrides it
 

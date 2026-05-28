@@ -183,7 +183,11 @@ defmodule Rondo.AgentRunner do
   defp run_gates(%{run_dir: nil}, _issue, _turn_number), do: {:error, :missing_run_ledger_for_gates}
 
   defp run_gates(context, issue, turn_number) do
-    case Gates.run(context.gates, context.workspace, run_dir: context.run_dir, execution_id: gate_execution_id(turn_number)) do
+    case Gates.run(context.gates, context.workspace,
+           run_dir: context.run_dir,
+           execution_id: gate_execution_id(turn_number),
+           action_policy: true
+         ) do
       {:ok, summary} ->
         send_gate_update(context.claude_update_recipient, issue, summary)
         :ok

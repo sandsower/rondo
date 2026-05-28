@@ -1992,9 +1992,14 @@ defmodule Rondo.OrchestratorStatusTest do
     assert archived_entry.exit_reason =~ "gate_failed"
     assert archived_entry.latest_gate.status == :fail
 
-    [manifest_path] = Path.wildcard(Path.join([workspace_root, ".rondo_runs", "MT-GATE-FAIL-ORCH", "*", "manifest.json"]))
-    manifest = manifest_path |> File.read!() |> Jason.decode!()
-    assert manifest["status"] == "failed"
+    manifest =
+      [workspace_root, ".rondo_runs", "MT-GATE-FAIL-ORCH", "*", "manifest.json"]
+      |> Path.join()
+      |> Path.wildcard()
+      |> Enum.map(fn path -> path |> File.read!() |> Jason.decode!() end)
+      |> Enum.find(&(&1["status"] == "failed"))
+
+    assert manifest
     assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "gates_completed"))
     assert Enum.any?(manifest["artifacts"], &(&1["kind"] == "gate_results"))
   end
