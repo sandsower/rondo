@@ -162,10 +162,16 @@ defmodule RondoWeb.Presenter do
   defp gate_payload(nil), do: nil
 
   defp gate_payload(gate) when is_map(gate) do
+    failed =
+      case Map.get(gate, :failed, Map.get(gate, "failed", [])) do
+        failures when is_list(failures) -> Enum.map(failures, &gate_failure_payload/1)
+        _other -> []
+      end
+
     %{
       status: Map.get(gate, :status) || Map.get(gate, "status"),
       results_path: Map.get(gate, :results_path) || Map.get(gate, "results_path"),
-      failed: gate |> Map.get(:failed, Map.get(gate, "failed", [])) |> Enum.map(&gate_failure_payload/1)
+      failed: failed
     }
   end
 

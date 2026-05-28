@@ -116,30 +116,39 @@ defmodule Rondo.RunOnce do
   defp do_run_agent_with_ledger(issue, deps, agent_opts, ledger) do
     result = deps.agent_runner.(issue, Keyword.put_new(agent_opts, :run_dir, ledger.run_dir))
     ledger = record_queued_updates(ledger, issue.id)
-    complete_run_once_ledger(ledger, result)
-    result
+    complete_run_once_ledger_result(ledger, result)
   rescue
     error ->
       reason = {:agent_run_failed, Exception.message(error)}
       ledger = record_queued_updates(ledger, issue.id)
-      complete_run_once_ledger(ledger, {:error, reason})
-      {:error, reason}
+      complete_run_once_ledger_result(ledger, {:error, reason})
   catch
     :exit, reason ->
       reason = {:agent_run_failed, {:exit, reason}}
       ledger = record_queued_updates(ledger, issue.id)
-      complete_run_once_ledger(ledger, {:error, reason})
-      {:error, reason}
+      complete_run_once_ledger_result(ledger, {:error, reason})
 
     kind, reason ->
       reason = {:agent_run_failed, {kind, reason}}
       ledger = record_queued_updates(ledger, issue.id)
-      complete_run_once_ledger(ledger, {:error, reason})
-      {:error, reason}
+      complete_run_once_ledger_result(ledger, {:error, reason})
+  end
+
+  defp complete_run_once_ledger_result(ledger, result) do
+    case complete_run_once_ledger(ledger, result) do
+      {:ok, _ledger} ->
+        result
+
+      {:error, reason} ->
+        {:error, {:run_once_ledger_completion_failed, reason, original_result(result)}}
+    end
   end
 
   defp complete_run_once_ledger(ledger, :ok), do: RunLedger.complete_run(ledger, :completed, %{mode: "run_once"})
   defp complete_run_once_ledger(ledger, {:error, reason}), do: RunLedger.complete_run(ledger, :failed, %{mode: "run_once", reason: inspect(reason)})
+
+  defp original_result(:ok), do: :ok
+  defp original_result({:error, reason}), do: reason
 
   defp record_queued_updates(ledger, issue_id) do
     collect_queued_updates(issue_id)
@@ -160,7 +169,7 @@ defmodule Rondo.RunOnce do
   defp record_update(ledger, update) do
     case RunLedger.append_agent_event(ledger, update) do
       :ok -> :ok
-      {:error, reason} -> Logger.warning("Failed to append run-once ledger agent event: #{inspect(reason)}")
+      {:error, reason} -> Logger.warning("Failed to append run-once ledger agent event #{ledger_context(ledger)} reason=#{inspect(reason)}")
     end
 
     ledger
@@ -249,6 +258,18 @@ defmodule Rondo.RunOnce do
   @spec normalize_state(term()) :: String.t()
   defp normalize_state(state) when is_binary(state), do: state |> String.trim() |> String.downcase()
   defp normalize_state(_state), do: ""
+
+  defp ledger_context(ledger) do
+    issue = Map.get(ledger.manifest, "issue", %{})
+
+    [
+      "issue_identifier=#{Map.get(issue, "identifier") || "unknown"}",
+      "issue_id=#{Map.get(issue, "id") || "unknown"}",
+      "run_id=#{ledger.run_id}",
+      "run_dir=#{ledger.run_dir}"
+    ]
+    |> Enum.join(" ")
+  end
 
   @spec issue_context(Issue.t()) :: String.t()
   defp issue_context(%Issue{identifier: identifier, id: id}) do

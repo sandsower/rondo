@@ -1,6 +1,8 @@
 defmodule Rondo.RunOnceTest do
   use Rondo.TestSupport, async: true
 
+  import ExUnit.CaptureLog
+
   alias Rondo.RunOnce
 
   test "runs exactly one visible active issue" do
@@ -192,6 +194,61 @@ defmodule Rondo.RunOnceTest do
     assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "gates_completed"))
     assert Enum.any?(manifest["artifacts"], &(&1["kind"] == "gate_results"))
     assert File.read!(Path.join(run_dir, "artifacts/gates/turn-0001/0001-proof-stdout.log")) == "nope\n"
+  end
+
+  test "surfaces terminal run ledger completion failures" do
+    parent = self()
+
+    agent_runner = fn _issue, agent_opts ->
+      manifest_path = Path.join(Keyword.fetch!(agent_opts, :run_dir), "manifest.json")
+      File.rm!(manifest_path)
+      File.mkdir_p!(manifest_path)
+      :ok
+    end
+
+    assert {:error, {:run_once_ledger_completion_failed, reason, :ok}} =
+             RunOnce.run("issue-1",
+               deps: deps(issue("issue-1", state: "In Progress"), parent, agent_runner: agent_runner)
+             )
+
+    assert reason in [:eisdir, :eacces]
+  end
+
+  test "logs run context when agent event persistence fails" do
+    parent = self()
+
+    agent_runner = fn issue, agent_opts ->
+      run_dir = Keyword.fetch!(agent_opts, :run_dir)
+      File.mkdir_p!(Path.join(run_dir, "artifacts/agent-events.ndjson"))
+
+      send(
+        self(),
+        {:claude_worker_update, issue.id,
+         %{
+           event: :assistant,
+           timestamp: DateTime.utc_now(),
+           session_id: "session-1",
+           usage: nil,
+           raw: %{message: "hello"}
+         }}
+      )
+
+      :ok
+    end
+
+    log =
+      capture_log(fn ->
+        assert :ok =
+                 RunOnce.run("issue-1",
+                   deps: deps(issue("issue-1", state: "In Progress"), parent, agent_runner: agent_runner)
+                 )
+      end)
+
+    assert log =~ "Failed to append run-once ledger agent event"
+    assert log =~ "issue_identifier=GH-1"
+    assert log =~ "issue_id=issue-1"
+    assert log =~ "run_id=GH-1-"
+    assert log =~ "run_dir="
   end
 
   test "passes agent opts through to the agent runner" do

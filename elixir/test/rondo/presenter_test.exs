@@ -65,6 +65,56 @@ defmodule Rondo.PresenterTest do
     assert issue_payload.running.latest_gate.status == :fail
   end
 
+  test "gate payload tolerates malformed failed values" do
+    snapshot = %{
+      running: [
+        %{
+          issue_id: "issue-gate",
+          identifier: "MT-GATE",
+          state: "In Progress",
+          session_id: nil,
+          turn_count: 1,
+          last_claude_event: :gates_completed,
+          last_claude_message: %{event: :gates_completed},
+          last_claude_timestamp: nil,
+          started_at: nil,
+          latest_gate: %{status: :fail, results_path: "artifacts/gates/results.json", failed: nil},
+          claude_input_tokens: 0,
+          claude_output_tokens: 0,
+          claude_total_tokens: 0,
+          event_log: []
+        },
+        %{
+          issue_id: "issue-gate-2",
+          identifier: "MT-GATE-2",
+          state: "In Progress",
+          session_id: nil,
+          turn_count: 1,
+          last_claude_event: :gates_completed,
+          last_claude_message: %{event: :gates_completed},
+          last_claude_timestamp: nil,
+          started_at: nil,
+          latest_gate: %{"status" => "fail", "results_path" => "artifacts/gates/results.json", "failed" => "unit"},
+          claude_input_tokens: 0,
+          claude_output_tokens: 0,
+          claude_total_tokens: 0,
+          event_log: []
+        }
+      ],
+      retrying: [],
+      archived: [],
+      claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    server_name = Module.concat(__MODULE__, :MalformedGateSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+
+    assert Enum.map(payload.running, & &1.latest_gate.failed) == [[], []]
+  end
+
   test "run comparison labels omit timestamp suffix when started_at is invalid" do
     runs = [
       %{started_at: "invalid", tokens: %{input_tokens: 1, output_tokens: 2}},
