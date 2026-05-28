@@ -410,6 +410,11 @@ Each entry contains:
   - Runs with cwd set to the issue workspace.
 - `timeout_ms` (positive integer, optional)
   - Default: `60000`.
+- `action_id` (string, optional)
+  - Stable Beislið action id for policy evaluation.
+- `action_classes` (list of strings, optional)
+  - Beislið action classes for policy evaluation.
+  - Defaults to `["read"]` for legacy flat sensor gates.
 
 Gate stdout/stderr and a structured `results.json` are persisted under the run ledger. Any gate
 failure, error, or timeout makes the current run attempt fail/retry; gate evidence must not rely on
@@ -664,6 +669,8 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `pi.command`: shell command string, default `pi`
 - `pi.turn_timeout_ms`: positive integer, default `3600000`
 - `pi.stall_timeout_ms`: positive integer, default `300000`
+- `gates[].action_id`: optional Beislið action id for gate policy evaluation
+- `gates[].action_classes`: optional Beislið action classes, default `["read"]`
 - `action_policy.command`: executable path/name, default `beislid`
 - `action_policy.run_mode`: one of `supervised-auto`, `unattended-auto`; default `unattended-auto`
 - `server.port` (extension): integer, optional; enables the optional HTTP server, `0` may be used

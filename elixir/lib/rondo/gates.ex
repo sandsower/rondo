@@ -90,7 +90,7 @@ defmodule Rondo.Gates do
     exit_abs = Path.join(run_dir, Path.join(relative_gates_dir, "#{safe_name}-exit-status"))
     started_ms = System.monotonic_time(:millisecond)
 
-    case evaluate_gate_policy(name, policy_opts) do
+    case evaluate_gate_policy(gate, policy_opts) do
       {:ok, policy_decision} ->
         task =
           Task.async(fn ->
@@ -246,15 +246,14 @@ defmodule Rondo.Gates do
     end
   end
 
-  defp evaluate_gate_policy(_name, false), do: {:ok, nil}
+  defp evaluate_gate_policy(_gate, false), do: {:ok, nil}
 
-  defp evaluate_gate_policy(_name, policy_opts) do
-    # Flat v1 gates do not yet carry Beislið rich metadata describing whether a
-    # command mutates state. Classify them conservatively as read-only using a
-    # known Beislið action id so unattended mode does not block solely because a
-    # project-specific gate name is unknown. Rich staged gates can pass stable
-    # gate-specific action ids once that metadata lands.
-    case ActionPolicy.evaluate("file.read", ["read"], policy_opts) do
+  defp evaluate_gate_policy(gate, policy_opts) do
+    name = Map.fetch!(gate, :name)
+    classes = Map.get(gate, :action_classes, [])
+    action = Map.get(gate, :action_id) || default_gate_action_id(name, classes)
+
+    case ActionPolicy.evaluate(action, classes, policy_opts) do
       {:ok, %{"decision" => "allow"} = envelope} ->
         {:ok, envelope}
 
@@ -265,6 +264,9 @@ defmodule Rondo.Gates do
         {:error, {:action_policy_failed, reason}, nil}
     end
   end
+
+  defp default_gate_action_id(_name, ["read"]), do: "file.read"
+  defp default_gate_action_id(name, _classes), do: "gate." <> safe_name(name)
 
   defp blocked_policy_decision(reason, nil), do: %{side_effect_status: :blocked, reason: inspect(reason)}
 

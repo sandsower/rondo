@@ -206,7 +206,9 @@ defmodule Rondo.Config do
   @type gate :: %{
           name: String.t(),
           command: String.t(),
-          timeout_ms: pos_integer()
+          timeout_ms: pos_integer(),
+          action_id: String.t() | nil,
+          action_classes: [String.t()]
         }
   @type action_policy :: %{
           command: String.t(),
@@ -318,7 +320,9 @@ defmodule Rondo.Config do
       %{
         name: Map.fetch!(gate, :name),
         command: Map.fetch!(gate, :command),
-        timeout_ms: Map.get(gate, :timeout_ms, @default_gate_timeout_ms)
+        timeout_ms: Map.get(gate, :timeout_ms, @default_gate_timeout_ms),
+        action_id: Map.get(gate, :action_id),
+        action_classes: Map.get(gate, :action_classes, ["read"])
       }
     end)
   end
@@ -832,6 +836,8 @@ defmodule Rondo.Config do
         |> put_if_present(:name, scalar_string_value(Map.get(gate, "name")))
         |> put_if_present(:command, command_value(Map.get(gate, "command")))
         |> put_if_present(:timeout_ms, positive_integer_value(Map.get(gate, "timeout_ms")))
+        |> put_if_present(:action_id, scalar_string_value(Map.get(gate, "action_id")))
+        |> put_if_present(:action_classes, tools_list_value(Map.get(gate, "action_classes")))
 
       _other ->
         %{}

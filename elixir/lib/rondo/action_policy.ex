@@ -11,16 +11,7 @@ defmodule Rondo.ActionPolicy do
   alias Rondo.{Config, PathSafety}
 
   @decisions ["allow", "ask", "deny"]
-  @classes [
-    "read",
-    "workspace-write",
-    "dependency-install",
-    "network-read",
-    "git-local",
-    "git-remote",
-    "destructive",
-    "secret-bearing"
-  ]
+  @default_timeout_ms 5_000
   @baselines ["none", "non-default-branch", "separate-worktree", "host-sandbox"]
 
   @type envelope :: map()
@@ -34,11 +25,12 @@ defmodule Rondo.ActionPolicy do
   def evaluate(action, classes, opts \\ []) when is_binary(action) and is_list(classes) do
     command = Keyword.get(opts, :command, Config.action_policy_command())
     mode = Keyword.get(opts, :mode, Config.action_policy_run_mode())
+    timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
     sandbox_status = Keyword.get_lazy(opts, :sandbox_status, fn -> sandbox_status(Keyword.get(opts, :workspace)) end)
 
     with :ok <- validate_classes(classes),
          :ok <- validate_baseline(Map.fetch!(sandbox_status, :baseline)),
-         {:ok, output} <- run_evaluator(command, evaluator_args(mode, action, classes, sandbox_status)) do
+         {:ok, output} <- run_evaluator(command, evaluator_args(mode, action, classes, sandbox_status), timeout_ms) do
       decode_envelope(output)
     end
   end
@@ -79,13 +71,32 @@ defmodule Rondo.ActionPolicy do
   defp maybe_add_flag(args, true, flag), do: args ++ [flag]
   defp maybe_add_flag(args, _false, _flag), do: args
 
-  defp run_evaluator(command, args) do
-    case System.cmd(command, args, stderr_to_stdout: true) do
-      {output, 0} -> {:ok, output}
-      {output, status} -> {:error, {:evaluator_exit, status, String.trim(output)}}
+  defp run_evaluator(command, args, timeout_ms) do
+    with :ok <- executable_available?(command) do
+      do_run_evaluator(command, args, timeout_ms)
     end
-  rescue
-    error in ErlangError -> {:error, {:evaluator_unavailable, Exception.message(error)}}
+  end
+
+  defp do_run_evaluator(command, args, timeout_ms) do
+    task =
+      Task.async(fn ->
+        System.cmd(command, args, stderr_to_stdout: true)
+      end)
+
+    case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {output, 0}} -> {:ok, output}
+      {:ok, {output, status}} -> {:error, {:evaluator_exit, status, String.trim(output)}}
+      nil -> {:error, {:evaluator_timeout, timeout_ms}}
+    end
+  end
+
+  defp executable_available?(command) do
+    cond do
+      String.contains?(command, "/") and File.exists?(command) -> :ok
+      String.contains?(command, "/") -> {:error, {:evaluator_unavailable, command}}
+      System.find_executable(command) -> :ok
+      true -> {:error, {:evaluator_unavailable, command}}
+    end
   end
 
   defp decode_envelope(output) do
@@ -106,7 +117,7 @@ defmodule Rondo.ActionPolicy do
   defp validate_envelope(_envelope), do: {:error, :invalid_evaluator_envelope}
 
   defp validate_classes(classes) do
-    case Enum.find(classes, &(&1 not in @classes)) do
+    case Enum.find(classes, &(not is_binary(&1) or String.trim(&1) == "")) do
       nil -> :ok
       invalid -> {:error, {:invalid_action_class, invalid}}
     end

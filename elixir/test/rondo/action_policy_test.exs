@@ -49,8 +49,14 @@ defmodule Rondo.ActionPolicyTest do
 
     assert :ok = ActionPolicy.authorize("file.read", ["read"], command: fake_evaluator("allow"), sandbox_status: sandbox_status)
 
-    assert {:error, {:action_policy_failed, {:invalid_action_class, "release"}}} =
-             ActionPolicy.authorize("release.publish", ["release"], command: fake_evaluator("allow"), sandbox_status: sandbox_status)
+    assert :ok =
+             ActionPolicy.authorize("release.publish", ["release"],
+               command: fake_evaluator("allow"),
+               sandbox_status: sandbox_status
+             )
+
+    assert {:error, {:action_policy_failed, {:invalid_action_class, ""}}} =
+             ActionPolicy.authorize("release.publish", [""], command: fake_evaluator("allow"), sandbox_status: sandbox_status)
   end
 
   test "authorize blocks denied and approval-required decisions" do
@@ -73,8 +79,8 @@ defmodule Rondo.ActionPolicyTest do
     command = fake_evaluator("malformed")
     incomplete_command = fake_evaluator("incomplete")
 
-    assert {:error, {:invalid_action_class, "release"}} =
-             ActionPolicy.evaluate("release.publish", ["release"],
+    assert {:error, {:invalid_action_class, ""}} =
+             ActionPolicy.evaluate("release.publish", [""],
                command: command,
                sandbox_status: %{baseline: "separate-worktree", default_branch: false, uncommitted_changes: false}
              )
@@ -109,6 +115,22 @@ defmodule Rondo.ActionPolicyTest do
 
     assert {:error, {:evaluator_unavailable, _message}} =
              ActionPolicy.evaluate("gate.unit", ["read"], command: Path.join(tmp_dir("missing"), "nope"), sandbox_status: sandbox_status)
+
+    assert {:error, {:evaluator_unavailable, "rondo-missing-action-policy-command"}} =
+             ActionPolicy.evaluate("gate.unit", ["read"], command: "rondo-missing-action-policy-command", sandbox_status: sandbox_status)
+
+    directory_command = tmp_dir("directory-command")
+    File.mkdir_p!(directory_command)
+
+    assert {:error, {:evaluator_exit, 13, ""}} =
+             ActionPolicy.evaluate("gate.unit", ["read"], command: directory_command, sandbox_status: sandbox_status)
+
+    assert {:error, {:evaluator_timeout, 10}} =
+             ActionPolicy.evaluate("gate.unit", ["read"],
+               command: fake_evaluator("sleep"),
+               timeout_ms: 10,
+               sandbox_status: sandbox_status
+             )
   end
 
   test "nil and outside workspaces use the conservative none baseline" do
@@ -162,6 +184,7 @@ defmodule Rondo.ActionPolicyTest do
       invalid-json) echo not-json; exit 0 ;;
       malformed) echo '[]'; exit 0 ;;
       incomplete) echo '{"decision":"allow"}'; exit 0 ;;
+      sleep) sleep 1; exit 0 ;;
     esac
 
     action=""

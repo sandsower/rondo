@@ -210,7 +210,9 @@ Notes:
   agent turn. Gates run in the issue workspace, persist stdout/stderr and `results.json` under the
   run ledger, and cause the run to fail/retry when any gate fails, errors, or times out.
 - Gate entries use a flat Beislið-compatible shape: `name`, `command`, and optional `timeout_ms`
-  (default: 60000).
+  (default: 60000). Legacy flat gates default to Beislið `read`/`file.read` policy; gates that
+  mutate state should declare `action_id` and `action_classes` such as `dependency.install` with
+  `workspace-write`/`dependency-install`.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
 - `tracker.repo` is required for `tracker.kind: github` and uses `owner/repo` syntax.
 - `tracker.state_label_prefix` defaults to `status:` for GitHub label-emulated workflow states.

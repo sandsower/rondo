@@ -274,11 +274,15 @@ defmodule Rondo.TestSupport do
     name = Map.get(map, :name) || Map.get(map, "name")
     command = Map.get(map, :command) || Map.get(map, "command")
     timeout_ms = Map.get(map, :timeout_ms) || Map.get(map, "timeout_ms")
+    action_id = Map.get(map, :action_id) || Map.get(map, "action_id")
+    action_classes = Map.get(map, :action_classes) || Map.get(map, "action_classes")
 
     [
       "  - name: #{yaml_value(name)}",
       "    command: #{yaml_value(command)}",
-      gate_timeout_yaml(timeout_ms)
+      gate_timeout_yaml(timeout_ms),
+      gate_action_id_yaml(action_id),
+      gate_action_classes_yaml(action_classes)
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
@@ -288,6 +292,12 @@ defmodule Rondo.TestSupport do
 
   defp gate_timeout_yaml(nil), do: nil
   defp gate_timeout_yaml(timeout_ms), do: "    timeout_ms: #{yaml_value(timeout_ms)}"
+
+  defp gate_action_id_yaml(nil), do: nil
+  defp gate_action_id_yaml(action_id), do: "    action_id: #{yaml_value(action_id)}"
+
+  defp gate_action_classes_yaml(nil), do: nil
+  defp gate_action_classes_yaml(action_classes), do: "    action_classes: #{yaml_value(action_classes)}"
 
   defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
 

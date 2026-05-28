@@ -753,9 +753,27 @@ defmodule Rondo.WorkspaceAndConfigTest do
     )
 
     assert Config.gates() == [
-             %{name: "unit", command: "mix test", timeout_ms: 120_000},
-             %{name: "format", command: "mix format --check-formatted", timeout_ms: 60_000}
+             %{name: "unit", command: "mix test", timeout_ms: 120_000, action_id: nil, action_classes: ["read"]},
+             %{name: "format", command: "mix format --check-formatted", timeout_ms: 60_000, action_id: nil, action_classes: ["read"]}
            ]
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      gates: [
+        %{
+          name: "mutating",
+          command: "mix deps.get",
+          action_id: "dependency.install",
+          action_classes: ["workspace-write", "dependency-install"]
+        }
+      ]
+    )
+
+    assert [
+             %{
+               action_id: "dependency.install",
+               action_classes: ["workspace-write", "dependency-install"]
+             }
+           ] = Config.gates()
   end
 
   test "config validates flat gate definitions" do

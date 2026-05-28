@@ -218,6 +218,46 @@ defmodule Rondo.GatesTest do
     refute File.exists?(Path.join(workspace, "should-not-run-either"))
   end
 
+  test "passes configured gate action metadata to action policy" do
+    test_root = tmp_dir("gates-action-policy-metadata")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-POLICY-META")
+    run_dir = Path.join(workspace_root, ".rondo_runs/MT-POLICY-META/run-1")
+
+    File.mkdir_p!(workspace)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    assert {:error, summary} =
+             Gates.run(
+               [
+                 %{
+                   name: "deps",
+                   command: "touch should-not-run",
+                   timeout_ms: 1_000,
+                   action_id: "dependency.install",
+                   action_classes: ["workspace-write", "dependency-install"]
+                 }
+               ],
+               workspace,
+               run_dir: run_dir,
+               action_policy: true,
+               action_policy_command: fake_action_policy("deny")
+             )
+
+    assert [
+             %{
+               policy_decision: %{
+                 "action" => "dependency.install",
+                 "classes" => ["workspace-write", "dependency-install"],
+                 "side_effect_status" => "blocked"
+               }
+             }
+           ] = summary.results
+
+    refute File.exists?(Path.join(workspace, "should-not-run"))
+  end
+
   test "blocks gates when action policy evaluation fails closed" do
     test_root = tmp_dir("gates-action-policy-failure")
     workspace_root = Path.join(test_root, "workspaces")
@@ -303,14 +343,17 @@ defmodule Rondo.GatesTest do
     esac
     action=""
     mode=""
+    classes=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --action) action="$2"; shift 2 ;;
         --mode) mode="$2"; shift 2 ;;
+        --class) classes="$classes${classes:+,}$2"; shift 2 ;;
         *) shift ;;
       esac
     done
-    printf '{"decision":"#{decision}","action":"%s","mode":"%s","classes":["read"],"matched_rules":[],"sandbox_status":{"baseline":"separate-worktree"},"requires_human":false,"log_level":"info","reason":"test","remediation":[]}' "$action" "$mode"
+    classes_json=$(printf '%s' "$classes" | awk 'BEGIN{FS=","; printf "["} {for(i=1;i<=NF;i++){if(i>1)printf ","; printf "\\\"" $i "\\\""}} END{printf "]"}')
+    printf '{"decision":"#{decision}","action":"%s","mode":"%s","classes":%s,"matched_rules":[],"sandbox_status":{"baseline":"separate-worktree"},"requires_human":false,"log_level":"info","reason":"test","remediation":[]}' "$action" "$mode" "$classes_json"
     """)
 
     File.chmod!(path, 0o755)
