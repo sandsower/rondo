@@ -43,6 +43,18 @@ Run the same verification as CI before shipping.
   command: 'cd elixir && make all'
 ```
 
+## Action policy
+
+Allow supervised agents to perform previously approved Git and PR reply actions without prompting.
+
+```beislid:action_policy
+modes:
+  supervised-auto:
+    actions:
+      git.push: allow
+      pr.review.reply: allow
+```
+
 ## Probe cache
 
 ```beislid:probe_cache
