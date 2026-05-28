@@ -91,11 +91,9 @@ defmodule Rondo.ActionPolicy do
   end
 
   defp executable_available?(command) do
-    cond do
-      String.contains?(command, "/") and File.exists?(command) -> :ok
-      String.contains?(command, "/") -> {:error, {:evaluator_unavailable, command}}
-      System.find_executable(command) -> :ok
-      true -> {:error, {:evaluator_unavailable, command}}
+    case System.find_executable(command) do
+      executable when is_binary(executable) -> :ok
+      nil -> {:error, {:evaluator_unavailable, command}}
     end
   end
 

@@ -119,11 +119,12 @@ defmodule Rondo.ActionPolicyTest do
     assert {:error, {:evaluator_unavailable, "rondo-missing-action-policy-command"}} =
              ActionPolicy.evaluate("gate.unit", ["read"], command: "rondo-missing-action-policy-command", sandbox_status: sandbox_status)
 
-    directory_command = tmp_dir("directory-command")
-    File.mkdir_p!(directory_command)
+    non_executable_command = Path.join(tmp_dir("non-executable-command"), "beislid")
+    File.mkdir_p!(Path.dirname(non_executable_command))
+    File.write!(non_executable_command, "#!/bin/sh\n")
 
-    assert {:error, {:evaluator_exit, 13, ""}} =
-             ActionPolicy.evaluate("gate.unit", ["read"], command: directory_command, sandbox_status: sandbox_status)
+    assert {:error, {:evaluator_unavailable, ^non_executable_command}} =
+             ActionPolicy.evaluate("gate.unit", ["read"], command: non_executable_command, sandbox_status: sandbox_status)
 
     assert {:error, {:evaluator_timeout, 10}} =
              ActionPolicy.evaluate("gate.unit", ["read"],
