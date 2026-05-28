@@ -5,7 +5,7 @@ defmodule Rondo.Gates do
 
   alias Rondo.{Config, PathSafety}
 
-  @results_path "artifacts/gates/results.json"
+  @results_filename "results.json"
   @shell_timeout_exit_status 124
   @command_not_found_exit_status 127
 
@@ -32,11 +32,18 @@ defmodule Rondo.Gates do
   @spec run([gate()], Path.t(), keyword()) :: {:ok, summary()} | {:error, summary() | term()}
   def run(gates, workspace, opts \\ []) when is_list(gates) and is_binary(workspace) do
     run_dir = Keyword.fetch!(opts, :run_dir)
+    execution_id = Keyword.get(opts, :execution_id)
+    relative_gates_dir = relative_gates_dir(execution_id)
+    results_path = Path.join(relative_gates_dir, @results_filename)
 
     with {:ok, workspace} <- validate_workspace(workspace),
-         :ok <- File.mkdir_p(gates_dir(run_dir)) do
-      results = gates |> Enum.with_index(1) |> Enum.map(fn {gate, index} -> run_gate(gate, index, workspace, run_dir) end)
-      summary = build_summary(results, @results_path)
+         :ok <- File.mkdir_p(Path.join(run_dir, relative_gates_dir)) do
+      results =
+        gates
+        |> Enum.with_index(1)
+        |> Enum.map(fn {gate, index} -> run_gate(gate, index, workspace, run_dir, relative_gates_dir) end)
+
+      summary = build_summary(results, results_path)
 
       case write_results(run_dir, summary) do
         :ok -> result_tuple(summary)
@@ -69,16 +76,16 @@ defmodule Rondo.Gates do
     path == root or String.starts_with?(path, root <> "/")
   end
 
-  defp run_gate(gate, index, workspace, run_dir) do
+  defp run_gate(gate, index, workspace, run_dir, relative_gates_dir) do
     name = Map.fetch!(gate, :name)
     command = Map.fetch!(gate, :command)
     timeout_ms = Map.fetch!(gate, :timeout_ms)
     safe_name = indexed_safe_name(name, index)
-    stdout_path = Path.join("artifacts/gates", "#{safe_name}-stdout.log")
-    stderr_path = Path.join("artifacts/gates", "#{safe_name}-stderr.log")
+    stdout_path = Path.join(relative_gates_dir, "#{safe_name}-stdout.log")
+    stderr_path = Path.join(relative_gates_dir, "#{safe_name}-stderr.log")
     stdout_abs = Path.join(run_dir, stdout_path)
     stderr_abs = Path.join(run_dir, stderr_path)
-    exit_abs = Path.join(gates_dir(run_dir), "#{safe_name}-exit-status")
+    exit_abs = Path.join(run_dir, Path.join(relative_gates_dir, "#{safe_name}-exit-status"))
     started_ms = System.monotonic_time(:millisecond)
 
     task =
@@ -105,11 +112,12 @@ defmodule Rondo.Gates do
   end
 
   defp await_gate(task, timeout_ms, exit_abs) do
-    case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
+    case Task.yield(task, timeout_ms) do
       {:ok, exit_status} ->
         classify_exit(exit_status)
 
       nil ->
+        Task.shutdown(task, :brutal_kill)
         %{status: :timeout, exit_status: read_exit_status(exit_abs) || @shell_timeout_exit_status}
     end
   end
@@ -162,7 +170,7 @@ defmodule Rondo.Gates do
   end
 
   defp write_results(run_dir, summary) do
-    path = Path.join(run_dir, @results_path)
+    path = Path.join(run_dir, summary.results_path)
 
     with :ok <- File.mkdir_p(Path.dirname(path)),
          {:ok, json} <- Jason.encode(summary_to_json(summary)) do
@@ -188,7 +196,11 @@ defmodule Rondo.Gates do
     }
   end
 
-  defp gates_dir(run_dir), do: Path.join(run_dir, "artifacts/gates")
+  defp relative_gates_dir(nil), do: "artifacts/gates"
+
+  defp relative_gates_dir(execution_id) when is_binary(execution_id) do
+    Path.join("artifacts/gates", safe_name(execution_id))
+  end
 
   defp indexed_safe_name(name, index) when is_integer(index) and index > 0 do
     index_prefix = index |> Integer.to_string() |> String.pad_leading(4, "0")

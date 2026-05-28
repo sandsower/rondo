@@ -153,7 +153,7 @@ defmodule Rondo.AgentRunner do
           completion_observed?
         )
 
-        with :ok <- run_gates(context, issue) do
+        with :ok <- run_gates(context, issue, turn_number) do
           continue_agent_turns(context, issue, turn_number, effective_run_ref)
         end
 
@@ -178,12 +178,12 @@ defmodule Rondo.AgentRunner do
     |> claude_event_handler(recipient, issue).()
   end
 
-  defp run_gates(%{gates: []}, _issue), do: :ok
+  defp run_gates(%{gates: []}, _issue, _turn_number), do: :ok
 
-  defp run_gates(%{run_dir: nil}, _issue), do: {:error, :missing_run_ledger_for_gates}
+  defp run_gates(%{run_dir: nil}, _issue, _turn_number), do: {:error, :missing_run_ledger_for_gates}
 
-  defp run_gates(context, issue) do
-    case Gates.run(context.gates, context.workspace, run_dir: context.run_dir) do
+  defp run_gates(context, issue, turn_number) do
+    case Gates.run(context.gates, context.workspace, run_dir: context.run_dir, execution_id: gate_execution_id(turn_number)) do
       {:ok, summary} ->
         send_gate_update(context.claude_update_recipient, issue, summary)
         :ok
@@ -196,6 +196,12 @@ defmodule Rondo.AgentRunner do
         {:error, {:gate_error, reason}}
     end
   end
+
+  defp gate_execution_id(turn_number) when is_integer(turn_number) and turn_number > 0 do
+    "turn-" <> (turn_number |> Integer.to_string() |> String.pad_leading(4, "0"))
+  end
+
+  defp gate_execution_id(_turn_number), do: "turn-unknown"
 
   defp send_gate_update(recipient, %Issue{id: issue_id}, summary)
        when is_pid(recipient) and is_binary(issue_id) and is_map(summary) do

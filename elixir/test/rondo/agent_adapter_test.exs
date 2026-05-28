@@ -448,8 +448,62 @@ defmodule Rondo.AgentAdapterTest do
 
       {:ok, workspace} = Rondo.PathSafety.canonicalize(Path.join(workspace_root, "MT-GATES"))
       assert File.read!(Path.join(workspace, "gate-pwd.txt")) == workspace <> "\n"
-      assert_receive {:claude_worker_update, "issue-gates", %{event: :gates_completed, raw: %{status: :pass}}}, 500
-      assert File.exists?(Path.join(run_dir, "artifacts/gates/results.json"))
+      assert_receive {:claude_worker_update, "issue-gates", %{event: :gates_completed, raw: %{status: :pass} = raw}}, 500
+      assert raw.results_path == "artifacts/gates/turn-0001/results.json"
+      assert File.exists?(Path.join(run_dir, "artifacts/gates/turn-0001/results.json"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner namespaces gate artifacts for each continuation turn" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-gate-turns-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-GATE-TURNS/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 2,
+        gates: [%{name: "proof", command: "echo gate", timeout_ms: 1_000}]
+      )
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-gate-turns",
+        identifier: "MT-GATE-TURNS",
+        title: "Gate turn proof",
+        description: "Exercise gate artifact namespacing",
+        state: "In Progress",
+        labels: []
+      }
+
+      fetcher = fn [_issue_id] ->
+        fetch_count = Process.get(:gate_turn_fetch_count, 0) + 1
+        Process.put(:gate_turn_fetch_count, fetch_count)
+
+        state = if fetch_count == 1, do: "In Progress", else: "Done"
+        {:ok, [%{issue | state: state}]}
+      end
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 issue_state_fetcher: fetcher,
+                 run_dir: run_dir,
+                 test_pid: parent
+               )
+
+      assert_receive {:claude_worker_update, "issue-gate-turns", %{event: :gates_completed, raw: first_raw}}, 500
+      assert_receive {:claude_worker_update, "issue-gate-turns", %{event: :gates_completed, raw: second_raw}}, 500
+
+      assert first_raw.results_path == "artifacts/gates/turn-0001/results.json"
+      assert second_raw.results_path == "artifacts/gates/turn-0002/results.json"
+      assert File.read!(Path.join(run_dir, first_raw.results_path)) =~ "turn-0001"
+      assert File.read!(Path.join(run_dir, second_raw.results_path)) =~ "turn-0002"
     after
       File.rm_rf(test_root)
     end

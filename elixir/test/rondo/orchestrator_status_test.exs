@@ -918,8 +918,8 @@ defmodule Rondo.OrchestratorStatusTest do
       end
     end)
 
-    worker_pid =
-      spawn(fn ->
+    {:ok, worker_pid} =
+      Task.Supervisor.start_child(Rondo.TaskSupervisor, fn ->
         receive do
           :done -> :ok
         end
@@ -1928,6 +1928,75 @@ defmodule Rondo.OrchestratorStatusTest do
 
     artifact_path = Path.join(ledger.run_dir, "artifacts/agent-events.ndjson")
     assert File.read!(artifact_path) =~ "turn/completed"
+  end
+
+  test "orchestrator retries and marks run ledger failed when configured gates fail" do
+    workspace_root = tmp_dir("orchestrator-gate-failure-retry")
+    claude_bin = fake_claude_script(workspace_root, "gate-failure-session", 0)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: claude_bin,
+      max_turns: 1,
+      gates: [%{name: "proof", command: "echo nope; exit 3", timeout_ms: 1_000}]
+    )
+
+    issue = %Issue{
+      id: "issue-orchestrator-gate-failure",
+      identifier: "MT-GATE-FAIL-ORCH",
+      title: "Gate failure retry test",
+      description: "Fail a configured gate in orchestrator path",
+      state: "Todo",
+      url: "https://example.org/issues/MT-GATE-FAIL-ORCH"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :GateFailureRetryOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    state = :sys.get_state(pid)
+    state = %{state | max_concurrent_agents: 1, poll_interval_ms: 60_000}
+    :sys.replace_state(pid, fn _ -> state end)
+
+    send(pid, {:tick, state.tick_token})
+
+    retry_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).retrying do
+          [entry | _] -> entry
+          _ -> nil
+        end
+      end)
+
+    assert retry_entry.identifier == "MT-GATE-FAIL-ORCH"
+    assert retry_entry.attempt == 1
+    assert retry_entry.error =~ "agent exited:"
+    assert retry_entry.error =~ "gate_failed"
+
+    archived_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).archived do
+          [entry | _] -> entry
+          _ -> nil
+        end
+      end)
+
+    assert archived_entry.exit_reason =~ "gate_failed"
+    assert archived_entry.latest_gate.status == :fail
+
+    [manifest_path] = Path.wildcard(Path.join([workspace_root, ".rondo_runs", "MT-GATE-FAIL-ORCH", "*", "manifest.json"]))
+    manifest = manifest_path |> File.read!() |> Jason.decode!()
+    assert manifest["status"] == "failed"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "gates_completed"))
+    assert Enum.any?(manifest["artifacts"], &(&1["kind"] == "gate_results"))
   end
 
   test "gate worker updates append run ledger checkpoints and artifacts" do
