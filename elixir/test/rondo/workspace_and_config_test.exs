@@ -669,6 +669,18 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Config.claude_allowed_tools() == nil
     assert Config.claude_turn_timeout_ms() == 3_600_000
     assert Config.claude_stall_timeout_ms() == 300_000
+    assert Config.action_policy() == %{command: "beislid", run_mode: "unattended-auto"}
+    assert Config.action_policy_command() == "beislid"
+    assert Config.action_policy_run_mode() == "unattended-auto"
+
+    write_workflow_file!(Workflow.workflow_file_path(), action_policy_command: "/tmp/beislid", action_policy_run_mode: "supervised-auto")
+    assert Config.action_policy() == %{command: "/tmp/beislid", run_mode: "supervised-auto"}
+
+    write_workflow_file!(Workflow.workflow_file_path(), action_policy_run_mode: "YOLO")
+    assert {:error, {:invalid_workflow_config, _, [%{path: "action_policy.run_mode"}]}} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(), action_policy_command: "")
+    assert {:error, {:invalid_workflow_config, _, [%{path: "action_policy.command"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), claude_permission_mode: "acceptEdits")
     assert Config.claude_permission_mode() == "acceptEdits"

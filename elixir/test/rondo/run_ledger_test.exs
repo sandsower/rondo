@@ -215,6 +215,44 @@ defmodule Rondo.RunLedgerTest do
     assert RunLedger.agent_metadata_for_agent_update(%{adapter: "atom-key-adapter"}) == %{"adapter" => "atom-key-adapter"}
   end
 
+  test "records Beislið action policy decisions as checkpoints" do
+    workspace_root = tmp_dir("ledger-action-policy")
+    issue = issue_fixture()
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "dec1510n",
+               action_policy_run_mode: "unattended-auto"
+             )
+
+    envelope = %{
+      "decision" => "deny",
+      "mode" => "unattended-auto",
+      "action" => "git.push",
+      "classes" => ["git-remote"],
+      "matched_rules" => [%{"type" => "class", "decision" => "deny"}],
+      "sandbox_status" => %{"baseline" => "separate-worktree"},
+      "requires_human" => false,
+      "log_level" => "error",
+      "reason" => "classes=git-remote",
+      "remediation" => ["Do not run this action"]
+    }
+
+    assert {:ok, ledger} = RunLedger.record_action_policy_decision(ledger, envelope)
+    assert {:ok, ledger} = RunLedger.record_action_policy_decision(ledger, envelope, side_effect_status: "blocked")
+
+    manifest = decode_json!(ledger.manifest_path)
+    assert manifest["action_policy"] == %{"provider" => "beislid", "run_mode" => "unattended-auto"}
+    assert [_, %{"kind" => "action_policy_decision", "path" => checkpoint_path}] = manifest["checkpoints"]
+
+    checkpoint = decode_json!(Path.join(ledger.run_dir, checkpoint_path))
+    assert checkpoint["payload"]["decision"] == "deny"
+    assert checkpoint["payload"]["side_effect_status"] == "blocked"
+    assert checkpoint["source"] == %{"policy" => "beislid_action_policy"}
+  end
+
   test "update_agent_metadata records adapter run ref capabilities and final report in manifest" do
     workspace_root = tmp_dir("ledger-agent-metadata")
     issue = issue_fixture()

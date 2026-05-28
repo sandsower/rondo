@@ -3,7 +3,7 @@ defmodule Rondo.Gates do
   Runs deterministic workflow gates inside an issue workspace and persists results.
   """
 
-  alias Rondo.{Config, PathSafety}
+  alias Rondo.{ActionPolicy, Config, PathSafety}
 
   @results_filename "results.json"
   @shell_timeout_exit_status 124
@@ -38,10 +38,12 @@ defmodule Rondo.Gates do
 
     with {:ok, workspace} <- validate_workspace(workspace),
          :ok <- File.mkdir_p(Path.join(run_dir, relative_gates_dir)) do
+      policy_opts = action_policy_opts(opts, workspace)
+
       results =
         gates
         |> Enum.with_index(1)
-        |> Enum.map(fn {gate, index} -> run_gate(gate, index, workspace, run_dir, relative_gates_dir) end)
+        |> Enum.map(fn {gate, index} -> run_gate(gate, index, workspace, run_dir, relative_gates_dir, policy_opts) end)
 
       summary = build_summary(results, results_path)
 
@@ -76,7 +78,7 @@ defmodule Rondo.Gates do
     path == root or String.starts_with?(path, root <> "/")
   end
 
-  defp run_gate(gate, index, workspace, run_dir, relative_gates_dir) do
+  defp run_gate(gate, index, workspace, run_dir, relative_gates_dir, policy_opts) do
     name = Map.fetch!(gate, :name)
     command = Map.fetch!(gate, :command)
     timeout_ms = Map.fetch!(gate, :timeout_ms)
@@ -88,18 +90,35 @@ defmodule Rondo.Gates do
     exit_abs = Path.join(run_dir, Path.join(relative_gates_dir, "#{safe_name}-exit-status"))
     started_ms = System.monotonic_time(:millisecond)
 
-    task =
-      Task.async(fn ->
-        File.rm(exit_abs)
-        shell = gate_shell(command, stdout_abs, stderr_abs, exit_abs)
-        {_output, exit_status} = System.cmd("sh", ["-lc", shell], cd: workspace, stderr_to_stdout: true)
-        exit_status
-      end)
+    case evaluate_gate_policy(name, policy_opts) do
+      {:ok, policy_decision} ->
+        task =
+          Task.async(fn ->
+            File.rm(exit_abs)
+            shell = gate_shell(command, stdout_abs, stderr_abs, exit_abs)
+            {_output, exit_status} = System.cmd("sh", ["-lc", shell], cd: workspace, stderr_to_stdout: true)
+            exit_status
+          end)
 
-    status = await_gate(task, timeout_ms, exit_abs)
-    duration_ms = System.monotonic_time(:millisecond) - started_ms
+        status = await_gate(task, timeout_ms, exit_abs)
+        duration_ms = System.monotonic_time(:millisecond) - started_ms
 
-    build_result(name, command, status, duration_ms, workspace, stdout_path, stderr_path)
+        build_result(name, command, status, duration_ms, workspace, stdout_path, stderr_path, policy_decision)
+
+      {:error, reason, policy_decision} ->
+        duration_ms = System.monotonic_time(:millisecond) - started_ms
+
+        build_result(
+          name,
+          command,
+          %{status: :error, exit_status: nil},
+          duration_ms,
+          workspace,
+          stdout_path,
+          stderr_path,
+          blocked_policy_decision(reason, policy_decision)
+        )
+    end
   end
 
   defp gate_shell(command, stdout_abs, stderr_abs, exit_abs) do
@@ -135,26 +154,42 @@ defmodule Rondo.Gates do
     end
   end
 
-  defp build_result(name, command, %{status: status, exit_status: exit_status}, duration_ms, workspace, stdout_path, stderr_path) do
+  defp build_result(name, command, %{status: status, exit_status: exit_status}, duration_ms, workspace, stdout_path, stderr_path, policy_decision) do
     %{
       name: name,
       command: command,
       status: status,
-      retryable: retryable?(status),
-      environment_failure: environment_failure?(status),
+      retryable: retryable?(status, policy_decision),
+      environment_failure: environment_failure?(status, policy_decision),
       exit_status: exit_status,
       duration_ms: max(duration_ms, 0),
       cwd: workspace,
       stdout_path: stdout_path,
-      stderr_path: stderr_path
+      stderr_path: stderr_path,
+      policy_decision: policy_decision
     }
+    |> drop_nil_values()
   end
 
-  defp retryable?(status) when status in [:error, :timeout], do: true
-  defp retryable?(_status), do: false
+  defp retryable?(status, policy_decision) do
+    cond do
+      is_map(policy_decision) and blocked_policy_decision?(policy_decision) -> false
+      status in [:error, :timeout] -> true
+      true -> false
+    end
+  end
 
-  defp environment_failure?(status) when status in [:error, :timeout], do: true
-  defp environment_failure?(_status), do: false
+  defp environment_failure?(status, policy_decision) do
+    cond do
+      is_map(policy_decision) and blocked_policy_decision?(policy_decision) -> false
+      status in [:error, :timeout] -> true
+      true -> false
+    end
+  end
+
+  defp blocked_policy_decision?(policy_decision) do
+    Map.get(policy_decision, :side_effect_status) == :blocked or Map.get(policy_decision, "side_effect_status") == "blocked"
+  end
 
   defp build_summary(results, results_path) do
     %{status: overall_status(results), results_path: results_path, results: results}
@@ -188,12 +223,59 @@ defmodule Rondo.Gates do
       status: result.status,
       retryable: result.retryable,
       environment_failure: result.environment_failure,
-      exit_status: result.exit_status,
+      exit_status: Map.get(result, :exit_status),
       duration_ms: result.duration_ms,
       cwd: result.cwd,
       stdout_path: result.stdout_path,
-      stderr_path: result.stderr_path
+      stderr_path: result.stderr_path,
+      policy_decision: Map.get(result, :policy_decision)
     }
+    |> drop_nil_values()
+  end
+
+  defp action_policy_opts(opts, workspace) do
+    if Keyword.get(opts, :action_policy, false) do
+      [
+        workspace: workspace,
+        command: Keyword.get(opts, :action_policy_command, Config.action_policy_command()),
+        mode: Keyword.get(opts, :action_policy_run_mode, Config.action_policy_run_mode()),
+        sandbox_status: Keyword.get_lazy(opts, :sandbox_status, fn -> ActionPolicy.sandbox_status(workspace) end)
+      ]
+    else
+      false
+    end
+  end
+
+  defp evaluate_gate_policy(_name, false), do: {:ok, nil}
+
+  defp evaluate_gate_policy(_name, policy_opts) do
+    # Flat v1 gates do not yet carry Beislið rich metadata describing whether a
+    # command mutates state. Classify them conservatively as read-only using a
+    # known Beislið action id so unattended mode does not block solely because a
+    # project-specific gate name is unknown. Rich staged gates can pass stable
+    # gate-specific action ids once that metadata lands.
+    case ActionPolicy.evaluate("file.read", ["read"], policy_opts) do
+      {:ok, %{"decision" => "allow"} = envelope} ->
+        {:ok, envelope}
+
+      {:ok, %{"decision" => decision} = envelope} when decision in ["ask", "deny"] ->
+        {:error, {:action_policy_blocked, decision}, envelope}
+
+      {:error, reason} ->
+        {:error, {:action_policy_failed, reason}, nil}
+    end
+  end
+
+  defp blocked_policy_decision(reason, nil), do: %{side_effect_status: :blocked, reason: inspect(reason)}
+
+  defp blocked_policy_decision(reason, envelope) do
+    envelope
+    |> Map.put("side_effect_status", "blocked")
+    |> Map.put("block_reason", inspect(reason))
+  end
+
+  defp drop_nil_values(map) do
+    Map.reject(map, fn {_key, value} -> is_nil(value) end)
   end
 
   defp relative_gates_dir(nil), do: "artifacts/gates"

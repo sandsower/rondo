@@ -190,6 +190,14 @@ Notes:
   `pi.stall_timeout_ms` mirror the Claude timeout settings. Resume uses pi `--session <id>` when a
   stable session id is available; usage/rate-limit/sandbox metadata is best-effort/degraded based on
   pi JSON-mode events.
+- `action_policy.command` points to the Beislið CLI used for deterministic action-risk evaluation.
+  Default: `beislid`.
+- `action_policy.run_mode` selects Beislið's policy mode. Supported values: `supervised-auto` and
+  `unattended-auto`. Default: `unattended-auto`.
+- Beislið owns the action-policy vocabulary and decision table; Rondo enforces it at Rondo-owned
+  orchestration boundaries and persists the returned envelopes in run artifacts. Claude/pi
+  permission flags are useful host controls, but they are not a substitute for external policy
+  enforcement.
 - `agent.max_turns` caps how many back-to-back agent turns Rondo will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Rondo uses a default prompt template that includes the issue
@@ -227,6 +235,9 @@ claude:
   command: "$CLAUDE_BIN"
   model: "claude-opus-4-6"
   dangerously_skip_permissions: true
+action_policy:
+  command: beislid
+  run_mode: unattended-auto
 ```
 
 - If `WORKFLOW.md` is missing, has invalid YAML, or contains invalid configured values, startup

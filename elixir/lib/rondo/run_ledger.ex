@@ -101,6 +101,19 @@ defmodule Rondo.RunLedger do
     end
   end
 
+  @spec record_action_policy_decision(t(), map(), keyword()) :: {:ok, t()} | {:error, term()}
+  def record_action_policy_decision(%__MODULE__{} = ledger, envelope, opts \\ []) when is_map(envelope) do
+    payload =
+      envelope
+      |> Map.merge(%{
+        "human_outcome" => Keyword.get(opts, :human_outcome),
+        "side_effect_status" => Keyword.get(opts, :side_effect_status)
+      })
+      |> drop_nil_values()
+
+    write_checkpoint(ledger, :action_policy_decision, payload, source: %{policy: "beislid_action_policy"})
+  end
+
   @spec update_agent_metadata(t(), map()) :: {:ok, t()} | {:error, term()}
   def update_agent_metadata(%__MODULE__{} = ledger, metadata) when is_map(metadata) do
     agent_metadata = metadata |> sanitize_value() |> drop_nil_values()
@@ -297,6 +310,10 @@ defmodule Rondo.RunLedger do
         "diff_source" => Keyword.get(opts, :agent_diff_source)
       },
       "mode" => mode_snapshot(opts),
+      "action_policy" => %{
+        "provider" => "beislid",
+        "run_mode" => Keyword.get(opts, :action_policy_run_mode, Config.action_policy_run_mode())
+      },
       "timestamps" => %{
         "created_at" => iso_timestamp,
         "updated_at" => iso_timestamp,
