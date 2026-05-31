@@ -462,7 +462,7 @@ Fields:
   - Default: `20`.
   - Caps back-to-back adapter turns for an active issue.
 
-#### 5.3.6 `claude` (object)
+#### 5.3.8 `claude` (object)
 
 Fields:
 
@@ -505,7 +505,7 @@ Fields:
   - No stdout activity timeout.
   - If `<= 0`, stall detection is disabled.
 
-#### 5.3.7 `pi` (object)
+#### 5.3.9 `pi` (object)
 
 Fields:
 
@@ -521,7 +521,7 @@ Fields:
   - Default: `300000` (5 minutes).
   - No stdout activity timeout.
 
-#### 5.3.8 `action_policy` (object)
+#### 5.3.10 `action_policy` (object)
 
 Fields:
 

@@ -91,8 +91,15 @@ defmodule Rondo.AgentAdapterTest do
     def proof_requirements(_opts \\ []), do: {:ok, []}
 
     @impl true
-    def evaluate_action_policy(action, classes, _opts \\ []) do
-      {:ok, %{"decision" => "allow", "action" => action, "classes" => classes, "provider" => "fake_process"}}
+    def evaluate_action_policy(action, classes, opts \\ []) do
+      {:ok,
+       %{
+         "decision" => "allow",
+         "action" => action,
+         "classes" => classes,
+         "mode" => Keyword.fetch!(opts, :mode),
+         "provider" => "fake_process"
+       }}
     end
   end
 

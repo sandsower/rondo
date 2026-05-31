@@ -187,8 +187,15 @@ defmodule Rondo.GatesTest do
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
     on_exit(fn -> File.rm_rf(test_root) end)
 
-    evaluator = fn action, classes, _opts ->
-      {:ok, %{"decision" => "allow", "action" => action, "classes" => classes, "provider" => "native-test"}}
+    evaluator = fn action, classes, opts ->
+      {:ok,
+       %{
+         "decision" => "allow",
+         "action" => action,
+         "classes" => classes,
+         "mode" => Keyword.fetch!(opts, :mode),
+         "provider" => "native-test"
+       }}
     end
 
     assert {:ok, summary} =
@@ -276,6 +283,37 @@ defmodule Rondo.GatesTest do
                  "classes" => ["workspace-write", "dependency-install"],
                  "side_effect_status" => "blocked"
                }
+             }
+           ] = summary.results
+
+    refute File.exists?(Path.join(workspace, "should-not-run"))
+  end
+
+  test "blocks gates when provider action policy evaluator returns an invalid envelope" do
+    test_root = tmp_dir("gates-action-policy-invalid-provider")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-POLICY-INVALID-PROVIDER")
+    run_dir = Path.join(workspace_root, ".rondo_runs/MT-POLICY-INVALID-PROVIDER/run-1")
+
+    File.mkdir_p!(workspace)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    evaluator = fn _action, _classes, _opts -> {:ok, %{"decision" => "allow"}} end
+
+    assert {:error, summary} =
+             Gates.run([%{name: "invalid provider", command: "touch should-not-run", timeout_ms: 1_000}], workspace,
+               run_dir: run_dir,
+               action_policy: true,
+               action_policy_evaluator: evaluator
+             )
+
+    assert [
+             %{
+               status: :error,
+               retryable: false,
+               environment_failure: false,
+               policy_decision: %{"decision" => "allow", "side_effect_status" => "blocked"}
              }
            ] = summary.results
 
