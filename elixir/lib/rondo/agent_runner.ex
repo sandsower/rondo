@@ -217,7 +217,7 @@ defmodule Rondo.AgentRunner do
   end
 
   defp select_gate_selection(%{gates: gates}, _issue, _turn_number) when is_list(gates) do
-    {:ok, ProcessProvider.gate_selection_result(gates)}
+    {:ok, gates |> ProcessProvider.gate_selection_result() |> Map.put(:action_policy_provider, Native)}
   end
 
   defp select_gate_selection(context, issue, turn_number) do

@@ -723,6 +723,58 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  test "agent runner uses native action policy for caller-provided flat gates" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-flat-gates-provider-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-FLAT/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        action_policy_command: fake_action_policy("allow")
+      )
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-flat-gates",
+        identifier: "MT-FLAT",
+        title: "Flat gate provider proof",
+        description: "Exercise caller-provided flat gates",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: FailingGateSelectionProvider,
+                 gates: [%{name: "flat-proof", command: "echo flat > flat-gate.txt", timeout_ms: 1_000, action_classes: ["read"]}],
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 run_dir: run_dir,
+                 test_pid: parent
+               )
+
+      {:ok, workspace} = Rondo.PathSafety.canonicalize(Path.join(workspace_root, "MT-FLAT"))
+      assert File.read!(Path.join(workspace, "flat-gate.txt")) == "flat\n"
+
+      assert_receive {
+                       :claude_worker_update,
+                       "issue-flat-gates",
+                       %{event: :gates_completed, raw: %{results: [result]}}
+                     },
+                     500
+
+      refute result.policy_decision["provider"] == "failing_gate_selection"
+      assert result.policy_decision["decision"] == "allow"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner runs configured gates after successful turns" do
     test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-gates-#{System.unique_integer([:positive])}")
 
@@ -857,6 +909,28 @@ defmodule Rondo.AgentAdapterTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp fake_action_policy(decision) do
+    path = Path.join(System.tmp_dir!(), "rondo-agent-adapter-policy-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.dirname(path))
+
+    File.write!(path, """
+    #!/bin/sh
+    action=""
+    mode=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --action) action="$2"; shift 2 ;;
+        --mode) mode="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '{"decision":"#{decision}","action":"%s","mode":"%s","classes":["read"]}' "$action" "$mode"
+    """)
+
+    File.chmod!(path, 0o755)
+    path
   end
 
   test "pi adapter wraps pi CLI and returns normalized events" do
