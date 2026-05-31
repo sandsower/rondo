@@ -1,6 +1,6 @@
 defmodule Rondo.RunOnce do
   @moduledoc """
-  Synchronous one-shot runner for executing exactly one visible tracker issue.
+  Synchronous one-shot runner for executing exactly one visible tracker issue or local execution request.
   """
 
   require Logger

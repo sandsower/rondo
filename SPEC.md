@@ -2149,8 +2149,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - CLI uses `./WORKFLOW.md` when no workflow path argument is provided
 - CLI errors on nonexistent explicit workflow path or missing default `./WORKFLOW.md`
 - CLI supports `run-once <path-to-WORKFLOW.md> --issue <id>` for one selected visible tracker issue
+- CLI supports `run-once <path-to-WORKFLOW.md> --manifest <path>` for one selected local execution request
 - CLI `run-once` exits zero when the one-shot run completes and non-zero for validation, tracker,
-  visibility, workspace, or agent failures
+  manifest, visibility, workspace, or agent failures
 - CLI surfaces startup failure cleanly
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally
@@ -2183,7 +2184,7 @@ Use the same validation profiles as Section 17:
 - Typed config layer with defaults and `$` resolution
 - Dynamic `WORKFLOW.md` watch/reload/re-apply for config and prompt
 - Polling orchestrator with single-authority mutable state
-- Single-issue `run-once` mode for bounded CI/operator-triggered runs
+- Single-request `run-once` mode for bounded CI/operator-triggered tracker issue or manifest runs
 - Issue tracker client with candidate fetch + state refresh + terminal fetch
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
