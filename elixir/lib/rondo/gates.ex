@@ -238,6 +238,7 @@ defmodule Rondo.Gates do
       [
         workspace: workspace,
         command: Keyword.get(opts, :action_policy_command, Config.action_policy_command()),
+        evaluator: Keyword.get(opts, :action_policy_evaluator, &ActionPolicy.evaluate/3),
         mode: Keyword.get(opts, :action_policy_run_mode, Config.action_policy_run_mode()),
         sandbox_status: Keyword.get_lazy(opts, :sandbox_status, fn -> ActionPolicy.sandbox_status(workspace) end)
       ]
@@ -253,7 +254,9 @@ defmodule Rondo.Gates do
     classes = Map.get(gate, :action_classes, [])
     action = Map.get(gate, :action_id) || default_gate_action_id(name, classes)
 
-    case ActionPolicy.evaluate(action, classes, policy_opts) do
+    evaluator = Keyword.get(policy_opts, :evaluator, &ActionPolicy.evaluate/3)
+
+    case evaluator.(action, classes, policy_opts) do
       {:ok, %{"decision" => "allow"} = envelope} ->
         {:ok, envelope}
 

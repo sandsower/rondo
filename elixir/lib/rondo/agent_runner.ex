@@ -7,7 +7,7 @@ defmodule Rondo.AgentRunner do
   alias Rondo.Agent.Adapter
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.PiAdapter
-  alias Rondo.{Config, Gates, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias Rondo.{Config, Gates, Linear.Issue, ProcessProvider, Tracker, Workspace}
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, claude_update_recipient \\ nil, opts \\ []) do
@@ -101,15 +101,17 @@ defmodule Rondo.AgentRunner do
   defp send_phase_update(_recipient, _issue, _phase), do: :ok
 
   defp run_agent_turns(workspace, issue, claude_update_recipient, opts) do
-    with {:ok, adapter} <- adapter_module(opts) do
+    with {:ok, adapter} <- adapter_module(opts),
+         {:ok, provider} <- process_provider_module(opts) do
       context = %{
         workspace: workspace,
         claude_update_recipient: claude_update_recipient,
         opts: opts,
         issue_state_fetcher: Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1),
         adapter: adapter,
+        process_provider: provider,
         max_turns: Keyword.get(opts, :max_turns, Config.agent_max_turns()),
-        gates: Keyword.get(opts, :gates, Config.gates()),
+        gates: Keyword.get_lazy(opts, :gates, fn -> ProcessProvider.select_gates!(provider) end),
         run_dir: Keyword.get(opts, :run_dir)
       }
 
@@ -118,7 +120,7 @@ defmodule Rondo.AgentRunner do
   end
 
   defp do_run_agent_turns(context, issue, turn_number, run_ref) do
-    prompt = build_turn_prompt(issue, context.opts, turn_number, context.max_turns)
+    prompt = build_turn_prompt(context.process_provider, issue, context.opts, turn_number, context.max_turns)
 
     completion_ref = make_ref()
     Process.put(completion_ref, false)
@@ -186,7 +188,8 @@ defmodule Rondo.AgentRunner do
     case Gates.run(context.gates, context.workspace,
            run_dir: context.run_dir,
            execution_id: gate_execution_id(turn_number),
-           action_policy: true
+           action_policy: true,
+           action_policy_evaluator: ProcessProvider.action_policy_evaluator(context.process_provider)
          ) do
       {:ok, summary} ->
         send_gate_update(context.claude_update_recipient, issue, summary)
@@ -264,9 +267,20 @@ defmodule Rondo.AgentRunner do
   defp resolve_adapter_module(:pi), do: {:ok, PiAdapter}
   defp resolve_adapter_module(other), do: {:error, {:unsupported_agent_adapter, other}}
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+  defp process_provider_module(opts) do
+    opts
+    |> Keyword.get(:process_provider, Config.process_provider_kind())
+    |> resolve_process_provider_module()
+  end
 
-  defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
+  defp resolve_process_provider_module("native"), do: {:ok, Rondo.ProcessProvider.Native}
+  defp resolve_process_provider_module(:native), do: {:ok, Rondo.ProcessProvider.Native}
+  defp resolve_process_provider_module(module) when is_atom(module), do: {:ok, module}
+  defp resolve_process_provider_module(other), do: {:error, {:unsupported_process_provider, other}}
+
+  defp build_turn_prompt(provider, issue, opts, 1, _max_turns), do: ProcessProvider.prompt(provider, issue, opts)
+
+  defp build_turn_prompt(_provider, _issue, _opts, turn_number, max_turns) do
     """
     Continuation guidance:
 

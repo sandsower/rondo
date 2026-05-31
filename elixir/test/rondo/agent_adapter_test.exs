@@ -61,6 +61,41 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  defmodule FakeProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "fake_process"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test, prompt: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :ok, checks: %{available: :ok}}
+
+    @impl true
+    def select_gates(_opts \\ []) do
+      {:ok, [%{name: "provider-proof", command: "echo provider > provider-gate.txt", timeout_ms: 1_000, action_id: nil, action_classes: ["read"]}]}
+    end
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Provider prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []), do: %{}
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(action, classes, _opts \\ []) do
+      {:ok, %{"decision" => "allow", "action" => action, "classes" => classes, "provider" => "fake_process"}}
+    end
+  end
+
   defmodule NonResumableFakeAdapter do
     @behaviour Rondo.Agent.Adapter
 
@@ -408,6 +443,53 @@ defmodule Rondo.AgentAdapterTest do
       assert previous_run_ref == Adapter.run_ref("fake", "fake-run-1", "fake_run_id", true)
 
       assert_receive {:claude_worker_update, "issue-fake", %{event: :session_started, session_id: nil, raw: %{adapter: "fake"}}}, 500
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner routes prompt, gate selection, and policy through process provider" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-process-provider-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-PROVIDER/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, max_turns: 1, gates: nil)
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-provider",
+        identifier: "MT-PROVIDER",
+        title: "Provider proof",
+        description: "Exercise process provider boundary",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: FakeProcessProvider,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 run_dir: run_dir,
+                 test_pid: parent
+               )
+
+      {:ok, workspace} = Rondo.PathSafety.canonicalize(Path.join(workspace_root, "MT-PROVIDER"))
+      assert File.read!(Path.join(workspace, "provider-gate.txt")) == "provider\n"
+      assert_receive {:fake_adapter_invoked, 1, "Provider prompt for MT-PROVIDER", ^workspace, nil}, 500
+
+      assert_receive {
+                       :claude_worker_update,
+                       "issue-provider",
+                       %{event: :gates_completed, raw: %{status: :pass, results: [result]}}
+                     },
+                     500
+
+      assert result.policy_decision["provider"] == "fake_process"
     after
       File.rm_rf(test_root)
     end

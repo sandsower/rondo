@@ -177,6 +177,30 @@ defmodule Rondo.GatesTest do
     assert [%{"policy_decision" => %{"decision" => "allow"}}] = results_json["results"]
   end
 
+  test "uses injected process-provider action policy evaluator" do
+    test_root = tmp_dir("gates-action-policy-provider")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-PROVIDER")
+    run_dir = Path.join(workspace_root, ".rondo_runs/MT-PROVIDER/run-1")
+
+    File.mkdir_p!(workspace)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    evaluator = fn action, classes, _opts ->
+      {:ok, %{"decision" => "allow", "action" => action, "classes" => classes, "provider" => "native-test"}}
+    end
+
+    assert {:ok, summary} =
+             Gates.run([%{name: "unit", command: "echo provider", timeout_ms: 1_000}], workspace,
+               run_dir: run_dir,
+               action_policy: true,
+               action_policy_evaluator: evaluator
+             )
+
+    assert [%{policy_decision: %{"provider" => "native-test"}}] = summary.results
+  end
+
   test "blocks gates when action policy denies or requires approval" do
     test_root = tmp_dir("gates-action-policy-block")
     workspace_root = Path.join(test_root, "workspaces")

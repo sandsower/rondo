@@ -7,7 +7,7 @@ defmodule Rondo.RunLedger do
   workspace root.
   """
 
-  alias Rondo.{Config, Linear.Issue}
+  alias Rondo.{Config, Linear.Issue, ProcessProvider}
 
   @schema_version 1
   @max_string_bytes 2_048
@@ -335,6 +335,7 @@ defmodule Rondo.RunLedger do
         "final_report" => Keyword.get(opts, :agent_final_report),
         "diff_source" => Keyword.get(opts, :agent_diff_source)
       },
+      "process_provider" => process_provider_snapshot(opts),
       "mode" => mode_snapshot(opts),
       "action_policy" => %{
         "provider" => "beislid",
@@ -362,6 +363,20 @@ defmodule Rondo.RunLedger do
       "labels" => issue_value(issue, :labels, []),
       "priority" => issue_value(issue, :priority)
     }
+  end
+
+  defp process_provider_snapshot(opts) do
+    provider =
+      opts
+      |> Keyword.get(:process_provider, Config.process_provider_kind())
+      |> ProcessProvider.provider_module()
+
+    %{
+      "kind" => provider.id(),
+      "capabilities" => provider.capabilities(),
+      "probe" => provider.probe([])
+    }
+    |> sanitize_value()
   end
 
   defp mode_snapshot(opts) do
