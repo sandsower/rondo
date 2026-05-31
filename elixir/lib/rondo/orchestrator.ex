@@ -7,7 +7,7 @@ defmodule Rondo.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias Rondo.{AgentRunner, Config, RunLedger, StatusDashboard, Tracker, Workspace}
+  alias Rondo.{AgentRunner, Config, Interrupt, RunLedger, StatusDashboard, Tracker, Workspace}
   alias Rondo.Linear.Issue
 
   @timeseries_sample_interval_ms 10_000
@@ -42,6 +42,7 @@ defmodule Rondo.Orchestrator do
       completed: MapSet.new(),
       claimed: MapSet.new(),
       retry_attempts: %{},
+      paused_interrupts: %{},
       claude_totals: nil,
       claude_rate_limits: nil,
       archived_runs: []
@@ -57,6 +58,7 @@ defmodule Rondo.Orchestrator do
   @impl true
   def init(_opts) do
     now_ms = System.monotonic_time(:millisecond)
+    paused_interrupts = load_paused_interrupts()
 
     state = %State{
       poll_interval_ms: Config.poll_interval_ms(),
@@ -65,6 +67,9 @@ defmodule Rondo.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
+      claimed: MapSet.new(Map.keys(paused_interrupts)),
+      retry_attempts: %{},
+      paused_interrupts: paused_interrupts,
       claude_totals: @empty_claude_totals,
       claude_rate_limits: nil,
       archived_runs: load_archived_runs()
@@ -166,27 +171,33 @@ defmodule Rondo.Orchestrator do
         {running_entry, state} = pop_running_entry(state, issue_id)
         running_entry = refresh_running_entry_state(running_entry)
         state = record_session_completion_totals(state, running_entry)
-        state = archive_running_entry(state, running_entry, reason)
         session_id = running_entry_session_id(running_entry)
 
         state =
-          case reason do
-            :normal ->
+          cond do
+            reason == :normal ->
               Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
               state
+              |> archive_running_entry(running_entry, reason)
               |> complete_issue(issue_id)
               |> schedule_issue_retry(issue_id, 1, %{
                 identifier: running_entry.identifier,
                 delay_type: :continuation
               })
 
-            _ ->
+            pause_after_gate_failure?(running_entry, reason) ->
+              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=repeated_gate_failure")
+              pause_running_entry(state, issue_id, running_entry, reason)
+
+            true ->
               Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
 
               next_attempt = next_retry_attempt_from_running(running_entry)
 
-              schedule_issue_retry(state, issue_id, next_attempt, %{
+              state
+              |> archive_running_entry(running_entry, reason)
+              |> schedule_issue_retry(issue_id, next_attempt, %{
                 identifier: running_entry.identifier,
                 error: "agent exited: #{inspect(reason)}"
               })
@@ -791,7 +802,9 @@ defmodule Rondo.Orchestrator do
             session_id: nil,
             run_id: run_ledger_id(ledger),
             run_dir: run_ledger_dir(ledger),
+            workspace: expected_workspace_for_issue(issue),
             ledger: ledger,
+            run_ref: nil,
             last_claude_message: nil,
             last_claude_timestamp: nil,
             last_claude_event: nil,
@@ -872,6 +885,19 @@ defmodule Rondo.Orchestrator do
     end
   end
 
+  defp pause_run_ledger(nil, _interrupt, _session_id), do: nil
+
+  defp pause_run_ledger(%RunLedger{} = ledger, interrupt, session_id) do
+    case RunLedger.pause_run(ledger, interrupt) do
+      {:ok, ledger} ->
+        ledger
+
+      {:error, reason} ->
+        Logger.warning("Run ledger pause failed #{ledger_context(ledger, session_id)} reason=#{inspect(reason)}")
+        ledger
+    end
+  end
+
   defp link_run_ledger_archive(nil, _archive_path), do: nil
 
   defp link_run_ledger_archive(%RunLedger{} = ledger, archive_path) when not is_binary(archive_path),
@@ -929,6 +955,87 @@ defmodule Rondo.Orchestrator do
   end
 
   defp gate_result_artifacts(_result), do: []
+
+  defp pause_after_gate_failure?(running_entry, reason) do
+    retry_attempt = running_entry |> Map.get(:retry_attempt) |> normalize_retry_attempt()
+    retry_attempt >= 1 and gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate))
+  end
+
+  defp gate_failure_reason?(reason), do: reason |> inspect() |> String.contains?("gate_failed")
+
+  defp failed_gate?(%{status: status}) when status in [:pass, "pass", nil], do: false
+  defp failed_gate?(%{status: _status}), do: true
+  defp failed_gate?(_gate), do: false
+
+  defp pause_running_entry(state, issue_id, running_entry, _reason) do
+    interrupt = Interrupt.repeated_gate_failure(interrupt_context(running_entry))
+    ledger = pause_run_ledger(Map.get(running_entry, :ledger), interrupt, Map.get(running_entry, :session_id))
+    paused_entry = paused_entry_from_running(issue_id, running_entry, interrupt, ledger)
+
+    Logger.warning(
+      "Paused run for issue_id=#{issue_id} issue_identifier=#{Map.get(paused_entry, :identifier)} " <>
+        "run_dir=#{Map.get(paused_entry, :run_dir) || "n/a"} question=#{interrupt["question"]}"
+    )
+
+    %{
+      state
+      | paused_interrupts: Map.put(state.paused_interrupts, issue_id, paused_entry),
+        claimed: MapSet.put(state.claimed, issue_id)
+    }
+  end
+
+  defp interrupt_context(running_entry) do
+    %{
+      issue: Map.get(running_entry, :issue),
+      gate: gate_summary_for_interrupt(running_entry),
+      run_id: Map.get(running_entry, :run_id),
+      run_dir: Map.get(running_entry, :run_dir),
+      workspace: running_entry_workspace(running_entry),
+      session_id: Map.get(running_entry, :session_id),
+      run_ref: running_entry_run_ref(running_entry),
+      retry_attempt: Map.get(running_entry, :retry_attempt)
+    }
+  end
+
+  defp gate_summary_for_interrupt(%{last_claude_message: %{event: :gates_completed, message: message}}) when is_map(message), do: message
+  defp gate_summary_for_interrupt(%{last_claude_message: %{message: message}}) when is_map(message), do: message
+  defp gate_summary_for_interrupt(running_entry), do: Map.get(running_entry, :latest_gate) || %{}
+
+  defp paused_entry_from_running(issue_id, running_entry, interrupt, ledger) do
+    issue = Map.get(running_entry, :issue) || %Issue{id: issue_id, identifier: Map.get(running_entry, :identifier)}
+
+    %{
+      issue_id: issue_id,
+      identifier: Map.get(running_entry, :identifier),
+      issue: issue,
+      state: Map.get(issue, :state),
+      session_id: Map.get(running_entry, :session_id),
+      run_id: run_ledger_id(ledger) || Map.get(running_entry, :run_id),
+      run_dir: run_ledger_dir(ledger) || Map.get(running_entry, :run_dir),
+      workspace: running_entry_workspace(running_entry),
+      paused_at: interrupt["created_at"],
+      retry_attempt: Map.get(running_entry, :retry_attempt),
+      latest_gate: Map.get(running_entry, :latest_gate),
+      interrupt: interrupt,
+      tracker_visibility: "known"
+    }
+  end
+
+  defp running_entry_workspace(%{workspace: workspace}) when is_binary(workspace), do: workspace
+
+  defp running_entry_workspace(%{ledger: %RunLedger{manifest: %{"repo" => %{"workspace" => workspace}}}}) when is_binary(workspace),
+    do: workspace
+
+  defp running_entry_workspace(%{issue: %Issue{} = issue}), do: expected_workspace_for_issue(issue)
+  defp running_entry_workspace(%{identifier: identifier}) when is_binary(identifier), do: Path.join(Config.workspace_root(), identifier)
+  defp running_entry_workspace(_running_entry), do: nil
+
+  defp running_entry_run_ref(%{run_ref: run_ref}) when not is_nil(run_ref), do: run_ref
+  defp running_entry_run_ref(%{ledger: %RunLedger{manifest: %{"agent" => %{"run_ref" => run_ref}}}}), do: run_ref
+  defp running_entry_run_ref(_running_entry), do: nil
+
+  defp expected_workspace_for_issue(%Issue{identifier: identifier}) when is_binary(identifier), do: Path.join(Config.workspace_root(), identifier)
+  defp expected_workspace_for_issue(_issue), do: nil
 
   defp artifact_from_path(_kind, nil), do: nil
   defp artifact_from_path(kind, path) when is_binary(path), do: %{"kind" => kind, "path" => path}
@@ -1283,10 +1390,30 @@ defmodule Rondo.Orchestrator do
         }
       end)
 
+    paused =
+      state.paused_interrupts
+      |> Enum.map(fn {issue_id, metadata} ->
+        %{
+          issue_id: issue_id,
+          identifier: Map.get(metadata, :identifier),
+          state: Map.get(metadata, :state),
+          session_id: Map.get(metadata, :session_id),
+          run_id: Map.get(metadata, :run_id),
+          run_dir: Map.get(metadata, :run_dir),
+          workspace: Map.get(metadata, :workspace),
+          paused_at: Map.get(metadata, :paused_at),
+          retry_attempt: Map.get(metadata, :retry_attempt),
+          latest_gate: Map.get(metadata, :latest_gate),
+          interrupt: Map.get(metadata, :interrupt, %{}),
+          tracker_visibility: Map.get(metadata, :tracker_visibility, "unknown")
+        }
+      end)
+
     {:reply,
      %{
        running: running,
        retrying: retrying,
+       paused: paused,
        archived: Map.get(state, :archived_runs, []),
        claude_totals: state.claude_totals,
        rate_limits: Map.get(state, :claude_rate_limits),
@@ -1342,6 +1469,7 @@ defmodule Rondo.Orchestrator do
         last_claude_timestamp: timestamp,
         last_claude_message: summarize_claude_update(update),
         session_id: session_id_for_update(running_entry.session_id, update),
+        run_ref: run_ref_for_update(Map.get(running_entry, :run_ref), update),
         last_claude_event: event,
         claude_input_tokens: claude_input_tokens + token_delta.input_tokens,
         claude_output_tokens: claude_output_tokens + token_delta.output_tokens,
@@ -1407,6 +1535,10 @@ defmodule Rondo.Orchestrator do
     do: session_id
 
   defp session_id_for_update(existing, _update), do: existing
+
+  defp run_ref_for_update(_existing, %{run_ref: run_ref}) when not is_nil(run_ref), do: run_ref
+  defp run_ref_for_update(_existing, %{"run_ref" => run_ref}) when not is_nil(run_ref), do: run_ref
+  defp run_ref_for_update(existing, _update), do: existing
 
   defp latest_gate_for_update(_running_entry, %{event: :gates_completed, raw: raw}) when is_map(raw) do
     %{
@@ -1751,6 +1883,65 @@ defmodule Rondo.Orchestrator do
     error ->
       Rondo.Debug.log("Failed to load archived runs: #{Exception.message(error)}")
       []
+  end
+
+  defp load_paused_interrupts do
+    [Config.workspace_root(), ".rondo_runs", "*", "*", "manifest.json"]
+    |> Path.join()
+    |> Path.wildcard()
+    |> Enum.map(&load_paused_interrupt_manifest/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.sort_by(fn {_issue_id, entry} -> Map.get(entry, :paused_at) || "" end)
+    |> Map.new()
+  rescue
+    error ->
+      Rondo.Debug.log("Failed to load paused interrupts: #{Exception.message(error)}")
+      %{}
+  end
+
+  defp load_paused_interrupt_manifest(path) do
+    with {:ok, manifest} <- RunLedger.load_manifest(path),
+         "paused" <- Map.get(manifest, "status"),
+         %{"id" => issue_id} = issue_snapshot when is_binary(issue_id) <- Map.get(manifest, "issue"),
+         entry <- paused_entry_from_manifest(manifest, issue_snapshot) do
+      {issue_id, entry}
+    else
+      _ -> nil
+    end
+  end
+
+  defp paused_entry_from_manifest(manifest, issue_snapshot) do
+    issue = issue_from_manifest(issue_snapshot)
+    interrupt = Map.get(manifest, "interrupt", %{})
+
+    %{
+      issue_id: issue.id,
+      identifier: issue.identifier || issue.id,
+      issue: issue,
+      state: issue.state,
+      session_id: get_in(manifest, ["agent", "session_id"]) || get_in(interrupt, ["resume", "session_id"]),
+      run_id: Map.get(manifest, "run_id"),
+      run_dir: Map.get(manifest, "run_dir"),
+      workspace: get_in(manifest, ["repo", "workspace"]),
+      paused_at: get_in(manifest, ["timestamps", "paused_at"]),
+      retry_attempt: get_in(interrupt, ["resume", "retry_attempt"]),
+      latest_gate: Map.get(interrupt, "gate"),
+      interrupt: interrupt,
+      tracker_visibility: "unknown"
+    }
+  end
+
+  defp issue_from_manifest(issue_snapshot) do
+    %Issue{
+      id: map_value(issue_snapshot, :id),
+      identifier: map_value(issue_snapshot, :identifier),
+      title: map_value(issue_snapshot, :title),
+      description: map_value(issue_snapshot, :description),
+      priority: map_value(issue_snapshot, :priority),
+      state: map_value(issue_snapshot, :state),
+      url: map_value(issue_snapshot, :url),
+      labels: map_value(issue_snapshot, :labels) || []
+    }
   end
 
   defp load_archive_identifiers(root) do

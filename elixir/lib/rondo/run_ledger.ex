@@ -137,6 +137,28 @@ defmodule Rondo.RunLedger do
     end
   end
 
+  @spec pause_run(t(), map(), keyword()) :: {:ok, t()} | {:error, term()}
+  def pause_run(%__MODULE__{} = ledger, interrupt, opts \\ []) when is_map(interrupt) do
+    timestamp = Keyword.get(opts, :timestamp, DateTime.utc_now())
+    checkpoint_opts = opts |> Keyword.put(:timestamp, timestamp) |> Keyword.put_new(:source, %{interrupt: "human"})
+
+    with {:ok, ledger} <- write_checkpoint(ledger, :interrupt_created, interrupt, checkpoint_opts) do
+      iso_timestamp = datetime_to_iso(timestamp)
+      sanitized_interrupt = sanitize_value(interrupt)
+
+      manifest =
+        ledger.manifest
+        |> Map.put("status", "paused")
+        |> Map.put("interrupt", sanitized_interrupt)
+        |> put_in(["timestamps", "updated_at"], iso_timestamp)
+        |> put_in(["timestamps", "paused_at"], iso_timestamp)
+
+      with :ok <- write_json_file(ledger.manifest_path, manifest) do
+        {:ok, %{ledger | manifest: manifest}}
+      end
+    end
+  end
+
   @spec complete_run(t(), String.t() | atom(), map(), keyword()) :: {:ok, t()} | {:error, term()}
   def complete_run(%__MODULE__{} = ledger, status, payload, opts \\ []) when is_map(payload) do
     status_string = kind_to_string(status)
