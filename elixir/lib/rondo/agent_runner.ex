@@ -189,17 +189,19 @@ defmodule Rondo.AgentRunner do
     end
   end
 
-  defp run_selected_gates(_context, _issue, _turn_number, %{gates: []}), do: :ok
+  defp run_selected_gates(%{run_dir: nil}, _issue, _turn_number, %{gates: []}), do: :ok
 
   defp run_selected_gates(%{run_dir: nil}, _issue, _turn_number, _gate_selection), do: {:error, :missing_run_ledger_for_gates}
 
   defp run_selected_gates(context, issue, turn_number, gate_selection) do
+    action_policy_provider = Map.get(gate_selection, :action_policy_provider, context.process_provider)
+
     case Gates.run(gate_selection.gates, context.workspace,
            run_dir: context.run_dir,
            execution_id: gate_execution_id(turn_number),
-           gate_selection: Map.drop(gate_selection, [:gates]),
+           gate_selection: Map.drop(gate_selection, [:gates, :action_policy_provider]),
            action_policy: true,
-           action_policy_evaluator: ProcessProvider.action_policy_evaluator(context.process_provider)
+           action_policy_evaluator: ProcessProvider.action_policy_evaluator(action_policy_provider)
          ) do
       {:ok, summary} ->
         send_gate_update(context.claude_update_recipient, issue, summary)
@@ -223,7 +225,7 @@ defmodule Rondo.AgentRunner do
 
     case ProcessProvider.select_gate_selection(context.process_provider, opts) do
       {:ok, selection} ->
-        {:ok, selection}
+        {:ok, Map.put(selection, :action_policy_provider, context.process_provider)}
 
       {:error, reason} ->
         handle_gate_selection_failure(context.process_provider, reason, opts)
@@ -250,7 +252,7 @@ defmodule Rondo.AgentRunner do
       Logger.warning("Process provider gate selection failed provider=#{provider_id} reason=#{inspect(reason)}; falling back to native gates")
 
       with {:ok, selection} <- ProcessProvider.select_gate_selection(Native, opts) do
-        {:ok, annotate_native_fallback(selection, provider_id, reason)}
+        {:ok, selection |> annotate_native_fallback(provider_id, reason) |> Map.put(:action_policy_provider, Native)}
       end
     end
   end

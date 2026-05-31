@@ -138,6 +138,43 @@ defmodule Rondo.AgentAdapterTest do
     def proof_requirements(_opts \\ []), do: {:ok, []}
 
     @impl true
+    def evaluate_action_policy(_action, _classes, _opts \\ []), do: {:error, :provider_unavailable}
+  end
+
+  defmodule EmptyGateSelectionProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "empty_gate_selection"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test, prompt: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :ok, checks: %{gate_selection: :ok}}
+
+    @impl true
+    def select_gates(_opts \\ []) do
+      {:ok,
+       Rondo.ProcessProvider.gate_selection_result([],
+         skipped: [%{name: "slow-proof", reason: "not needed for documentation-only turn"}],
+         metadata: %{provider: id(), stage: :post_turn}
+       )}
+    end
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Provider prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []), do: %{}
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
     def evaluate_action_policy(action, classes, opts \\ []) do
       {:ok, %{"decision" => "allow", "action" => action, "classes" => classes, "mode" => Keyword.fetch!(opts, :mode)}}
     end
@@ -596,6 +633,53 @@ defmodule Rondo.AgentAdapterTest do
       assert gate_selection.metadata.fallback_from == "failing_gate_selection"
       assert [%{message: message}] = gate_selection.warnings
       assert message =~ "provider_unavailable"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner persists all-skipped provider gate selection explanations" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-empty-gates-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-EMPTY/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, max_turns: 1, gates: nil)
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-empty-gates",
+        identifier: "MT-EMPTY",
+        title: "Empty gate selection proof",
+        description: "Exercise all-skipped gate selection metadata",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: EmptyGateSelectionProvider,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 run_dir: run_dir,
+                 test_pid: parent
+               )
+
+      assert_receive {
+                       :claude_worker_update,
+                       "issue-empty-gates",
+                       %{event: :gates_completed, raw: %{status: :pass, results: [], gate_selection: gate_selection}}
+                     },
+                     500
+
+      assert gate_selection.skipped == [%{name: "slow-proof", reason: "not needed for documentation-only turn"}]
+      assert gate_selection.metadata == %{provider: "empty_gate_selection", stage: :post_turn}
+
+      results_json = run_dir |> Path.join("artifacts/gates/turn-0001/results.json") |> File.read!() |> Jason.decode!()
+      assert results_json["gate_selection"]["skipped"] == [%{"name" => "slow-proof", "reason" => "not needed for documentation-only turn"}]
     after
       File.rm_rf(test_root)
     end
