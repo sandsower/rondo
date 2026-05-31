@@ -24,9 +24,10 @@ defmodule Rondo.Gates do
           stderr_path: Path.t()
         }
   @type summary :: %{
-          status: gate_status(),
-          results_path: Path.t(),
-          results: [gate_result()]
+          required(:status) => gate_status(),
+          required(:results_path) => Path.t(),
+          required(:results) => [gate_result()],
+          optional(:gate_selection) => map()
         }
 
   @spec run([gate()], Path.t(), keyword()) :: {:ok, summary()} | {:error, summary() | term()}
@@ -35,6 +36,7 @@ defmodule Rondo.Gates do
     execution_id = Keyword.get(opts, :execution_id)
     relative_gates_dir = relative_gates_dir(execution_id)
     results_path = Path.join(relative_gates_dir, @results_filename)
+    gate_selection = Keyword.get(opts, :gate_selection)
 
     with {:ok, workspace} <- validate_workspace(workspace),
          :ok <- File.mkdir_p(Path.join(run_dir, relative_gates_dir)) do
@@ -45,7 +47,7 @@ defmodule Rondo.Gates do
         |> Enum.with_index(1)
         |> Enum.map(fn {gate, index} -> run_gate(gate, index, workspace, run_dir, relative_gates_dir, policy_opts) end)
 
-      summary = build_summary(results, results_path)
+      summary = build_summary(results, results_path, gate_selection)
 
       case write_results(run_dir, summary) do
         :ok -> result_tuple(summary)
@@ -59,8 +61,10 @@ defmodule Rondo.Gates do
     %{
       status: summary.status,
       results_path: summary.results_path,
-      results: Enum.map(summary.results, &gate_result_to_json/1)
+      results: Enum.map(summary.results, &gate_result_to_json/1),
+      gate_selection: Map.get(summary, :gate_selection)
     }
+    |> drop_nil_values()
   end
 
   defp validate_workspace(workspace) do
@@ -191,8 +195,9 @@ defmodule Rondo.Gates do
     Map.get(policy_decision, :side_effect_status) == :blocked or Map.get(policy_decision, "side_effect_status") == "blocked"
   end
 
-  defp build_summary(results, results_path) do
-    %{status: overall_status(results), results_path: results_path, results: results}
+  defp build_summary(results, results_path, gate_selection) do
+    %{status: overall_status(results), results_path: results_path, results: results, gate_selection: gate_selection}
+    |> drop_nil_values()
   end
 
   defp overall_status(results) do

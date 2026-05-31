@@ -201,7 +201,12 @@ Notes:
 - `process_provider.kind` selects the process/work-contract provider. Default and only supported
   value for now: `native`. The native provider preserves standalone `WORKFLOW.md` behavior for flat
   gates, prompts, action-policy evaluation, model hints, and run metadata; richer guide/proof
-  provider features report unsupported until a future provider implements them.
+  provider features report unsupported until a future provider implements them. Gate selection flows
+  through this provider boundary and gate artifacts include selected/skipped explanations, warnings,
+  and provider metadata when gates run.
+- `process_provider.required` controls provider failure behavior. Default: `false`. Optional provider
+  gate-selection failures can warn and fall back to native flat gates; required provider failures stop
+  the run clearly instead of falling back.
 - `agent.max_turns` caps how many back-to-back agent turns Rondo will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Rondo uses a default prompt template that includes the issue
@@ -248,6 +253,7 @@ action_policy:
   run_mode: unattended-auto
 process_provider:
   kind: native
+  required: false
 ```
 
 - If `WORKFLOW.md` is missing, has invalid YAML, or contains invalid configured values, startup

@@ -45,6 +45,7 @@ defmodule Rondo.Config do
   @default_action_policy_run_mode "unattended-auto"
   @valid_action_policy_run_modes ["supervised-auto", "unattended-auto"]
   @default_process_provider_kind "native"
+  @default_process_provider_required false
   @valid_process_provider_kinds ["native"]
   @default_debug false
   @default_observability_enabled true
@@ -157,7 +158,8 @@ defmodule Rondo.Config do
                                type: :map,
                                default: %{},
                                keys: [
-                                 kind: [type: :string, default: @default_process_provider_kind]
+                                 kind: [type: :string, default: @default_process_provider_kind],
+                                 required: [type: :boolean, default: @default_process_provider_required]
                                ]
                              ],
                              hooks: [
@@ -224,7 +226,8 @@ defmodule Rondo.Config do
           run_mode: String.t()
         }
   @type process_provider :: %{
-          kind: String.t()
+          kind: String.t(),
+          required: boolean()
         }
 
   @spec current_workflow() :: {:ok, workflow_payload()} | {:error, term()}
@@ -445,13 +448,19 @@ defmodule Rondo.Config do
     provider = get_in(validated_workflow_options(), [:process_provider])
 
     %{
-      kind: Map.get(provider, :kind)
+      kind: Map.get(provider, :kind),
+      required: Map.get(provider, :required)
     }
   end
 
   @spec process_provider_kind() :: String.t()
   def process_provider_kind do
     get_in(validated_workflow_options(), [:process_provider, :kind])
+  end
+
+  @spec process_provider_required?() :: boolean()
+  def process_provider_required? do
+    get_in(validated_workflow_options(), [:process_provider, :required])
   end
 
   @spec pi_turn_timeout_ms() :: pos_integer()
@@ -843,6 +852,7 @@ defmodule Rondo.Config do
   defp extract_process_provider_options(section) do
     %{}
     |> put_if_present(:kind, scalar_string_value(Map.get(section, "kind")))
+    |> put_if_present(:required, boolean_value(Map.get(section, "required")))
   end
 
   defp tools_list_value(values) when is_list(values) do
@@ -950,6 +960,7 @@ defmodule Rondo.Config do
       validate_string_field(action_policy, "action_policy.command"),
       validate_inclusion_field(action_policy, "action_policy.run_mode", @valid_action_policy_run_modes),
       validate_inclusion_field(process_provider, "process_provider.kind", @valid_process_provider_kinds),
+      validate_boolean_field(process_provider, "process_provider.required"),
       validate_string_field(hooks, "hooks.after_create"),
       validate_string_field(hooks, "hooks.before_run"),
       validate_string_field(hooks, "hooks.after_run"),

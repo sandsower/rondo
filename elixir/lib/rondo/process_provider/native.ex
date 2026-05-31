@@ -47,7 +47,15 @@ defmodule Rondo.ProcessProvider.Native do
   end
 
   @impl true
-  def select_gates(_opts \\ []), do: {:ok, Config.gates()}
+  def select_gates(opts \\ []) do
+    gates = Config.gates()
+
+    {:ok,
+     ProcessProvider.gate_selection_result(gates,
+       selected: Enum.map(gates, &selected_gate_reason/1),
+       metadata: %{provider: id(), source: "WORKFLOW.md", stage: Keyword.get(opts, :stage)}
+     )}
+  end
 
   @impl true
   def select_guides(_opts \\ []), do: ProcessProvider.unsupported(:no_native_guide_registry)
@@ -70,6 +78,10 @@ defmodule Rondo.ProcessProvider.Native do
   @impl true
   def evaluate_action_policy(action, classes, opts \\ []) do
     ActionPolicy.evaluate(action, classes, opts)
+  end
+
+  defp selected_gate_reason(gate) do
+    %{name: Map.get(gate, :name, "gate"), reason: "selected from flat WORKFLOW.md gates by native process provider"}
   end
 
   defp command_status(command) when is_binary(command) do

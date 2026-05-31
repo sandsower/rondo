@@ -74,8 +74,15 @@ defmodule Rondo.AgentAdapterTest do
     def probe(_opts \\ []), do: %{status: :ok, checks: %{available: :ok}}
 
     @impl true
-    def select_gates(_opts \\ []) do
-      {:ok, [%{name: "provider-proof", command: "echo provider > provider-gate.txt", timeout_ms: 1_000, action_id: nil, action_classes: ["read"]}]}
+    def select_gates(opts \\ []) do
+      gates = [%{name: "provider-proof", command: "echo provider > provider-gate.txt", timeout_ms: 1_000, action_id: nil, action_classes: ["read"]}]
+
+      {:ok,
+       Rondo.ProcessProvider.gate_selection_result(gates,
+         selected: [%{name: "provider-proof", reason: "fake provider selected turn #{Keyword.get(opts, :turn_number)}"}],
+         skipped: [%{name: "slow-proof", reason: "not needed for fake provider test"}],
+         metadata: %{provider: id(), stage: Keyword.get(opts, :stage)}
+       )}
     end
 
     @impl true
@@ -100,6 +107,39 @@ defmodule Rondo.AgentAdapterTest do
          "mode" => Keyword.fetch!(opts, :mode),
          "provider" => "fake_process"
        }}
+    end
+  end
+
+  defmodule FailingGateSelectionProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "failing_gate_selection"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :unavailable, prompt: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :missing, checks: %{gate_selection: :missing}}
+
+    @impl true
+    def select_gates(_opts \\ []), do: {:error, :provider_unavailable}
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Provider prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []), do: %{}
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(action, classes, opts \\ []) do
+      {:ok, %{"decision" => "allow", "action" => action, "classes" => classes, "mode" => Keyword.fetch!(opts, :mode)}}
     end
   end
 
@@ -492,11 +532,108 @@ defmodule Rondo.AgentAdapterTest do
       assert_receive {
                        :claude_worker_update,
                        "issue-provider",
-                       %{event: :gates_completed, raw: %{status: :pass, results: [result]}}
+                       %{
+                         event: :gates_completed,
+                         raw: %{status: :pass, results: [result], gate_selection: gate_selection}
+                       }
                      },
                      500
 
       assert result.policy_decision["provider"] == "fake_process"
+      assert gate_selection.selected == [%{name: "provider-proof", reason: "fake provider selected turn 1"}]
+      assert gate_selection.skipped == [%{name: "slow-proof", reason: "not needed for fake provider test"}]
+      assert gate_selection.metadata == %{provider: "fake_process", stage: :post_turn}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner falls back to native gates when optional provider gate selection fails" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-provider-fallback-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-FALLBACK/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        process_provider_required: false,
+        gates: [%{name: "native-proof", command: "echo native > native-gate.txt", timeout_ms: 1_000}]
+      )
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-fallback",
+        identifier: "MT-FALLBACK",
+        title: "Provider fallback proof",
+        description: "Exercise optional fallback",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: FailingGateSelectionProvider,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 run_dir: run_dir,
+                 test_pid: parent
+               )
+
+      {:ok, workspace} = Rondo.PathSafety.canonicalize(Path.join(workspace_root, "MT-FALLBACK"))
+      assert File.read!(Path.join(workspace, "native-gate.txt")) == "native\n"
+
+      assert_receive {
+                       :claude_worker_update,
+                       "issue-fallback",
+                       %{event: :gates_completed, raw: %{gate_selection: gate_selection}}
+                     },
+                     500
+
+      assert gate_selection.metadata.fallback_from == "failing_gate_selection"
+      assert [%{message: message}] = gate_selection.warnings
+      assert message =~ "provider_unavailable"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner fails clearly when required provider gate selection fails" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-provider-required-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-REQUIRED/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        process_provider_required: true,
+        gates: [%{name: "native-proof", command: "echo native > native-gate.txt", timeout_ms: 1_000}]
+      )
+
+      issue = %Issue{
+        id: "issue-required",
+        identifier: "MT-REQUIRED",
+        title: "Provider required proof",
+        description: "Exercise required provider failure",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert_raise RuntimeError, ~r/process_provider_gate_selection_failed.*provider_unavailable/, fn ->
+        AgentRunner.run(issue, self(),
+          agent_adapter: FakeAdapter,
+          process_provider: FailingGateSelectionProvider,
+          issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+          run_dir: run_dir,
+          test_pid: self()
+        )
+      end
     after
       File.rm_rf(test_root)
     end
