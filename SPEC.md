@@ -823,17 +823,21 @@ Sorting order (stable intent):
 ### 8.3 Single-Issue `run-once` Dispatch
 
 Implementations may expose a bounded one-shot CLI mode for CI/CD or operator-driven triggers, for
-example `rondo run-once <WORKFLOW.md> --issue <id>`. This mode:
+example `rondo run-once <WORKFLOW.md> --issue <id>` or
+`rondo run-once <WORKFLOW.md> --manifest <path>`. This mode:
 
 - Loads and validates the supplied workflow file using the same config contract as daemon mode.
-- Fetches exactly one issue by tracker ID/number through the configured tracker visibility boundary.
-- Fails clearly when the issue is missing, filtered/non-visible, terminal, inactive, blocked, or not
-  routable to this worker.
+- Fetches exactly one issue by tracker ID/number through the configured tracker visibility boundary,
+  or loads exactly one local execution-request / approved-slice manifest.
+- Fails clearly when the issue is missing, filtered/non-visible, terminal, inactive, blocked, not
+  routable to this worker, or when the local manifest is malformed.
 - Reuses normal workspace creation and `after_create`, `before_run`, and `after_run` hooks.
-- Transitions `Todo` issues to `In Progress` before starting the agent, matching normal dispatch
-  semantics.
-- Runs the configured agent adapter synchronously for that issue and exits zero on completion or
-  non-zero on config, tracker, workspace, hook, or agent failure.
+- Transitions `Todo` tracker issues to `In Progress` before starting the agent, matching normal
+  dispatch semantics. Manifest runs synthesize an already-active in-memory issue and do not perform
+  tracker state transitions.
+- Runs the configured agent adapter synchronously for that issue/request and exits zero on completion
+  or non-zero on config, tracker, manifest, workspace, hook, or agent failure.
+- Records manifest source contract metadata in the run ledger when using a local manifest.
 - Does not start the long-running polling loop, dashboard, multi-issue scheduler, or retry queue.
 
 ### 8.4 Concurrency Control

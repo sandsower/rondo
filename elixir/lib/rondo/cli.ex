@@ -7,7 +7,7 @@ defmodule Rondo.CLI do
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer, debug: :boolean]
-  @run_once_switches @switches ++ [issue: :string]
+  @run_once_switches @switches ++ [issue: :string, manifest: :string]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type evaluate_result :: :ok | :run_once_completed | {:error, String.t()}
@@ -17,7 +17,8 @@ defmodule Rondo.CLI do
           set_logs_root: (String.t() -> :ok | {:error, term()}),
           set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
           ensure_all_started: (-> ensure_started_result()),
-          run_once: (String.t() -> :ok | {:error, term()})
+          run_once: (String.t() -> :ok | {:error, term()}),
+          run_manifest: (Path.t() -> :ok | {:error, term()})
         }
 
   @spec main([String.t()]) :: no_return()
@@ -56,10 +57,10 @@ defmodule Rondo.CLI do
 
       {:run_once, opts, [workflow_path]} ->
         with :ok <- require_guardrails_acknowledgement(opts),
-             :ok <- require_issue(opts),
+             :ok <- require_run_once_target(opts),
              :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_debug(opts),
-             :ok <- run_once(workflow_path, Keyword.fetch!(opts, :issue), deps) do
+             :ok <- run_once(workflow_path, opts, deps) do
           :run_once_completed
         end
 
@@ -100,25 +101,39 @@ defmodule Rondo.CLI do
     end
   end
 
-  @spec run_once(String.t(), String.t(), deps()) :: :ok | {:error, String.t()}
-  defp run_once(workflow_path, issue_id, deps) do
+  @spec run_once(String.t(), keyword(), deps()) :: :ok | {:error, String.t()}
+  defp run_once(workflow_path, opts, deps) do
     expanded_path = Path.expand(workflow_path)
 
     if deps.file_regular?.(expanded_path) do
       :ok = deps.set_workflow_file_path.(expanded_path)
-
-      case Map.get(deps, :run_once, &RunOnce.run/1).(issue_id) do
-        :ok -> :ok
-        {:error, reason} -> {:error, "run-once failed for issue #{issue_id}: #{inspect(reason)}"}
-      end
+      run_once_target(opts, deps)
     else
       {:error, "Workflow file not found: #{expanded_path}"}
     end
   end
 
+  defp run_once_target(opts, deps) do
+    case {Keyword.get(opts, :issue), Keyword.get(opts, :manifest)} do
+      {issue_id, nil} when is_binary(issue_id) ->
+        case Map.get(deps, :run_once, &RunOnce.run/1).(issue_id) do
+          :ok -> :ok
+          {:error, reason} -> {:error, "run-once failed for issue #{issue_id}: #{inspect(reason)}"}
+        end
+
+      {nil, manifest_path} when is_binary(manifest_path) ->
+        expanded_manifest_path = Path.expand(manifest_path)
+
+        case Map.get(deps, :run_manifest, &RunOnce.run_manifest/1).(expanded_manifest_path) do
+          :ok -> :ok
+          {:error, reason} -> {:error, "run-once failed for manifest #{expanded_manifest_path}: #{inspect(reason)}"}
+        end
+    end
+  end
+
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: rondo [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]\n       rondo run-once [--logs-root <path>] <path-to-WORKFLOW.md> --issue <id>"
+    "Usage: rondo [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]\n       rondo run-once [--logs-root <path>] <path-to-WORKFLOW.md> (--issue <id> | --manifest <path>)"
   end
 
   @spec runtime_deps() :: deps()
@@ -129,7 +144,8 @@ defmodule Rondo.CLI do
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
       ensure_all_started: fn -> Application.ensure_all_started(:rondo) end,
-      run_once: &RunOnce.run/1
+      run_once: &RunOnce.run/1,
+      run_manifest: &RunOnce.run_manifest/1
     }
   end
 
@@ -149,16 +165,20 @@ defmodule Rondo.CLI do
     end
   end
 
-  @spec require_issue(keyword()) :: :ok | {:error, String.t()}
-  defp require_issue(opts) do
-    case Keyword.get(opts, :issue) do
-      issue when is_binary(issue) ->
-        if String.trim(issue) == "", do: {:error, usage_message()}, else: :ok
+  @spec require_run_once_target(keyword()) :: :ok | {:error, String.t()}
+  defp require_run_once_target(opts) do
+    issue = opts |> Keyword.get(:issue) |> present_string?()
+    manifest = opts |> Keyword.get(:manifest) |> present_string?()
 
-      _ ->
-        {:error, usage_message()}
+    case {issue, manifest} do
+      {true, false} -> :ok
+      {false, true} -> :ok
+      _ -> {:error, usage_message()}
     end
   end
+
+  defp present_string?(value) when is_binary(value), do: String.trim(value) != ""
+  defp present_string?(_value), do: false
 
   defp require_guardrails_acknowledgement(opts) do
     if Keyword.get(opts, @acknowledgement_switch, false) do

@@ -5,7 +5,7 @@ defmodule Rondo.RunOnce do
 
   require Logger
 
-  alias Rondo.{AgentRunner, Config, Linear.Issue, RunLedger, Tracker}
+  alias Rondo.{AgentRunner, Config, ExecutionRequest, Linear.Issue, RunLedger, Tracker}
 
   @type run_result :: :ok | {:error, term()}
   @type deps :: %{
@@ -32,6 +32,21 @@ defmodule Rondo.RunOnce do
   end
 
   def run(issue_id, _opts), do: {:error, {:invalid_issue_id, issue_id}}
+
+  @spec run_manifest(Path.t(), keyword()) :: run_result()
+  def run_manifest(path, opts \\ []) do
+    if is_binary(path) do
+      deps = Keyword.get(opts, :deps, runtime_deps())
+      agent_opts = Keyword.get(opts, :agent_opts, [])
+
+      with :ok <- Config.validate!(),
+           {:ok, %{issue: issue, source_contract: source_contract}} <- ExecutionRequest.load(path) do
+        run_agent(issue, deps, agent_opts, source_contract: source_contract)
+      end
+    else
+      {:error, {:invalid_execution_request_path, path}}
+    end
+  end
 
   @spec runtime_deps() :: deps()
   defp runtime_deps do
@@ -102,9 +117,9 @@ defmodule Rondo.RunOnce do
     end
   end
 
-  @spec run_agent(Issue.t(), deps(), keyword()) :: run_result()
-  defp run_agent(issue, deps, agent_opts) do
-    case RunLedger.create_run(issue) do
+  @spec run_agent(Issue.t(), deps(), keyword(), keyword()) :: run_result()
+  defp run_agent(issue, deps, agent_opts, ledger_opts \\ []) do
+    case RunLedger.create_run(issue, ledger_opts) do
       {:ok, ledger} ->
         do_run_agent_with_ledger(issue, deps, agent_opts, ledger)
 

@@ -75,6 +75,37 @@ agent adapter as the polling service. Todo issues are transitioned to `In Progre
 runs. The command exits zero when the issue run completes and non-zero for config, tracker,
 visibility/filter, workspace, or agent failures.
 
+`run-once` can also execute a local approved-slice / execution-request manifest without fetching a
+tracker issue:
+
+```bash
+mise exec -- ./bin/rondo run-once ./WORKFLOW.md --manifest ./request.json
+```
+
+P0 manifest loading accepts local JSON with `schema: "rondo-execution-request-v1"` or
+`schema: "approved-slice-v1"`, plus `slice_id` and either `prompt` or `body`:
+
+```json
+{
+  "schema": "rondo-execution-request-v1",
+  "slice_id": "slice-123",
+  "parent_contract": {"id": "plan-1", "source": "beislid"},
+  "repo": {"base_ref": "main"},
+  "prompt": "Implement the approved slice.",
+  "boundaries": ["Do not touch billing."],
+  "dependencies": [],
+  "proof_requirements": ["mix test"],
+  "allowed_actions": {"run_mode": "supervised-auto"},
+  "process_provider": {},
+  "memory_provider": {},
+  "output_expectations": {}
+}
+```
+
+Manifest runs synthesize an in-memory issue from the request and record `source_contract` metadata in
+the run ledger. Provider settings and allowed-action fields are recorded for provenance in this P0
+slice; enforcement still comes from the configured Rondo/Beislið runtime boundaries.
+
 ## Configuration
 
 Pass a custom workflow file path to `./bin/rondo` when starting the long-running service:
