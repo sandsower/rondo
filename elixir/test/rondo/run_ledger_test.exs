@@ -80,6 +80,54 @@ defmodule Rondo.RunLedgerTest do
     assert manifest["issue"]["priority"] == 2
   end
 
+  test "create_run records source contract metadata when provided" do
+    workspace_root = tmp_dir("ledger-source-contract")
+
+    source_contract = %{
+      schema: "rondo-execution-request-v1",
+      slice_id: "slice-123",
+      path: "/tmp/request.json",
+      sha256: String.duplicate("a", 64),
+      parent_contract: %{"id" => "plan-1", "source" => "beislid"},
+      repo: %{"base_ref" => "main"},
+      allowed_actions: %{"run_mode" => "supervised-auto"},
+      process_provider: %{"name" => "pi"},
+      memory_provider: %{"name" => "memento"},
+      output_expectations: %{"final_report" => true}
+    }
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "5eedc0de",
+               source_contract: source_contract
+             )
+
+    manifest = decode_json!(ledger.manifest_path)
+    assert manifest["source_contract"]["schema"] == "rondo-execution-request-v1"
+    assert manifest["source_contract"]["slice_id"] == "slice-123"
+    assert manifest["source_contract"]["path"] == "/tmp/request.json"
+    assert manifest["source_contract"]["sha256"] == String.duplicate("a", 64)
+    assert manifest["source_contract"]["parent_contract"] == %{"id" => "plan-1", "source" => "beislid"}
+    assert manifest["source_contract"]["repo"] == %{"base_ref" => "main"}
+    assert manifest["source_contract"]["allowed_actions"] == %{"run_mode" => "supervised-auto"}
+    assert manifest["source_contract"]["process_provider"] == %{"name" => "pi"}
+    assert manifest["source_contract"]["memory_provider"] == %{"name" => "memento"}
+    assert manifest["source_contract"]["output_expectations"] == %{"final_report" => true}
+
+    assert {:ok, invalid_source_ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "badc0ffe",
+               source_contract: "invalid"
+             )
+
+    invalid_source_manifest = decode_json!(invalid_source_ledger.manifest_path)
+    refute Map.has_key?(invalid_source_manifest, "source_contract")
+  end
+
   test "create_run generates unique run IDs across attempts" do
     workspace_root = tmp_dir("ledger-unique")
     issue = issue_fixture()

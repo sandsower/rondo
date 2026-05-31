@@ -1,11 +1,11 @@
 defmodule Rondo.RunOnce do
   @moduledoc """
-  Synchronous one-shot runner for executing exactly one visible tracker issue.
+  Synchronous one-shot runner for executing exactly one visible tracker issue or local execution request.
   """
 
   require Logger
 
-  alias Rondo.{AgentRunner, Config, Linear.Issue, RunLedger, Tracker}
+  alias Rondo.{AgentRunner, Config, ExecutionRequest, Linear.Issue, RunLedger, Tracker}
 
   @type run_result :: :ok | {:error, term()}
   @type deps :: %{
@@ -32,6 +32,25 @@ defmodule Rondo.RunOnce do
   end
 
   def run(issue_id, _opts), do: {:error, {:invalid_issue_id, issue_id}}
+
+  @spec run_manifest(Path.t(), keyword()) :: run_result()
+  def run_manifest(path, opts \\ []) do
+    if is_binary(path) do
+      deps = Keyword.get(opts, :deps, runtime_deps())
+      agent_opts = Keyword.get(opts, :agent_opts, [])
+
+      with :ok <- Config.validate!(),
+           {:ok, %{issue: issue, source_contract: source_contract}} <- ExecutionRequest.load(path) do
+        run_agent(issue, deps, manifest_agent_opts(agent_opts), source_contract: source_contract)
+      end
+    else
+      {:error, {:invalid_execution_request_path, path}}
+    end
+  end
+
+  defp manifest_agent_opts(agent_opts) do
+    Keyword.put_new(agent_opts, :issue_state_fetcher, fn _issue_ids -> {:ok, []} end)
+  end
 
   @spec runtime_deps() :: deps()
   defp runtime_deps do
@@ -102,9 +121,9 @@ defmodule Rondo.RunOnce do
     end
   end
 
-  @spec run_agent(Issue.t(), deps(), keyword()) :: run_result()
-  defp run_agent(issue, deps, agent_opts) do
-    case RunLedger.create_run(issue) do
+  @spec run_agent(Issue.t(), deps(), keyword(), keyword()) :: run_result()
+  defp run_agent(issue, deps, agent_opts, ledger_opts \\ []) do
+    case RunLedger.create_run(issue, ledger_opts) do
       {:ok, ledger} ->
         do_run_agent_with_ledger(issue, deps, agent_opts, ledger)
 
@@ -168,13 +187,20 @@ defmodule Rondo.RunOnce do
 
   defp record_update(ledger, update) do
     case RunLedger.append_agent_event(ledger, update) do
-      :ok -> :ok
-      {:error, reason} -> Logger.warning("Failed to append run-once ledger agent event #{ledger_context(ledger)} reason=#{inspect(reason)}")
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to append run-once ledger agent event #{ledger_context(ledger)} session_id=#{update_session_id(update)} reason=#{inspect(reason)}")
     end
 
     ledger
     |> write_update_checkpoint(update)
     |> link_gate_artifacts(update)
+  end
+
+  defp update_session_id(update) do
+    Map.get(update, :session_id) || Map.get(update, "session_id") || "unknown"
   end
 
   defp write_update_checkpoint(ledger, update) do

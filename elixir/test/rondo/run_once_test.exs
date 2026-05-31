@@ -247,6 +247,7 @@ defmodule Rondo.RunOnceTest do
     assert log =~ "Failed to append run-once ledger agent event"
     assert log =~ "issue_identifier=GH-1"
     assert log =~ "issue_id=issue-1"
+    assert log =~ "session_id=session-1"
     assert log =~ "run_id=GH-1-"
     assert log =~ "run_dir="
   end
@@ -265,12 +266,50 @@ defmodule Rondo.RunOnceTest do
     assert_run_dir_option(agent_opts)
   end
 
+  test "runs a valid execution request manifest without tracker fetch or state transition" do
+    parent = self()
+    manifest_path = write_manifest!(%{schema: "rondo-execution-request-v1", slice_id: "slice-123", prompt: "Do the slice."})
+
+    assert :ok =
+             RunOnce.run_manifest(manifest_path,
+               deps: deps([], parent)
+             )
+
+    assert_received {:agent_run, %Issue{id: "slice-123", identifier: "slice-123", state: "In Progress"}, agent_opts}
+    assert_run_dir_option(agent_opts)
+    assert {:ok, []} = agent_opts |> Keyword.fetch!(:issue_state_fetcher) |> then(& &1.(["slice-123"]))
+    refute_received {:fetch_issue_states_by_ids, _}
+    refute_received {:update_issue_state, _, _}
+  end
+
+  test "invalid execution request manifests fail before agent execution" do
+    parent = self()
+    manifest_path = write_manifest!(%{schema: "unknown-v1", slice_id: "slice-123", prompt: "Do the slice."})
+
+    assert {:error, {:unsupported_execution_request_schema, "unknown-v1"}} =
+             RunOnce.run_manifest(manifest_path,
+               deps: deps([], parent)
+             )
+
+    refute_received {:agent_run, _, _}
+    refute_received {:fetch_issue_states_by_ids, _}
+    refute_received {:update_issue_state, _, _}
+  end
+
   defp assert_run_dir_option(agent_opts) do
     assert agent_opts |> Keyword.fetch!(:run_dir) |> File.dir?()
   end
 
   defp tmp_dir(name) do
     Path.join(System.tmp_dir!(), "rondo-#{name}-#{System.unique_integer([:positive])}")
+  end
+
+  defp write_manifest!(payload) do
+    dir = tmp_dir("manifest")
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "request.json")
+    File.write!(path, Jason.encode!(payload))
+    path
   end
 
   defp deps(fetch_result, parent, opts \\ []) do
