@@ -2051,6 +2051,7 @@ defmodule Rondo.OrchestratorStatusTest do
       end)
 
     assert retry_entry.attempt == 1
+    assert retry_entry.failure_reason == :gate_failed
 
     send(pid, {:retry_issue, issue.id, retry_entry.retry_token})
 

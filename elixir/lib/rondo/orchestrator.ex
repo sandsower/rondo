@@ -199,7 +199,8 @@ defmodule Rondo.Orchestrator do
               |> archive_running_entry(running_entry, reason)
               |> schedule_issue_retry(issue_id, next_attempt, %{
                 identifier: running_entry.identifier,
-                error: "agent exited: #{inspect(reason)}"
+                error: "agent exited: #{inspect(reason)}",
+                failure_reason: retry_failure_reason(running_entry, reason)
               })
           end
 
@@ -774,6 +775,7 @@ defmodule Rondo.Orchestrator do
 
   defp do_dispatch_issue(%State{} = state, issue, attempt) do
     recipient = self()
+    attempt_metadata = attempt_metadata(attempt)
     {ledger, dispatch_payload} = create_run_ledger(issue, attempt)
     ledger = write_run_ledger_checkpoint(ledger, :dispatch, dispatch_payload)
 
@@ -816,6 +818,7 @@ defmodule Rondo.Orchestrator do
             claude_last_reported_total_tokens: 0,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
+            retry_failure_reason: Keyword.get(attempt_metadata, :failure_reason),
             started_at: DateTime.utc_now(),
             latest_gate: nil,
             event_log: []
@@ -957,8 +960,12 @@ defmodule Rondo.Orchestrator do
   defp gate_result_artifacts(_result), do: []
 
   defp pause_after_gate_failure?(running_entry, reason) do
-    retry_attempt = running_entry |> Map.get(:retry_attempt) |> normalize_retry_attempt()
-    retry_attempt >= 1 and gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate))
+    previous_failure = Map.get(running_entry, :retry_failure_reason)
+    previous_failure == :gate_failed and gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate))
+  end
+
+  defp retry_failure_reason(running_entry, reason) do
+    if gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate)), do: :gate_failed
   end
 
   defp gate_failure_reason?(reason), do: reason |> inspect() |> String.contains?("gate_failed")
@@ -1115,7 +1122,8 @@ defmodule Rondo.Orchestrator do
             retry_token: retry_token,
             due_at_ms: due_at_ms,
             identifier: identifier,
-            error: error
+            error: error,
+            failure_reason: Map.get(metadata, :failure_reason)
           })
     }
   end
@@ -1125,7 +1133,8 @@ defmodule Rondo.Orchestrator do
       %{attempt: attempt, retry_token: ^retry_token} = retry_entry ->
         metadata = %{
           identifier: Map.get(retry_entry, :identifier),
-          error: Map.get(retry_entry, :error)
+          error: Map.get(retry_entry, :error),
+          failure_reason: Map.get(retry_entry, :failure_reason)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -1210,7 +1219,7 @@ defmodule Rondo.Orchestrator do
   defp handle_active_retry(state, issue, attempt, metadata, terminal_states) do
     if retry_candidate_issue?(issue, terminal_states) and
          dispatch_slots_available?(issue, state) do
-      {:noreply, dispatch_issue(state, issue, attempt)}
+      {:noreply, dispatch_issue(state, issue, {attempt, metadata})}
     else
       Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
 
@@ -1246,8 +1255,12 @@ defmodule Rondo.Orchestrator do
     min(@failure_retry_base_ms * (1 <<< max_delay_power), Config.max_retry_backoff_ms())
   end
 
+  defp normalize_retry_attempt({attempt, _metadata}), do: normalize_retry_attempt(attempt)
   defp normalize_retry_attempt(attempt) when is_integer(attempt) and attempt > 0, do: attempt
   defp normalize_retry_attempt(_attempt), do: 0
+
+  defp attempt_metadata({_attempt, metadata}) when is_map(metadata), do: Map.to_list(metadata)
+  defp attempt_metadata(_attempt), do: []
 
   defp next_retry_attempt_from_running(running_entry) do
     case Map.get(running_entry, :retry_attempt) do
