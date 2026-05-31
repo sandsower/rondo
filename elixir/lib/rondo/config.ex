@@ -44,6 +44,8 @@ defmodule Rondo.Config do
   @default_action_policy_command "beislid"
   @default_action_policy_run_mode "unattended-auto"
   @valid_action_policy_run_modes ["supervised-auto", "unattended-auto"]
+  @default_process_provider_kind "native"
+  @valid_process_provider_kinds ["native"]
   @default_debug false
   @default_observability_enabled true
   @default_observability_refresh_ms 1_000
@@ -151,6 +153,13 @@ defmodule Rondo.Config do
                                  run_mode: [type: :string, default: @default_action_policy_run_mode]
                                ]
                              ],
+                             process_provider: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 kind: [type: :string, default: @default_process_provider_kind]
+                               ]
+                             ],
                              hooks: [
                                type: :map,
                                default: %{},
@@ -213,6 +222,9 @@ defmodule Rondo.Config do
   @type action_policy :: %{
           command: String.t(),
           run_mode: String.t()
+        }
+  @type process_provider :: %{
+          kind: String.t()
         }
 
   @spec current_workflow() :: {:ok, workflow_payload()} | {:error, term()}
@@ -426,6 +438,20 @@ defmodule Rondo.Config do
   @spec action_policy_run_mode() :: String.t()
   def action_policy_run_mode do
     get_in(validated_workflow_options(), [:action_policy, :run_mode])
+  end
+
+  @spec process_provider() :: process_provider()
+  def process_provider do
+    provider = get_in(validated_workflow_options(), [:process_provider])
+
+    %{
+      kind: Map.get(provider, :kind)
+    }
+  end
+
+  @spec process_provider_kind() :: String.t()
+  def process_provider_kind do
+    get_in(validated_workflow_options(), [:process_provider, :kind])
   end
 
   @spec pi_turn_timeout_ms() :: pos_integer()
@@ -745,6 +771,7 @@ defmodule Rondo.Config do
       claude: extract_claude_options(section_map(config, "claude")),
       pi: extract_pi_options(section_map(config, "pi")),
       action_policy: extract_action_policy_options(section_map(config, "action_policy")),
+      process_provider: extract_process_provider_options(section_map(config, "process_provider")),
       hooks: extract_hooks_options(section_map(config, "hooks")),
       gates: extract_gates_options(Map.get(config, "gates")),
       observability: extract_observability_options(section_map(config, "observability")),
@@ -813,6 +840,11 @@ defmodule Rondo.Config do
     |> put_if_present(:run_mode, scalar_string_value(Map.get(section, "run_mode")))
   end
 
+  defp extract_process_provider_options(section) do
+    %{}
+    |> put_if_present(:kind, scalar_string_value(Map.get(section, "kind")))
+  end
+
   defp tools_list_value(values) when is_list(values) do
     filtered = Enum.filter(values, &is_binary/1) |> Enum.reject(&(String.trim(&1) == ""))
     if filtered == [], do: :omit, else: filtered
@@ -867,6 +899,7 @@ defmodule Rondo.Config do
     claude = section_map(config, "claude")
     pi = section_map(config, "pi")
     action_policy = section_map(config, "action_policy")
+    process_provider = section_map(config, "process_provider")
     hooks = section_map(config, "hooks")
     gates = Map.get(config, "gates")
     observability = section_map(config, "observability")
@@ -880,6 +913,7 @@ defmodule Rondo.Config do
       validate_section_map(config, "claude"),
       validate_section_map(config, "pi"),
       validate_section_map(config, "action_policy"),
+      validate_section_map(config, "process_provider"),
       validate_section_map(config, "hooks"),
       validate_gates_field(gates),
       validate_section_map(config, "observability"),
@@ -915,6 +949,7 @@ defmodule Rondo.Config do
       validate_positive_integer_field(pi, "pi.stall_timeout_ms"),
       validate_string_field(action_policy, "action_policy.command"),
       validate_inclusion_field(action_policy, "action_policy.run_mode", @valid_action_policy_run_modes),
+      validate_inclusion_field(process_provider, "process_provider.kind", @valid_process_provider_kinds),
       validate_string_field(hooks, "hooks.after_create"),
       validate_string_field(hooks, "hooks.before_run"),
       validate_string_field(hooks, "hooks.after_run"),

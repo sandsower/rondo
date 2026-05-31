@@ -30,6 +30,9 @@ defmodule Rondo.RunLedgerTest do
     assert manifest["issue"]["title"] == "Durable ledger"
     assert manifest["repo"]["workspace_root"] == Path.expand(workspace_root)
     assert manifest["agent"]["session_id"] == "session-abc"
+    assert manifest["process_provider"]["kind"] == "native"
+    assert manifest["process_provider"]["capabilities"]["gate_selection"] == "native_flat_gates"
+    assert manifest["process_provider"]["probe"]["checks"]["guide_selection"] == "unsupported"
     assert manifest["timestamps"]["started_at"] == "2026-05-10T15:30:01Z"
     assert manifest["checkpoints"] == []
 

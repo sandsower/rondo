@@ -238,6 +238,7 @@ defmodule Rondo.Gates do
       [
         workspace: workspace,
         command: Keyword.get(opts, :action_policy_command, Config.action_policy_command()),
+        evaluator: Keyword.get(opts, :action_policy_evaluator, &ActionPolicy.evaluate/3),
         mode: Keyword.get(opts, :action_policy_run_mode, Config.action_policy_run_mode()),
         sandbox_status: Keyword.get_lazy(opts, :sandbox_status, fn -> ActionPolicy.sandbox_status(workspace) end)
       ]
@@ -253,17 +254,26 @@ defmodule Rondo.Gates do
     classes = Map.get(gate, :action_classes, [])
     action = Map.get(gate, :action_id) || default_gate_action_id(name, classes)
 
-    case ActionPolicy.evaluate(action, classes, policy_opts) do
-      {:ok, %{"decision" => "allow"} = envelope} ->
-        {:ok, envelope}
+    evaluator = Keyword.get(policy_opts, :evaluator, &ActionPolicy.evaluate/3)
 
-      {:ok, %{"decision" => decision} = envelope} when decision in ["ask", "deny"] ->
-        {:error, {:action_policy_blocked, decision}, envelope}
+    case evaluator.(action, classes, policy_opts) do
+      {:ok, envelope} ->
+        evaluate_gate_policy_envelope(envelope)
 
       {:error, reason} ->
         {:error, {:action_policy_failed, reason}, nil}
     end
   end
+
+  defp evaluate_gate_policy_envelope(%{"decision" => "allow", "action" => action, "mode" => mode} = envelope)
+       when is_binary(action) and is_binary(mode),
+       do: {:ok, envelope}
+
+  defp evaluate_gate_policy_envelope(%{"decision" => decision, "action" => action, "mode" => mode} = envelope)
+       when decision in ["ask", "deny"] and is_binary(action) and is_binary(mode),
+       do: {:error, {:action_policy_blocked, decision}, envelope}
+
+  defp evaluate_gate_policy_envelope(envelope), do: {:error, {:action_policy_failed, :invalid_evaluator_envelope}, envelope}
 
   defp default_gate_action_id(_name, ["read"]), do: "file.read"
   defp default_gate_action_id(name, _classes), do: "gate." <> safe_name(name)

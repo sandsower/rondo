@@ -421,7 +421,25 @@ failure, error, or timeout makes the current run attempt fail/retry; gate eviden
 agent transcript self-report. This flat shape is intentionally compatible with simple external
 workflow gate definitions while keeping `WORKFLOW.md` as Rondo's runtime source of truth.
 
-#### 5.3.6 `agent` (object)
+#### 5.3.6 `process_provider` (object)
+
+Fields:
+
+- `kind` (string)
+  - Default: `native`.
+  - P0 supports `native` only. Invalid provider kinds fail workflow validation instead of silently
+    falling back.
+
+The process provider is the boundary for process/work-contract inputs: gate selection, guide
+selection, action-policy evaluation, model-routing hints, proof requirement resolution, and
+capability/probe metadata. The native provider preserves Rondo's existing standalone `WORKFLOW.md`
+behavior: flat gates come from top-level `gates`, prompts come from the Markdown body, action-policy
+evaluation delegates to the configured Beislið evaluator, model hints come from adapter config, and
+richer provider features degrade to unsupported/empty results unless a future provider marks them
+required. Rondo owns execution, proof artifacts, and run state; external systems such as Beislið own
+richer work-contract semantics when a future provider is added.
+
+#### 5.3.7 `agent` (object)
 
 Fields:
 
@@ -444,7 +462,7 @@ Fields:
   - Default: `20`.
   - Caps back-to-back adapter turns for an active issue.
 
-#### 5.3.6 `claude` (object)
+#### 5.3.8 `claude` (object)
 
 Fields:
 
@@ -487,7 +505,7 @@ Fields:
   - No stdout activity timeout.
   - If `<= 0`, stall detection is disabled.
 
-#### 5.3.7 `pi` (object)
+#### 5.3.9 `pi` (object)
 
 Fields:
 
@@ -503,7 +521,7 @@ Fields:
   - Default: `300000` (5 minutes).
   - No stdout activity timeout.
 
-#### 5.3.8 `action_policy` (object)
+#### 5.3.10 `action_policy` (object)
 
 Fields:
 
@@ -673,6 +691,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `gates[].action_classes`: optional Beislið action classes, default `["read"]`
 - `action_policy.command`: executable path/name, default `beislid`
 - `action_policy.run_mode`: one of `supervised-auto`, `unattended-auto`; default `unattended-auto`
+- `process_provider.kind`: string, default `native`; P0 supports `native` only
 - `server.port` (extension): integer, optional; enables the optional HTTP server, `0` may be used
   for ephemeral local bind, and CLI `--port` overrides it
 

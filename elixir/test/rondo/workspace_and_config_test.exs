@@ -672,6 +672,11 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Config.action_policy() == %{command: "beislid", run_mode: "unattended-auto"}
     assert Config.action_policy_command() == "beislid"
     assert Config.action_policy_run_mode() == "unattended-auto"
+    assert Config.process_provider() == %{kind: "native"}
+    assert Config.process_provider_kind() == "native"
+
+    write_workflow_file!(Workflow.workflow_file_path(), process_provider_kind: "beislid")
+    assert {:error, {:invalid_workflow_config, _, [%{path: "process_provider.kind"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), action_policy_command: "/tmp/beislid", action_policy_run_mode: "supervised-auto")
     assert Config.action_policy() == %{command: "/tmp/beislid", run_mode: "supervised-auto"}
