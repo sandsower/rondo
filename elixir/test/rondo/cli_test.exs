@@ -175,6 +175,21 @@ defmodule Rondo.CLITest do
     assert message =~ "rondo run-once"
   end
 
+  test "run-once treats blank targets as absent during validation and dispatch" do
+    parent = self()
+    workflow_path = "tmp/run-once/WORKFLOW.md"
+    expanded_path = Path.expand(workflow_path)
+    deps = run_once_deps(parent, expanded_path)
+
+    assert :run_once_completed = CLI.evaluate(["run-once", @ack_flag, workflow_path, "--issue", "123", "--manifest", ""], deps)
+    assert_received {:run_once, "123"}
+    refute_received {:run_manifest, _}
+
+    assert :run_once_completed = CLI.evaluate(["run-once", @ack_flag, workflow_path, "--issue", "", "--manifest", "request.json"], deps)
+    assert_received {:run_manifest, manifest_path}
+    assert manifest_path == Path.expand("request.json")
+  end
+
   test "run-once requires an issue id or manifest" do
     deps = run_once_deps(self(), Path.expand("WORKFLOW.md"))
 

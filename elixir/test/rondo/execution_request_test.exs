@@ -97,6 +97,28 @@ defmodule Rondo.ExecutionRequestTest do
     assert string_request.issue.description =~ "Return a summary."
   end
 
+  test "rejects invalid optional list sections" do
+    assert {:error, {:invalid_execution_request_field, "boundaries"}} =
+             "invalid-boundaries"
+             |> manifest_path(%{
+               schema: "rondo-execution-request-v1",
+               slice_id: "slice-123",
+               prompt: "Do it.",
+               boundaries: [%{bad: true}]
+             })
+             |> ExecutionRequest.load()
+
+    assert {:error, {:invalid_execution_request_field, "dependencies"}} =
+             "invalid-dependencies"
+             |> manifest_path(%{
+               schema: "rondo-execution-request-v1",
+               slice_id: "slice-123",
+               prompt: "Do it.",
+               dependencies: 123
+             })
+             |> ExecutionRequest.load()
+  end
+
   test "rejects missing required fields" do
     assert {:error, {:missing_execution_request_field, "slice_id"}} =
              "missing-slice"

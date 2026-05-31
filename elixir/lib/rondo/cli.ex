@@ -114,7 +114,7 @@ defmodule Rondo.CLI do
   end
 
   defp run_once_target(opts, deps) do
-    case {Keyword.get(opts, :issue), Keyword.get(opts, :manifest)} do
+    case run_once_target_values(opts) do
       {issue_id, nil} when is_binary(issue_id) ->
         case Map.get(deps, :run_once, &RunOnce.run/1).(issue_id) do
           :ok -> :ok
@@ -128,6 +128,9 @@ defmodule Rondo.CLI do
           :ok -> :ok
           {:error, reason} -> {:error, "run-once failed for manifest #{expanded_manifest_path}: #{inspect(reason)}"}
         end
+
+      _ ->
+        {:error, usage_message()}
     end
   end
 
@@ -167,18 +170,23 @@ defmodule Rondo.CLI do
 
   @spec require_run_once_target(keyword()) :: :ok | {:error, String.t()}
   defp require_run_once_target(opts) do
-    issue = opts |> Keyword.get(:issue) |> present_string?()
-    manifest = opts |> Keyword.get(:manifest) |> present_string?()
-
-    case {issue, manifest} do
-      {true, false} -> :ok
-      {false, true} -> :ok
+    case run_once_target_values(opts) do
+      {issue, nil} when is_binary(issue) -> :ok
+      {nil, manifest} when is_binary(manifest) -> :ok
       _ -> {:error, usage_message()}
     end
   end
 
-  defp present_string?(value) when is_binary(value), do: String.trim(value) != ""
-  defp present_string?(_value), do: false
+  defp run_once_target_values(opts) do
+    {normalize_target_value(Keyword.get(opts, :issue)), normalize_target_value(Keyword.get(opts, :manifest))}
+  end
+
+  defp normalize_target_value(value) when is_binary(value) do
+    trimmed = String.trim(value)
+    if trimmed == "", do: nil, else: trimmed
+  end
+
+  defp normalize_target_value(_value), do: nil
 
   defp require_guardrails_acknowledgement(opts) do
     if Keyword.get(opts, @acknowledgement_switch, false) do

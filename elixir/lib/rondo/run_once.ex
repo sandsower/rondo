@@ -41,11 +41,15 @@ defmodule Rondo.RunOnce do
 
       with :ok <- Config.validate!(),
            {:ok, %{issue: issue, source_contract: source_contract}} <- ExecutionRequest.load(path) do
-        run_agent(issue, deps, agent_opts, source_contract: source_contract)
+        run_agent(issue, deps, manifest_agent_opts(agent_opts), source_contract: source_contract)
       end
     else
       {:error, {:invalid_execution_request_path, path}}
     end
+  end
+
+  defp manifest_agent_opts(agent_opts) do
+    Keyword.put_new(agent_opts, :issue_state_fetcher, fn _issue_ids -> {:ok, []} end)
   end
 
   @spec runtime_deps() :: deps()

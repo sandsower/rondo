@@ -33,7 +33,8 @@ defmodule Rondo.ExecutionRequest do
     with {:ok, schema} <- required_string(payload, "schema"),
          :ok <- validate_schema(schema),
          {:ok, slice_id} <- required_string(payload, "slice_id"),
-         {:ok, prompt} <- prompt(payload) do
+         {:ok, prompt} <- prompt(payload),
+         {:ok, description} <- description(prompt, payload) do
       source_contract =
         payload
         |> Map.take(@metadata_keys)
@@ -47,7 +48,7 @@ defmodule Rondo.ExecutionRequest do
 
       {:ok,
        %{
-         issue: issue(slice_id, prompt, payload),
+         issue: issue(slice_id, description),
          source_contract: source_contract
        }}
     end
@@ -88,12 +89,12 @@ defmodule Rondo.ExecutionRequest do
     end
   end
 
-  defp issue(slice_id, prompt, payload) do
+  defp issue(slice_id, description) do
     %Issue{
       id: slice_id,
       identifier: slice_id,
       title: "Execution request #{slice_id}",
-      description: description(prompt, payload),
+      description: description,
       state: "In Progress",
       labels: ["execution-request"],
       assigned_to_worker: true
@@ -101,30 +102,47 @@ defmodule Rondo.ExecutionRequest do
   end
 
   defp description(prompt, payload) do
-    [
-      {"Prompt", prompt},
-      {"Boundaries", list_section(payload, "boundaries")},
-      {"Dependencies", list_section(payload, "dependencies")},
-      {"Proof requirements", list_section(payload, "proof_requirements")},
-      {"Output expectations", json_section(payload, "output_expectations")}
-    ]
-    |> Enum.reject(fn {_title, value} -> is_nil(value) or value == "" end)
-    |> Enum.map_join("\n\n", fn {title, value} -> "## #{title}\n\n#{value}" end)
+    with {:ok, boundaries} <- list_section(payload, "boundaries"),
+         {:ok, dependencies} <- list_section(payload, "dependencies"),
+         {:ok, proof_requirements} <- list_section(payload, "proof_requirements") do
+      description =
+        [
+          {"Prompt", prompt},
+          {"Boundaries", boundaries},
+          {"Dependencies", dependencies},
+          {"Proof requirements", proof_requirements},
+          {"Output expectations", json_section(payload, "output_expectations")}
+        ]
+        |> Enum.reject(fn {_title, value} -> is_nil(value) or value == "" end)
+        |> Enum.map_join("\n\n", fn {title, value} -> "## #{title}\n\n#{value}" end)
+
+      {:ok, description}
+    end
   end
 
   defp list_section(payload, key) do
     case Map.get(payload, key) || Map.get(payload, String.to_atom(key)) do
       values when is_list(values) ->
-        values
-        |> Enum.map(&to_string/1)
-        |> Enum.reject(&(String.trim(&1) == ""))
-        |> Enum.map_join("\n", &("- " <> &1))
+        if Enum.all?(values, &is_binary/1) do
+          section =
+            values
+            |> Enum.map(&String.trim/1)
+            |> Enum.reject(&(&1 == ""))
+            |> Enum.map_join("\n", &("- " <> &1))
+
+          {:ok, section}
+        else
+          {:error, {:invalid_execution_request_field, key}}
+        end
 
       value when is_binary(value) ->
-        String.trim(value)
+        {:ok, String.trim(value)}
+
+      nil ->
+        {:ok, nil}
 
       _ ->
-        nil
+        {:error, {:invalid_execution_request_field, key}}
     end
   end
 
