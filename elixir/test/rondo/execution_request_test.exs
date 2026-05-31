@@ -63,6 +63,13 @@ defmodule Rondo.ExecutionRequestTest do
     assert message =~ "unexpected byte"
   end
 
+  test "returns path-aware read errors" do
+    path = Path.join(System.tmp_dir!(), "missing-request-#{System.unique_integer([:positive])}.json")
+
+    assert {:error, {:execution_request_read_failed, expanded_path, :enoent}} = ExecutionRequest.load(path)
+    assert expanded_path == Path.expand(path)
+  end
+
   test "rejects unsupported schemas" do
     path = manifest_path("unknown-schema", %{schema: "unknown-v1", slice_id: "slice-123", prompt: "Do it."})
 

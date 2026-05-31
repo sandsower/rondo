@@ -247,6 +247,7 @@ defmodule Rondo.RunOnceTest do
     assert log =~ "Failed to append run-once ledger agent event"
     assert log =~ "issue_identifier=GH-1"
     assert log =~ "issue_id=issue-1"
+    assert log =~ "session_id=session-1"
     assert log =~ "run_id=GH-1-"
     assert log =~ "run_dir="
   end

@@ -74,13 +74,23 @@ defmodule Rondo.CLI do
 
   @spec parse_args([String.t()]) :: parse_result()
   defp parse_args(["run-once" | rest]) do
-    case OptionParser.parse(rest, strict: @run_once_switches) do
-      {opts, argv, []} -> {:run_once, opts, argv}
-      {_opts, _argv, invalid} -> {[], [], invalid}
+    if duplicate_run_once_flags?(rest) do
+      {[], [], [{"run-once", "duplicate target flag"}]}
+    else
+      case OptionParser.parse(rest, strict: @run_once_switches) do
+        {opts, argv, []} -> {:run_once, opts, argv}
+        {_opts, _argv, invalid} -> {[], [], invalid}
+      end
     end
   end
 
   defp parse_args(args), do: OptionParser.parse(args, strict: @switches)
+
+  defp duplicate_run_once_flags?(args) do
+    Enum.count(args, &target_flag?(&1, "--issue")) > 1 or Enum.count(args, &target_flag?(&1, "--manifest")) > 1
+  end
+
+  defp target_flag?(arg, flag), do: arg == flag or String.starts_with?(arg, flag <> "=")
 
   @spec run(String.t(), deps()) :: :ok | {:error, String.t()}
   def run(workflow_path, deps) do
@@ -178,7 +188,18 @@ defmodule Rondo.CLI do
   end
 
   defp run_once_target_values(opts) do
-    {normalize_target_value(Keyword.get(opts, :issue)), normalize_target_value(Keyword.get(opts, :manifest))}
+    with {:ok, issue} <- one_target_value(opts, :issue),
+         {:ok, manifest} <- one_target_value(opts, :manifest) do
+      {issue, manifest}
+    end
+  end
+
+  defp one_target_value(opts, key) do
+    case Keyword.get_values(opts, key) do
+      [] -> {:ok, nil}
+      [value] -> {:ok, normalize_target_value(value)}
+      _values -> {:error, {:duplicate_run_once_target, key}}
+    end
   end
 
   defp normalize_target_value(value) when is_binary(value) do

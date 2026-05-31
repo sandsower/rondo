@@ -17,7 +17,7 @@ defmodule Rondo.ExecutionRequest do
   def load(path) when is_binary(path) do
     expanded_path = Path.expand(path)
 
-    with {:ok, json} <- File.read(expanded_path),
+    with {:ok, json} <- read_manifest(expanded_path),
          {:ok, payload} <- Jason.decode(json),
          {:ok, request} <- normalize(payload, expanded_path, json) do
       {:ok, request}
@@ -28,6 +28,13 @@ defmodule Rondo.ExecutionRequest do
   end
 
   def load(path), do: {:error, {:invalid_execution_request_path, path}}
+
+  defp read_manifest(path) do
+    case File.read(path) do
+      {:ok, json} -> {:ok, json}
+      {:error, reason} -> {:error, {:execution_request_read_failed, path, reason}}
+    end
+  end
 
   defp normalize(payload, path, json) when is_map(payload) do
     with {:ok, schema} <- required_string(payload, "schema"),

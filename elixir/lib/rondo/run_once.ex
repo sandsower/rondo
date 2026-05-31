@@ -187,13 +187,20 @@ defmodule Rondo.RunOnce do
 
   defp record_update(ledger, update) do
     case RunLedger.append_agent_event(ledger, update) do
-      :ok -> :ok
-      {:error, reason} -> Logger.warning("Failed to append run-once ledger agent event #{ledger_context(ledger)} reason=#{inspect(reason)}")
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Failed to append run-once ledger agent event #{ledger_context(ledger)} session_id=#{update_session_id(update)} reason=#{inspect(reason)}")
     end
 
     ledger
     |> write_update_checkpoint(update)
     |> link_gate_artifacts(update)
+  end
+
+  defp update_session_id(update) do
+    Map.get(update, :session_id) || Map.get(update, "session_id") || "unknown"
   end
 
   defp write_update_checkpoint(ledger, update) do
