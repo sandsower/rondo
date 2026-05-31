@@ -14,15 +14,18 @@ defmodule RondoWeb.Presenter do
         running = Map.get(snapshot, :running, [])
         retrying = Map.get(snapshot, :retrying, [])
         archived = Map.get(snapshot, :archived, [])
+        paused = Map.get(snapshot, :paused, [])
 
         %{
           generated_at: generated_at,
           counts: %{
             running: length(running),
-            retrying: length(retrying)
+            retrying: length(retrying),
+            paused: length(paused)
           },
           running: Enum.map(running, &running_entry_payload/1),
           retrying: Enum.map(retrying, &retry_entry_payload/1),
+          paused: Enum.map(paused, &paused_entry_payload/1),
           archived: group_archived_by_ticket(archived),
           claude_totals: Map.get(snapshot, :claude_totals, %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}),
           rate_limits: Map.get(snapshot, :rate_limits)
@@ -42,11 +45,12 @@ defmodule RondoWeb.Presenter do
       %{} = snapshot ->
         running = Enum.find(snapshot.running, &(&1.identifier == issue_identifier))
         retry = Enum.find(snapshot.retrying, &(&1.identifier == issue_identifier))
+        paused = snapshot |> Map.get(:paused, []) |> Enum.find(&(&1.identifier == issue_identifier))
 
-        if is_nil(running) and is_nil(retry) do
+        if is_nil(running) and is_nil(retry) and is_nil(paused) do
           {:error, :issue_not_found}
         else
-          {:ok, issue_payload_body(issue_identifier, running, retry)}
+          {:ok, issue_payload_body(issue_identifier, running, retry, paused)}
         end
 
       _ ->
@@ -68,39 +72,66 @@ defmodule RondoWeb.Presenter do
     end
   end
 
-  defp issue_payload_body(issue_identifier, running, retry) do
+  defp issue_payload_body(issue_identifier, running, retry, paused) do
     %{
       issue_identifier: issue_identifier,
-      issue_id: issue_id_from_entries(running, retry),
-      status: issue_status(running, retry),
-      workspace: %{
-        path: Path.join(Config.workspace_root(), issue_identifier)
-      },
-      attempts: %{
-        restart_count: restart_count(retry),
-        current_retry_attempt: retry_attempt(retry)
-      },
-      running: running && running_issue_payload(running),
-      retry: retry && retry_issue_payload(retry),
-      logs: %{
-        claude_session_logs: (running && format_event_log(Map.get(running, :event_log, []))) || []
-      },
-      recent_events: (running && recent_events_payload(running)) || [],
-      last_error: retry && retry.error,
+      issue_id: issue_id_from_entries(running, retry, paused),
+      status: issue_status(running, retry, paused),
+      workspace: workspace_payload(issue_identifier, paused),
+      attempts: attempts_payload(retry),
+      running: maybe_running_issue_payload(running),
+      retry: maybe_retry_issue_payload(retry),
+      paused: maybe_paused_issue_payload(paused),
+      logs: logs_payload(running),
+      recent_events: recent_events_for(running),
+      last_error: retry_error(retry),
       tracked: %{}
     }
   end
 
-  defp issue_id_from_entries(running, retry),
-    do: (running && running.issue_id) || (retry && retry.issue_id)
+  defp issue_id_from_entries(running, retry, paused),
+    do: (running && running.issue_id) || (retry && retry.issue_id) || (paused && paused.issue_id)
+
+  defp workspace_payload(issue_identifier, paused) do
+    %{path: paused_workspace(paused) || Path.join(Config.workspace_root(), issue_identifier)}
+  end
+
+  defp paused_workspace(nil), do: nil
+  defp paused_workspace(paused), do: Map.get(paused, :workspace)
+
+  defp attempts_payload(retry) do
+    %{
+      restart_count: restart_count(retry),
+      current_retry_attempt: retry_attempt(retry)
+    }
+  end
+
+  defp maybe_running_issue_payload(nil), do: nil
+  defp maybe_running_issue_payload(running), do: running_issue_payload(running)
+
+  defp maybe_retry_issue_payload(nil), do: nil
+  defp maybe_retry_issue_payload(retry), do: retry_issue_payload(retry)
+
+  defp maybe_paused_issue_payload(nil), do: nil
+  defp maybe_paused_issue_payload(paused), do: paused_issue_payload(paused)
+
+  defp logs_payload(nil), do: %{claude_session_logs: []}
+  defp logs_payload(running), do: %{claude_session_logs: format_event_log(Map.get(running, :event_log, []))}
+
+  defp recent_events_for(nil), do: []
+  defp recent_events_for(running), do: recent_events_payload(running)
+
+  defp retry_error(nil), do: nil
+  defp retry_error(retry), do: retry.error
 
   defp restart_count(retry), do: max(retry_attempt(retry) - 1, 0)
   defp retry_attempt(nil), do: 0
   defp retry_attempt(retry), do: retry.attempt || 0
 
-  defp issue_status(_running, nil), do: "running"
-  defp issue_status(nil, _retry), do: "retrying"
-  defp issue_status(_running, _retry), do: "running"
+  defp issue_status(nil, nil, _paused), do: "paused"
+  defp issue_status(_running, nil, _paused), do: "running"
+  defp issue_status(nil, _retry, _paused), do: "retrying"
+  defp issue_status(_running, _retry, _paused), do: "running"
 
   defp running_entry_payload(entry) do
     %{
@@ -133,6 +164,23 @@ defmodule RondoWeb.Presenter do
     }
   end
 
+  defp paused_entry_payload(entry) do
+    %{
+      issue_id: entry_value(entry, :issue_id),
+      issue_identifier: entry_value(entry, :identifier),
+      state: entry_value(entry, :state),
+      session_id: entry_value(entry, :session_id),
+      run_id: Map.get(entry, :run_id),
+      run_dir: Map.get(entry, :run_dir),
+      workspace: Map.get(entry, :workspace),
+      paused_at: timestamp_payload(Map.get(entry, :paused_at)),
+      retry_attempt: Map.get(entry, :retry_attempt),
+      tracker_visibility: Map.get(entry, :tracker_visibility),
+      latest_gate: gate_payload(Map.get(entry, :latest_gate)),
+      interrupt: interrupt_payload(Map.get(entry, :interrupt))
+    }
+  end
+
   defp running_issue_payload(running) do
     %{
       session_id: running.session_id,
@@ -157,6 +205,38 @@ defmodule RondoWeb.Presenter do
       due_at: due_at_iso8601(retry.due_in_ms),
       error: retry.error
     }
+  end
+
+  defp paused_issue_payload(paused) do
+    paused
+    |> paused_entry_payload()
+    |> Map.delete(:issue_identifier)
+  end
+
+  defp entry_value(entry, key) when is_map(entry) and is_atom(key) do
+    Map.get(entry, key) || Map.get(entry, Atom.to_string(key))
+  end
+
+  defp interrupt_payload(nil), do: nil
+
+  defp interrupt_payload(interrupt) when is_map(interrupt) do
+    %{
+      reason: payload_value(interrupt, :reason),
+      state: payload_value(interrupt, :state),
+      question: payload_value(interrupt, :question),
+      options: payload_value(interrupt, :options) || [],
+      recommendation: payload_value(interrupt, :recommendation),
+      resume: payload_value(interrupt, :resume),
+      gate: payload_value(interrupt, :gate)
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp interrupt_payload(_interrupt), do: nil
+
+  defp payload_value(map, key) when is_map(map) and is_atom(key) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
   end
 
   defp gate_payload(nil), do: nil
@@ -322,6 +402,10 @@ defmodule RondoWeb.Presenter do
   end
 
   defp due_at_iso8601(_due_in_ms), do: nil
+
+  defp timestamp_payload(%DateTime{} = datetime), do: iso8601(datetime)
+  defp timestamp_payload(timestamp) when is_binary(timestamp), do: timestamp
+  defp timestamp_payload(_timestamp), do: nil
 
   defp iso8601(%DateTime{} = datetime) do
     datetime

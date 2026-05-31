@@ -2004,6 +2004,154 @@ defmodule Rondo.OrchestratorStatusTest do
     assert Enum.any?(manifest["artifacts"], &(&1["kind"] == "gate_results"))
   end
 
+  test "orchestrator pauses instead of retrying after a second gate failure" do
+    workspace_root = tmp_dir("orchestrator-gate-failure-pause")
+    claude_bin = fake_claude_script(workspace_root, "gate-pause-session", 0)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: claude_bin,
+      max_turns: 1,
+      gates: [%{name: "proof", command: "echo nope; exit 3", timeout_ms: 1_000}]
+    )
+
+    issue = %Issue{
+      id: "issue-orchestrator-gate-pause",
+      identifier: "MT-GATE-PAUSE",
+      title: "Gate failure pause test",
+      description: "Pause after repeated configured gate failures",
+      state: "Todo",
+      url: "https://example.org/issues/MT-GATE-PAUSE"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :GateFailurePauseOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    state = :sys.get_state(pid)
+    state = %{state | max_concurrent_agents: 1, poll_interval_ms: 60_000}
+    :sys.replace_state(pid, fn _ -> state end)
+
+    send(pid, {:tick, state.tick_token})
+
+    retry_entry =
+      wait_until(fn ->
+        case :sys.get_state(pid).retry_attempts do
+          %{"issue-orchestrator-gate-pause" => entry} -> entry
+          _ -> nil
+        end
+      end)
+
+    assert retry_entry.attempt == 1
+    assert retry_entry.failure_reason == :gate_failed
+
+    send(pid, {:retry_issue, issue.id, retry_entry.retry_token})
+
+    paused_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).paused do
+          [entry | _] -> entry
+          _ -> nil
+        end
+      end)
+
+    assert paused_entry.issue_id == issue.id
+    assert paused_entry.identifier == "MT-GATE-PAUSE"
+    assert paused_entry.interrupt["reason"] == "repeated_gate_failure"
+    assert paused_entry.interrupt["gate"]["status"] == "fail"
+    assert paused_entry.interrupt["resume"]["retry_attempt"] == 1
+    assert paused_entry.interrupt["resume"]["session_id"] == "gate-pause-session"
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert snapshot.retrying == []
+    assert snapshot.archived |> Enum.count(&(&1.identifier == "MT-GATE-PAUSE")) == 1
+
+    state = :sys.get_state(pid)
+    refute Map.has_key?(state.running, issue.id)
+    assert MapSet.member?(state.claimed, issue.id)
+
+    paused_manifest =
+      [workspace_root, ".rondo_runs", "MT-GATE-PAUSE", "*", "manifest.json"]
+      |> Path.join()
+      |> Path.wildcard()
+      |> Enum.map(fn path -> path |> File.read!() |> Jason.decode!() end)
+      |> Enum.find(&(&1["status"] == "paused"))
+
+    assert paused_manifest
+    assert Enum.any?(paused_manifest["checkpoints"], &(&1["kind"] == "interrupt_created"))
+  end
+
+  test "orchestrator loads paused ledgers on startup and excludes them from redispatch" do
+    workspace_root = tmp_dir("orchestrator-paused-startup")
+    claude_bin = fake_claude_script(workspace_root, "paused-startup-session", 0)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: claude_bin,
+      max_turns: 1
+    )
+
+    issue = %Issue{
+      id: "issue-paused-startup",
+      identifier: "MT-PAUSED-STARTUP",
+      title: "Paused startup test",
+      description: "Load paused ledger on orchestrator init",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-PAUSED-STARTUP"
+    }
+
+    assert {:ok, ledger} = Rondo.RunLedger.create_run(issue, workspace_root: workspace_root, random_suffix: "5eeded00")
+
+    interrupt =
+      Rondo.Interrupt.repeated_gate_failure(%{
+        issue: issue,
+        gate: %{status: :fail, results_path: "artifacts/gates/turn-0002/results.json"},
+        run_id: ledger.run_id,
+        run_dir: ledger.run_dir,
+        workspace: Path.join(workspace_root, issue.identifier),
+        session_id: "paused-startup-session",
+        retry_attempt: 1,
+        timestamp: ~U[2026-05-28 10:00:00Z]
+      })
+
+    assert {:ok, _ledger} = Rondo.RunLedger.pause_run(ledger, interrupt, timestamp: ~U[2026-05-28 10:00:00Z])
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :PausedStartupOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert [%{issue_id: "issue-paused-startup", identifier: "MT-PAUSED-STARTUP"} = paused_entry] = snapshot.paused
+    assert paused_entry.interrupt["reason"] == "repeated_gate_failure"
+    assert paused_entry.tracker_visibility == "unknown"
+
+    state = :sys.get_state(pid)
+    assert MapSet.member?(state.claimed, issue.id)
+
+    send(pid, {:tick, state.tick_token})
+    Process.sleep(100)
+
+    state = :sys.get_state(pid)
+    assert state.running == %{}
+    assert Map.has_key?(state.paused_interrupts, issue.id)
+  end
+
   test "gate worker updates append run ledger checkpoints and artifacts" do
     workspace_root = tmp_dir("orchestrator-ledger-gates")
     issue_id = "issue-ledger-gates"

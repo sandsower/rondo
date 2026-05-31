@@ -155,6 +155,41 @@ defmodule Rondo.RunLedgerTest do
     assert Enum.any?(failed_manifest["checkpoints"], &(&1["kind"] == "failed"))
   end
 
+  test "pause_run writes interrupt checkpoint and paused manifest state" do
+    workspace_root = tmp_dir("ledger-pause")
+    issue = issue_fixture()
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "cafed00d"
+             )
+
+    interrupt = %{
+      "reason" => "repeated_gate_failure",
+      "state" => "paused",
+      "question" => "Configured gates failed repeatedly. How should Rondo proceed?",
+      "options" => [%{"id" => "resume"}],
+      "gate" => %{"status" => "fail"},
+      "resume" => %{"run_id" => ledger.run_id, "session_id" => "session-pause"}
+    }
+
+    assert {:ok, ledger} = RunLedger.pause_run(ledger, interrupt, timestamp: @now)
+
+    manifest = decode_json!(ledger.manifest_path)
+    assert manifest["status"] == "paused"
+    assert manifest["interrupt"] == interrupt
+    assert manifest["timestamps"]["paused_at"] == "2026-05-10T15:30:12Z"
+    assert manifest["timestamps"]["finished_at"] == nil
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "interrupt_created"))
+
+    checkpoint_index = Enum.find(manifest["checkpoints"], &(&1["kind"] == "interrupt_created"))
+    checkpoint = decode_json!(Path.join(ledger.run_dir, checkpoint_index["path"]))
+    assert checkpoint["payload"] == interrupt
+    assert checkpoint["source"] == %{"interrupt" => "human"}
+  end
+
   test "checkpoint_kind_for_agent_update maps Claude and MCP lifecycle events" do
     assert RunLedger.checkpoint_kind_for_agent_update(%{raw: %{"method" => "turn/started"}}) == "turn_started"
     assert RunLedger.checkpoint_kind_for_agent_update(%{raw: %{"method" => "turn/failed"}}) == "turn_failed"

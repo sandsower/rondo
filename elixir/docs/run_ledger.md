@@ -1,6 +1,6 @@
 # Run Ledger
 
-Rondo writes a durable run ledger for each dispatched issue attempt. The ledger is local diagnostic state that lets operators inspect a completed, failed, or terminated run from disk without the orchestrator process.
+Rondo writes a durable run ledger for each dispatched issue attempt. The ledger is local diagnostic state that lets operators inspect a running, paused, completed, failed, or terminated run from disk without the orchestrator process.
 
 ## Layout
 
@@ -35,7 +35,7 @@ If `workspace.root` points at a temporary directory, ledgers are ephemeral with 
 `manifest.json` is the entry point. It records:
 
 - schema version and `run_id`
-- run status: `running`, `completed`, `failed`, or `terminated`
+- run status: `running`, `paused`, `completed`, `failed`, or `terminated`
 - absolute `run_dir`
 - ticket snapshot: id, identifier, title, description, state, URL, labels, and priority
 - workspace root and expected workspace path
@@ -44,8 +44,11 @@ If `workspace.root` points at a temporary directory, ledgers are ephemeral with 
 - timestamps
 - checkpoint index
 - artifact links
+- pending human interrupt payload when the status is `paused`
 
 Checkpoint and built-in artifact paths are relative to `run_dir`. Archive links may point at the existing archive location outside the ledger.
+
+A paused manifest includes an `interrupt` object with a stable reason, state, exact question, options, recommendation, gate evidence, and resume seeds such as run ID/path, workspace path, session ID, run reference when available, retry attempt, and gate artifact paths. Paused runs are discovered at orchestrator startup by scanning `.rondo_runs/*/*/manifest.json` for `status: "paused"` so they remain excluded from redispatch without relying on chat/session context.
 
 ## Checkpoints
 
@@ -62,6 +65,7 @@ Current checkpoint kinds include:
 - `turn_cancelled`
 - `edit_batch`
 - `gates_completed`
+- `interrupt_created`
 - `completed`
 - `failed`
 - `terminated`
@@ -82,11 +86,11 @@ Gate artifact links use these kinds in the manifest:
 - `gate_stdout` for a gate command's raw stdout log
 - `gate_stderr` for a gate command's raw stderr log
 
-Each gate completion also records a `gates_completed` checkpoint with the sanitized summary payload.
+Each gate completion also records a `gates_completed` checkpoint with the sanitized summary payload. If configured gates fail repeatedly, Rondo preserves the first retry behavior and then creates a human interrupt on the second gate-failed attempt. The interrupt checkpoint stores the full sanitized gate summary so operators can inspect the failure before a future resume/abort/defer action.
 
 ## Archive relationship
 
-The existing `.rondo_archive` behavior remains separate and unchanged. When an archived run file is written, the ledger manifest links to it as an artifact so operators can correlate the two records.
+The existing `.rondo_archive` behavior remains separate and terminal-only. When an archived run file is written, the ledger manifest links to it as an artifact so operators can correlate the two records. Paused runs are not archived as failed; they remain visible through the paused ledger manifest and observability payloads until an explicit outcome is implemented.
 
 ## Retention and privacy
 

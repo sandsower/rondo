@@ -710,7 +710,10 @@ Important nuance:
 - After each normal turn completion, the worker runs configured deterministic `gates` before it
   re-checks the tracker issue state.
 - If a gate fails, errors, or times out, the worker exits abnormally so retry logic can preserve the
-  failure with ledger artifacts instead of relying on agent self-report.
+  failure with ledger artifacts instead of relying on agent self-report. The first gate-failed
+  attempt is retried; a repeated gate-failed retry creates a durable human interrupt, marks the run
+  ledger `paused`, and excludes the issue from redispatch until an explicit operator outcome is
+  recorded.
 - If the issue is still in an active state, the worker should start another turn using
   `claude --resume <session_id>` in the same workspace, up to `agent.max_turns`.
 - The first turn should use the full rendered task prompt.

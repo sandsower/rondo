@@ -65,6 +65,88 @@ defmodule Rondo.PresenterTest do
     assert issue_payload.running.latest_gate.status == :fail
   end
 
+  test "state and issue API payloads expose paused interrupts" do
+    snapshot = %{
+      running: [],
+      retrying: [],
+      paused: [
+        %{
+          issue_id: "issue-paused",
+          identifier: "MT-PAUSED",
+          state: "In Progress",
+          session_id: "session-paused",
+          run_id: "MT-PAUSED-20260528T100000Z-deadbeef",
+          run_dir: "/tmp/rondo/.rondo_runs/MT-PAUSED/run",
+          workspace: "/tmp/rondo/MT-PAUSED",
+          paused_at: "2026-05-28T10:00:00Z",
+          retry_attempt: 1,
+          tracker_visibility: "unknown",
+          latest_gate: %{status: :fail, results_path: "artifacts/gates/results.json", failed: [%{name: "unit", status: :fail, exit_status: 2}]},
+          interrupt: %{
+            "reason" => "repeated_gate_failure",
+            "question" => "Configured gates failed repeatedly. How should Rondo proceed?",
+            "options" => [%{"id" => "resume"}],
+            "resume" => %{"run_id" => "MT-PAUSED-20260528T100000Z-deadbeef"}
+          }
+        }
+      ],
+      archived: [],
+      claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    server_name = Module.concat(__MODULE__, :PausedSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+    assert payload.counts.paused == 1
+    assert [paused] = payload.paused
+    assert paused.issue_identifier == "MT-PAUSED"
+    assert paused.interrupt.reason == "repeated_gate_failure"
+    assert paused.latest_gate.status == :fail
+
+    assert {:ok, issue_payload} = RondoWeb.Presenter.issue_payload("MT-PAUSED", server_name, 1_000)
+    assert issue_payload.status == "paused"
+    assert issue_payload.paused.interrupt.reason == "repeated_gate_failure"
+  end
+
+  test "state API tolerates disk-reconstructed paused entries with missing or string keys" do
+    snapshot = %{
+      running: [],
+      retrying: [],
+      paused: [
+        %{
+          "issue_id" => "issue-paused",
+          "identifier" => "MT-PAUSED",
+          "state" => "In Progress",
+          "session_id" => "session-paused",
+          interrupt: %{"reason" => "repeated_gate_failure"}
+        },
+        %{
+          run_id: "missing-required-fields",
+          interrupt: %{"reason" => "repeated_gate_failure"}
+        }
+      ],
+      archived: [],
+      claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    server_name = Module.concat(__MODULE__, :PausedPartialSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+    assert [string_keyed, missing_fields] = payload.paused
+    assert string_keyed.issue_id == "issue-paused"
+    assert string_keyed.issue_identifier == "MT-PAUSED"
+    assert string_keyed.state == "In Progress"
+    assert string_keyed.session_id == "session-paused"
+    assert missing_fields.issue_id == nil
+    assert missing_fields.issue_identifier == nil
+    assert missing_fields.state == nil
+    assert missing_fields.session_id == nil
+  end
+
   test "gate payload tolerates malformed failed values" do
     snapshot = %{
       running: [

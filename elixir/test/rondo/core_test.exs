@@ -496,6 +496,47 @@ defmodule Rondo.CoreTest do
     assert_due_after_range(due_at_ms, before_down_ms, after_state_ms, 40_000)
   end
 
+  test "first gate failure after continuation retry schedules retry instead of pausing" do
+    issue_id = "issue-gate-after-continuation"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :GateAfterContinuationOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-GATE-CONTINUATION",
+      retry_attempt: 1,
+      retry_failure_reason: nil,
+      latest_gate: %{status: :fail, results_path: "artifacts/gates/turn-0001/results.json"},
+      issue: %Issue{id: issue_id, identifier: "MT-GATE-CONTINUATION", state: "In Progress"},
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    reason = {:shutdown, {:gate_failed, %{status: :fail}}}
+    send(pid, {:DOWN, ref, :process, self(), reason})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    assert state.paused_interrupts == %{}
+    assert %{attempt: 2, failure_reason: :gate_failed} = state.retry_attempts[issue_id]
+  end
+
   test "first abnormal worker exit waits before retrying" do
     issue_id = "issue-crash-initial"
     ref = make_ref()
