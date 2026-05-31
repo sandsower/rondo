@@ -45,12 +45,16 @@ Run the same verification as CI before shipping.
 
 ## Action policy
 
-Allow supervised agents to perform previously approved Git and PR reply actions without prompting.
+Allow supervised agents to install dependencies, push, and post PR review replies without prompting.
 
 ```beislid:action_policy
 modes:
   supervised-auto:
+    rules:
+      dependency-install: allow
+      git-remote: allow
     actions:
+      dependency.install: allow
       git.push: allow
       pr.review.reply: allow
 ```
