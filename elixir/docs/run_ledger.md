@@ -38,6 +38,7 @@ If `workspace.root` points at a temporary directory, ledgers are ephemeral with 
 - run status: `running`, `paused`, `completed`, `failed`, or `terminated`
 - absolute `run_dir`
 - ticket snapshot: id, identifier, title, description, state, URL, labels, and priority
+- optional `source_contract` metadata for local execution-request / approved-slice manifest runs
 - workspace root and expected workspace path
 - tracker and agent adapter names
 - agent/Claude mode settings
@@ -47,6 +48,8 @@ If `workspace.root` points at a temporary directory, ledgers are ephemeral with 
 - pending human interrupt payload when the status is `paused`
 
 Checkpoint and built-in artifact paths are relative to `run_dir`. Archive links may point at the existing archive location outside the ledger.
+
+For `run-once --manifest` runs, `source_contract` records manifest provenance and planning metadata such as `schema`, `slice_id`, absolute manifest `path`, `sha256`, `parent_contract`, `repo`, `allowed_actions`, `process_provider`, `memory_provider`, and `output_expectations`. The manifest prompt/body is rendered into the issue description snapshot; the source contract block stays metadata-focused.
 
 A paused manifest includes an `interrupt` object with a stable reason, state, exact question, options, recommendation, gate evidence, and resume seeds such as run ID/path, workspace path, session ID, run reference when available, retry attempt, and gate artifact paths. Paused runs are discovered at orchestrator startup by scanning `.rondo_runs/*/*/manifest.json` for `status: "paused"` so they remain excluded from redispatch without relying on chat/session context.
 

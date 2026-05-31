@@ -142,10 +142,106 @@ defmodule Rondo.CLITest do
     workflow_path = "tmp/run-once/WORKFLOW.md"
     expanded_path = Path.expand(workflow_path)
 
+    deps = run_once_deps(parent, expanded_path)
+
+    assert :run_once_completed = CLI.evaluate(["run-once", @ack_flag, workflow_path, "--issue", "123"], deps)
+    assert_received {:workflow_checked, ^expanded_path}
+    assert_received {:workflow_set, ^expanded_path}
+    assert_received {:run_once, "123"}
+    refute_received :started
+  end
+
+  test "run-once sets workflow and runs selected manifest without starting daemon" do
+    parent = self()
+    workflow_path = "tmp/run-once/WORKFLOW.md"
+    manifest_path = "tmp/request.json"
+    expanded_path = Path.expand(workflow_path)
+    expanded_manifest_path = Path.expand(manifest_path)
+
+    deps = run_once_deps(parent, expanded_path)
+
+    assert :run_once_completed = CLI.evaluate(["run-once", @ack_flag, workflow_path, "--manifest", manifest_path], deps)
+    assert_received {:workflow_checked, ^expanded_path}
+    assert_received {:workflow_set, ^expanded_path}
+    assert_received {:run_manifest, ^expanded_manifest_path}
+    refute_received :run_once
+    refute_received :started
+  end
+
+  test "run-once rejects both issue and manifest" do
+    deps = run_once_deps(self(), Path.expand("WORKFLOW.md"))
+
+    assert {:error, message} = CLI.evaluate(["run-once", @ack_flag, "WORKFLOW.md", "--issue", "123", "--manifest", "request.json"], deps)
+    assert message =~ "rondo run-once"
+  end
+
+  test "run-once rejects duplicate issue or manifest flags" do
+    deps = run_once_deps(self(), Path.expand("WORKFLOW.md"))
+
+    assert {:error, message} = CLI.evaluate(["run-once", @ack_flag, "WORKFLOW.md", "--issue", "123", "--issue", "456"], deps)
+    assert message =~ "rondo run-once"
+
+    assert {:error, message} = CLI.evaluate(["run-once", @ack_flag, "WORKFLOW.md", "--manifest", "one.json", "--manifest", "two.json"], deps)
+    assert message =~ "rondo run-once"
+  end
+
+  test "run-once treats blank targets as absent during validation and dispatch" do
+    parent = self()
+    workflow_path = "tmp/run-once/WORKFLOW.md"
+    expanded_path = Path.expand(workflow_path)
+    deps = run_once_deps(parent, expanded_path)
+
+    assert :run_once_completed = CLI.evaluate(["run-once", @ack_flag, workflow_path, "--issue", "123", "--manifest", ""], deps)
+    assert_received {:run_once, "123"}
+    refute_received {:run_manifest, _}
+
+    assert :run_once_completed = CLI.evaluate(["run-once", @ack_flag, workflow_path, "--issue", "", "--manifest", "request.json"], deps)
+    assert_received {:run_manifest, manifest_path}
+    assert manifest_path == Path.expand("request.json")
+  end
+
+  test "run-once requires an issue id or manifest" do
+    deps = run_once_deps(self(), Path.expand("WORKFLOW.md"))
+
+    assert {:error, message} = CLI.evaluate(["run-once", @ack_flag, "WORKFLOW.md"], deps)
+    assert message =~ "rondo run-once"
+  end
+
+  test "run-once returns workflow not found" do
     deps = %{
+      file_regular?: fn _path -> false end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:rondo]} end,
+      run_once: fn _issue_id -> :ok end,
+      run_manifest: fn _manifest_path -> :ok end
+    }
+
+    assert {:error, message} = CLI.evaluate(["run-once", @ack_flag, "WORKFLOW.md", "--issue", "123"], deps)
+    assert message =~ "Workflow file not found:"
+  end
+
+  test "run-once returns runner errors" do
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:rondo]} end,
+      run_once: fn "123" -> {:error, :boom} end,
+      run_manifest: fn _manifest_path -> :ok end
+    }
+
+    assert {:error, message} = CLI.evaluate(["run-once", @ack_flag, "WORKFLOW.md", "--issue", "123"], deps)
+    assert message =~ "run-once failed for issue 123: :boom"
+  end
+
+  defp run_once_deps(parent, expected_workflow_path) do
+    %{
       file_regular?: fn path ->
         send(parent, {:workflow_checked, path})
-        path == expanded_path
+        path == expected_workflow_path
       end,
       set_workflow_file_path: fn path ->
         send(parent, {:workflow_set, path})
@@ -160,55 +256,11 @@ defmodule Rondo.CLITest do
       run_once: fn issue_id ->
         send(parent, {:run_once, issue_id})
         :ok
+      end,
+      run_manifest: fn manifest_path ->
+        send(parent, {:run_manifest, manifest_path})
+        :ok
       end
     }
-
-    assert :run_once_completed = CLI.evaluate(["run-once", @ack_flag, workflow_path, "--issue", "123"], deps)
-    assert_received {:workflow_checked, ^expanded_path}
-    assert_received {:workflow_set, ^expanded_path}
-    assert_received {:run_once, "123"}
-    refute_received :started
-  end
-
-  test "run-once requires an issue id" do
-    deps = %{
-      file_regular?: fn _path -> true end,
-      set_workflow_file_path: fn _path -> :ok end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:rondo]} end,
-      run_once: fn _issue_id -> :ok end
-    }
-
-    assert {:error, message} = CLI.evaluate(["run-once", @ack_flag, "WORKFLOW.md"], deps)
-    assert message =~ "rondo run-once"
-  end
-
-  test "run-once returns workflow not found" do
-    deps = %{
-      file_regular?: fn _path -> false end,
-      set_workflow_file_path: fn _path -> :ok end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:rondo]} end,
-      run_once: fn _issue_id -> :ok end
-    }
-
-    assert {:error, message} = CLI.evaluate(["run-once", @ack_flag, "WORKFLOW.md", "--issue", "123"], deps)
-    assert message =~ "Workflow file not found:"
-  end
-
-  test "run-once returns runner errors" do
-    deps = %{
-      file_regular?: fn _path -> true end,
-      set_workflow_file_path: fn _path -> :ok end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      ensure_all_started: fn -> {:ok, [:rondo]} end,
-      run_once: fn "123" -> {:error, :boom} end
-    }
-
-    assert {:error, message} = CLI.evaluate(["run-once", @ack_flag, "WORKFLOW.md", "--issue", "123"], deps)
-    assert message =~ "run-once failed for issue 123: :boom"
   end
 end

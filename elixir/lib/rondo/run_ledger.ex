@@ -350,7 +350,16 @@ defmodule Rondo.RunLedger do
       "checkpoints" => [],
       "artifacts" => [%{"kind" => "agent_events", "path" => "artifacts/agent-events.ndjson"}]
     }
+    |> maybe_put_source_contract(Keyword.get(opts, :source_contract))
   end
+
+  defp maybe_put_source_contract(manifest, nil), do: manifest
+
+  defp maybe_put_source_contract(manifest, source_contract) when is_map(source_contract) do
+    Map.put(manifest, "source_contract", sanitize_value(source_contract))
+  end
+
+  defp maybe_put_source_contract(manifest, _source_contract), do: manifest
 
   defp issue_snapshot(issue) do
     %{
