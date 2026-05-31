@@ -110,6 +110,43 @@ defmodule Rondo.PresenterTest do
     assert issue_payload.paused.interrupt.reason == "repeated_gate_failure"
   end
 
+  test "state API tolerates disk-reconstructed paused entries with missing or string keys" do
+    snapshot = %{
+      running: [],
+      retrying: [],
+      paused: [
+        %{
+          "issue_id" => "issue-paused",
+          "identifier" => "MT-PAUSED",
+          "state" => "In Progress",
+          "session_id" => "session-paused",
+          interrupt: %{"reason" => "repeated_gate_failure"}
+        },
+        %{
+          run_id: "missing-required-fields",
+          interrupt: %{"reason" => "repeated_gate_failure"}
+        }
+      ],
+      archived: [],
+      claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    server_name = Module.concat(__MODULE__, :PausedPartialSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+    assert [string_keyed, missing_fields] = payload.paused
+    assert string_keyed.issue_id == "issue-paused"
+    assert string_keyed.issue_identifier == "MT-PAUSED"
+    assert string_keyed.state == "In Progress"
+    assert string_keyed.session_id == "session-paused"
+    assert missing_fields.issue_id == nil
+    assert missing_fields.issue_identifier == nil
+    assert missing_fields.state == nil
+    assert missing_fields.session_id == nil
+  end
+
   test "gate payload tolerates malformed failed values" do
     snapshot = %{
       running: [

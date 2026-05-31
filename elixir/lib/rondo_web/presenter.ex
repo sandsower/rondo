@@ -166,10 +166,10 @@ defmodule RondoWeb.Presenter do
 
   defp paused_entry_payload(entry) do
     %{
-      issue_id: entry.issue_id,
-      issue_identifier: entry.identifier,
-      state: entry.state,
-      session_id: entry.session_id,
+      issue_id: entry_value(entry, :issue_id),
+      issue_identifier: entry_value(entry, :identifier),
+      state: entry_value(entry, :state),
+      session_id: entry_value(entry, :session_id),
       run_id: Map.get(entry, :run_id),
       run_dir: Map.get(entry, :run_dir),
       workspace: Map.get(entry, :workspace),
@@ -211,6 +211,10 @@ defmodule RondoWeb.Presenter do
     paused
     |> paused_entry_payload()
     |> Map.delete(:issue_identifier)
+  end
+
+  defp entry_value(entry, key) when is_map(entry) and is_atom(key) do
+    Map.get(entry, key) || Map.get(entry, Atom.to_string(key))
   end
 
   defp interrupt_payload(nil), do: nil

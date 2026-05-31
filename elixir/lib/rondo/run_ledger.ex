@@ -76,10 +76,13 @@ defmodule Rondo.RunLedger do
       "timestamp" => timestamp
     }
 
+    manifest_update = Keyword.get(opts, :manifest_update, & &1)
+
     manifest =
       ledger.manifest
       |> Map.update("checkpoints", [checkpoint_index], &(&1 ++ [checkpoint_index]))
       |> put_in(["timestamps", "updated_at"], timestamp)
+      |> manifest_update.()
 
     with :ok <- write_json_file(checkpoint_path, checkpoint),
          :ok <- write_json_file(ledger.manifest_path, manifest) do
@@ -140,23 +143,24 @@ defmodule Rondo.RunLedger do
   @spec pause_run(t(), map(), keyword()) :: {:ok, t()} | {:error, term()}
   def pause_run(%__MODULE__{} = ledger, interrupt, opts \\ []) when is_map(interrupt) do
     timestamp = Keyword.get(opts, :timestamp, DateTime.utc_now())
-    checkpoint_opts = opts |> Keyword.put(:timestamp, timestamp) |> Keyword.put_new(:source, %{interrupt: "human"})
+    iso_timestamp = datetime_to_iso(timestamp)
+    sanitized_interrupt = sanitize_value(interrupt)
 
-    with {:ok, ledger} <- write_checkpoint(ledger, :interrupt_created, interrupt, checkpoint_opts) do
-      iso_timestamp = datetime_to_iso(timestamp)
-      sanitized_interrupt = sanitize_value(interrupt)
-
-      manifest =
-        ledger.manifest
-        |> Map.put("status", "paused")
-        |> Map.put("interrupt", sanitized_interrupt)
-        |> put_in(["timestamps", "updated_at"], iso_timestamp)
-        |> put_in(["timestamps", "paused_at"], iso_timestamp)
-
-      with :ok <- write_json_file(ledger.manifest_path, manifest) do
-        {:ok, %{ledger | manifest: manifest}}
-      end
+    manifest_update = fn manifest ->
+      manifest
+      |> Map.put("status", "paused")
+      |> Map.put("interrupt", sanitized_interrupt)
+      |> put_in(["timestamps", "updated_at"], iso_timestamp)
+      |> put_in(["timestamps", "paused_at"], iso_timestamp)
     end
+
+    checkpoint_opts =
+      opts
+      |> Keyword.put(:timestamp, timestamp)
+      |> Keyword.put(:manifest_update, manifest_update)
+      |> Keyword.put_new(:source, %{interrupt: "human"})
+
+    write_checkpoint(ledger, :interrupt_created, interrupt, checkpoint_opts)
   end
 
   @spec complete_run(t(), String.t() | atom(), map(), keyword()) :: {:ok, t()} | {:error, term()}
