@@ -35,6 +35,38 @@ defmodule Rondo.GatesTest do
     assert [%{"name" => "unit", "status" => "pass"}] = results_json["results"]
   end
 
+  test "persists provider gate selection explanations with results" do
+    test_root = tmp_dir("gates-selection")
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-SELECTION")
+    run_dir = Path.join(workspace_root, ".rondo_runs/MT-SELECTION/run-1")
+
+    File.mkdir_p!(workspace)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    on_exit(fn -> File.rm_rf(test_root) end)
+
+    gate_selection = %{
+      selected: [%{name: "unit", reason: "matched stage verify"}],
+      skipped: [%{name: "slow", reason: "not required for this stage"}],
+      warnings: [%{message: "selector unavailable; used fallback"}],
+      metadata: %{provider: "native", stage: "verify"}
+    }
+
+    assert {:ok, summary} =
+             Gates.run([%{name: "unit", command: "true", timeout_ms: 1_000}], workspace,
+               run_dir: run_dir,
+               gate_selection: gate_selection
+             )
+
+    assert summary.gate_selection == gate_selection
+
+    results_json = run_dir |> Path.join("artifacts/gates/results.json") |> File.read!() |> Jason.decode!()
+    assert results_json["gate_selection"]["selected"] == [%{"name" => "unit", "reason" => "matched stage verify"}]
+    assert results_json["gate_selection"]["skipped"] == [%{"name" => "slow", "reason" => "not required for this stage"}]
+    assert results_json["gate_selection"]["warnings"] == [%{"message" => "selector unavailable; used fallback"}]
+    assert results_json["gate_selection"]["metadata"] == %{"provider" => "native", "stage" => "verify"}
+  end
+
   test "classifies non-zero exits as gate failures" do
     test_root = tmp_dir("gates-fail")
     on_exit(fn -> File.rm_rf(test_root) end)

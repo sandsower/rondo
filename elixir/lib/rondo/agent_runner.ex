@@ -8,6 +8,7 @@ defmodule Rondo.AgentRunner do
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.PiAdapter
   alias Rondo.{Config, Gates, Linear.Issue, ProcessProvider, Tracker, Workspace}
+  alias Rondo.ProcessProvider.Native
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, claude_update_recipient \\ nil, opts \\ []) do
@@ -111,7 +112,7 @@ defmodule Rondo.AgentRunner do
         adapter: adapter,
         process_provider: provider,
         max_turns: Keyword.get(opts, :max_turns, Config.agent_max_turns()),
-        gates: Keyword.get_lazy(opts, :gates, fn -> ProcessProvider.select_gates!(provider) end),
+        gates: Keyword.get(opts, :gates),
         run_dir: Keyword.get(opts, :run_dir)
       }
 
@@ -182,14 +183,25 @@ defmodule Rondo.AgentRunner do
 
   defp run_gates(%{gates: []}, _issue, _turn_number), do: :ok
 
-  defp run_gates(%{run_dir: nil}, _issue, _turn_number), do: {:error, :missing_run_ledger_for_gates}
-
   defp run_gates(context, issue, turn_number) do
-    case Gates.run(context.gates, context.workspace,
+    with {:ok, gate_selection} <- select_gate_selection(context, issue, turn_number) do
+      run_selected_gates(context, issue, turn_number, gate_selection)
+    end
+  end
+
+  defp run_selected_gates(%{run_dir: nil}, _issue, _turn_number, %{gates: []}), do: :ok
+
+  defp run_selected_gates(%{run_dir: nil}, _issue, _turn_number, _gate_selection), do: {:error, :missing_run_ledger_for_gates}
+
+  defp run_selected_gates(context, issue, turn_number, gate_selection) do
+    action_policy_provider = Map.get(gate_selection, :action_policy_provider, context.process_provider)
+
+    case Gates.run(gate_selection.gates, context.workspace,
            run_dir: context.run_dir,
            execution_id: gate_execution_id(turn_number),
+           gate_selection: Map.drop(gate_selection, [:gates, :action_policy_provider]),
            action_policy: true,
-           action_policy_evaluator: ProcessProvider.action_policy_evaluator(context.process_provider)
+           action_policy_evaluator: ProcessProvider.action_policy_evaluator(action_policy_provider)
          ) do
       {:ok, summary} ->
         send_gate_update(context.claude_update_recipient, issue, summary)
@@ -202,6 +214,59 @@ defmodule Rondo.AgentRunner do
       {:error, reason} ->
         {:error, {:gate_error, reason}}
     end
+  end
+
+  defp select_gate_selection(%{gates: gates}, _issue, _turn_number) when is_list(gates) do
+    {:ok, gates |> ProcessProvider.gate_selection_result() |> Map.put(:action_policy_provider, Native)}
+  end
+
+  defp select_gate_selection(context, issue, turn_number) do
+    opts = gate_selection_opts(context, issue, turn_number)
+
+    case ProcessProvider.select_gate_selection(context.process_provider, opts) do
+      {:ok, selection} ->
+        {:ok, Map.put(selection, :action_policy_provider, context.process_provider)}
+
+      {:error, reason} ->
+        handle_gate_selection_failure(context.process_provider, reason, opts)
+    end
+  end
+
+  defp gate_selection_opts(context, issue, turn_number) do
+    [
+      issue: issue,
+      workspace: context.workspace,
+      run_dir: context.run_dir,
+      stage: :post_turn,
+      turn_number: turn_number
+    ]
+  end
+
+  defp handle_gate_selection_failure(Native, reason, _opts), do: {:error, {:process_provider_gate_selection_failed, reason}}
+
+  defp handle_gate_selection_failure(provider, reason, opts) do
+    if Config.process_provider_required?() do
+      {:error, {:process_provider_gate_selection_failed, reason}}
+    else
+      provider_id = provider_id(provider)
+      Logger.warning("Process provider gate selection failed provider=#{provider_id} reason=#{inspect(reason)}; falling back to native gates")
+
+      with {:ok, selection} <- ProcessProvider.select_gate_selection(Native, opts) do
+        {:ok, selection |> annotate_native_fallback(provider_id, reason) |> Map.put(:action_policy_provider, Native)}
+      end
+    end
+  end
+
+  defp annotate_native_fallback(selection, provider_id, reason) do
+    warning = %{message: "provider #{provider_id} gate selection failed: #{inspect(reason)}; fell back to native gates"}
+
+    selection
+    |> Map.update!(:warnings, &[warning | &1])
+    |> Map.update!(:metadata, &Map.merge(&1, %{fallback_from: provider_id, fallback_reason: inspect(reason)}))
+  end
+
+  defp provider_id(provider) do
+    if function_exported?(provider, :id, 0), do: provider.id(), else: inspect(provider)
   end
 
   defp gate_execution_id(turn_number) when is_integer(turn_number) and turn_number > 0 do

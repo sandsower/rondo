@@ -8,6 +8,12 @@ defmodule Rondo.ProcessProviderTest do
     def select_gates(_opts), do: {:error, :provider_unavailable}
   end
 
+  defmodule LegacyListProvider do
+    def select_gates(_opts) do
+      {:ok, [%{name: "legacy", command: "mix test", timeout_ms: 1_000, action_classes: ["read"]}]}
+    end
+  end
+
   test "native provider exposes current workflow gates and unsupported rich features" do
     write_workflow_file!(Workflow.workflow_file_path(),
       gates: [%{name: "unit", command: "mix test", timeout_ms: 120_000}],
@@ -19,8 +25,15 @@ defmodule Rondo.ProcessProviderTest do
     assert Native.capabilities().gate_selection == "native_flat_gates"
     assert Native.capabilities().guide_selection == "unsupported"
 
-    assert {:ok, [%{name: "unit", command: "mix test", timeout_ms: 120_000, action_classes: ["read"]}]} =
-             Native.select_gates()
+    assert {:ok,
+            %{
+              gates: [%{name: "unit", command: "mix test", timeout_ms: 120_000, action_classes: ["read"]}],
+              selected: [%{name: "unit", reason: reason}],
+              skipped: [],
+              warnings: []
+            }} = Native.select_gates()
+
+    assert reason =~ "WORKFLOW.md"
 
     assert {:ok, []} = Native.select_guides()
     assert {:ok, []} = Native.proof_requirements()
@@ -62,8 +75,19 @@ defmodule Rondo.ProcessProviderTest do
     assert ProcessProvider.provider_module(__MODULE__) == __MODULE__
   end
 
-  test "provider facade helpers expose defaults and errors" do
+  test "provider facade helpers expose defaults, normalized selections, and errors" do
     assert ProcessProvider.probe_result(:ok) == %{status: :ok, checks: %{}}
+
+    assert {:ok,
+            %{
+              gates: [%{name: "legacy"}],
+              selected: [%{name: "legacy", reason: "selected by process provider"}],
+              skipped: [],
+              warnings: []
+            }} = ProcessProvider.select_gate_selection(LegacyListProvider)
+
+    assert [%{name: "legacy"}] = ProcessProvider.select_gates!(LegacyListProvider)
+    assert %{gates: []} = ProcessProvider.select_gate_selection!()
 
     assert_raise RuntimeError, ~r/process_provider_gate_selection_failed: :provider_unavailable/, fn ->
       ProcessProvider.select_gates!(ErrorProvider)

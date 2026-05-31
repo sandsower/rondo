@@ -416,10 +416,12 @@ Each entry contains:
   - Beislið action classes for policy evaluation.
   - Defaults to `["read"]` for legacy flat sensor gates.
 
-Gate stdout/stderr and a structured `results.json` are persisted under the run ledger. Any gate
-failure, error, or timeout makes the current run attempt fail/retry; gate evidence must not rely on
-agent transcript self-report. This flat shape is intentionally compatible with simple external
-workflow gate definitions while keeping `WORKFLOW.md` as Rondo's runtime source of truth.
+Gate stdout/stderr and a structured `results.json` are persisted under the run ledger. `results.json`
+also includes the ProcessProvider gate-selection envelope for the turn when available, including
+selected/skipped explanations, warnings, and provider metadata. Any gate failure, error, or timeout
+makes the current run attempt fail/retry; gate evidence must not rely on agent transcript self-report.
+This flat shape is intentionally compatible with simple external workflow gate definitions while
+keeping `WORKFLOW.md` as Rondo's runtime source of truth.
 
 #### 5.3.6 `process_provider` (object)
 
@@ -429,15 +431,21 @@ Fields:
   - Default: `native`.
   - P0 supports `native` only. Invalid provider kinds fail workflow validation instead of silently
     falling back.
+- `required` (boolean)
+  - Default: `false`.
+  - When `true`, provider gate-selection failures stop the run clearly. When `false`, Rondo may warn
+    and fall back to native flat gates for optional provider failures.
 
 The process provider is the boundary for process/work-contract inputs: gate selection, guide
 selection, action-policy evaluation, model-routing hints, proof requirement resolution, and
-capability/probe metadata. The native provider preserves Rondo's existing standalone `WORKFLOW.md`
-behavior: flat gates come from top-level `gates`, prompts come from the Markdown body, action-policy
-evaluation delegates to the configured Beislið evaluator, model hints come from adapter config, and
-richer provider features degrade to unsupported/empty results unless a future provider marks them
-required. Rondo owns execution, proof artifacts, and run state; external systems such as Beislið own
-richer work-contract semantics when a future provider is added.
+capability/probe metadata. Gate selection returns an envelope containing the runnable gates plus
+selected/skipped explanations, warnings, and provider metadata; Rondo persists that envelope with gate
+artifacts. The native provider preserves Rondo's existing standalone `WORKFLOW.md` behavior: flat gates
+come from top-level `gates`, prompts come from the Markdown body, action-policy evaluation delegates
+to the configured Beislið evaluator, model hints come from adapter config, and richer provider
+features degrade to unsupported/empty results unless a future provider marks them required. Rondo owns
+execution, proof artifacts, and run state; external systems such as Beislið own richer work-contract
+semantics when a future provider is added.
 
 #### 5.3.7 `agent` (object)
 
