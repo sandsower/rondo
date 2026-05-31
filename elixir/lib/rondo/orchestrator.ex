@@ -780,7 +780,7 @@ defmodule Rondo.Orchestrator do
     ledger = write_run_ledger_checkpoint(ledger, :dispatch, dispatch_payload)
 
     case Task.Supervisor.start_child(Rondo.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, run_dir: run_ledger_dir(ledger))
+           AgentRunner.run(issue, recipient, attempt: normalize_retry_attempt(attempt), run_dir: run_ledger_dir(ledger))
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
