@@ -92,9 +92,38 @@ defmodule Rondo.RunOnceTest do
                deps: deps(issue("issue-todo", state: "Todo"), parent)
              )
 
+    assert_received {:action_policy_evaluate, "tracker.issue.transition", ["git-remote"]}
     assert_received {:update_issue_state, "issue-todo", "In Progress"}
     assert_received {:agent_run, %Issue{id: "issue-todo", state: "In Progress"}, agent_opts}
     assert_run_dir_option(agent_opts)
+  end
+
+  test "blocks Todo transitions when action policy asks for guidance" do
+    parent = self()
+
+    assert {:error, {:action_policy_guidance_required, interrupt}} =
+             RunOnce.run("issue-todo",
+               deps: deps(issue("issue-todo", state: "Todo"), parent, policy_decision: "ask")
+             )
+
+    assert interrupt["reason"] == "action_policy_guidance_required"
+    assert interrupt["blocked_side_effect"]["action"] == "tracker.issue.transition"
+    assert interrupt["blocked_side_effect"]["resume_safe"] == true
+    assert interrupt["suggested_responses"] |> Enum.any?(&(&1["id"] == "approve_once"))
+    refute_received {:update_issue_state, _, _}
+    refute_received {:agent_run, _, _}
+  end
+
+  test "blocks Todo transitions when action policy denies" do
+    parent = self()
+
+    assert {:error, {:action_policy_denied, %{"decision" => "deny"}}} =
+             RunOnce.run("issue-todo",
+               deps: deps(issue("issue-todo", state: "Todo"), parent, policy_decision: "deny")
+             )
+
+    refute_received {:update_issue_state, _, _}
+    refute_received {:agent_run, _, _}
   end
 
   test "returns clear error when Todo transition fails" do
@@ -315,6 +344,7 @@ defmodule Rondo.RunOnceTest do
   defp deps(fetch_result, parent, opts \\ []) do
     update_result = Keyword.get(opts, :update_result, :ok)
     agent_runner = Keyword.get(opts, :agent_runner, :ok)
+    policy_decision = Keyword.get(opts, :policy_decision, "allow")
 
     %{
       fetch_issue_states_by_ids: fn issue_ids ->
@@ -324,6 +354,21 @@ defmodule Rondo.RunOnceTest do
       update_issue_state: fn issue_id, state_name ->
         send(parent, {:update_issue_state, issue_id, state_name})
         update_result
+      end,
+      action_policy_evaluator: fn action, classes, _opts ->
+        send(parent, {:action_policy_evaluate, action, classes})
+
+        {:ok,
+         %{
+           "decision" => policy_decision,
+           "action" => action,
+           "classes" => classes,
+           "mode" => "supervised-auto",
+           "log_level" => if(policy_decision == "deny", do: "error", else: "warning"),
+           "requires_human" => policy_decision == "ask",
+           "reason" => "test #{policy_decision}",
+           "matched_rules" => []
+         }}
       end,
       agent_runner: fn issue, agent_opts ->
         send(parent, {:agent_run, issue, agent_opts})

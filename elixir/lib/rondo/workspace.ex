@@ -6,6 +6,7 @@ defmodule Rondo.Workspace do
   require Logger
   alias Rondo.Config
   alias Rondo.PathSafety
+  alias Rondo.SideEffectPolicy
 
   @excluded_entries MapSet.new([".elixir_ls", "tmp"])
 
@@ -172,25 +173,58 @@ defmodule Rondo.Workspace do
     timeout_ms = Config.workspace_hooks()[:timeout_ms]
     command = interpolate_hook_command(command, workspace, issue_context)
 
-    Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace}")
+    with :ok <- authorize_hook(workspace, issue_context, hook_name) do
+      Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace}")
 
-    task =
-      Task.async(fn ->
-        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
-      end)
+      task =
+        Task.async(fn ->
+          System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
+        end)
 
-    case Task.yield(task, timeout_ms) do
-      {:ok, cmd_result} ->
-        handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
+      case Task.yield(task, timeout_ms) do
+        {:ok, cmd_result} ->
+          handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
 
-      nil ->
-        Task.shutdown(task, :brutal_kill)
+        nil ->
+          Task.shutdown(task, :brutal_kill)
 
-        Logger.warning("Workspace hook timed out hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} timeout_ms=#{timeout_ms}")
+          Logger.warning("Workspace hook timed out hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} timeout_ms=#{timeout_ms}")
 
-        {:error, {:workspace_hook_timeout, hook_name, timeout_ms}}
+          {:error, {:workspace_hook_timeout, hook_name, timeout_ms}}
+      end
     end
   end
+
+  defp authorize_hook(workspace, issue_context, hook_name) do
+    side_effect = %{
+      action: "workspace.hook.#{hook_name}",
+      classes: ["workspace-write"],
+      label: "Workspace #{hook_name} hook",
+      operation: "Run configured #{hook_name} workspace hook",
+      required: hook_required?(hook_name),
+      resume_safe: false,
+      skip_behavior: hook_skip_behavior(hook_name),
+      side_effect_id: "workspace-hook:#{hook_name}:#{issue_context.issue_identifier}"
+    }
+
+    case SideEffectPolicy.evaluate(side_effect, workspace: workspace) do
+      {:ok, _decision} ->
+        :ok
+
+      {:blocked, %{block_reason: :action_policy_requires_guidance, interrupt: interrupt}} ->
+        {:error, {:action_policy_guidance_required, interrupt}}
+
+      {:blocked, %{block_reason: :action_policy_denied, envelope: envelope}} ->
+        {:error, {:action_policy_denied, envelope}}
+
+      {:blocked, %{block_reason: {:action_policy_failed, reason}}} ->
+        {:error, {:action_policy_failed, reason}}
+    end
+  end
+
+  defp hook_required?(hook_name), do: hook_name in ["after_create", "before_run"]
+  defp hook_skip_behavior(hook_name) when hook_name in ["after_run", "before_remove"], do: "continue"
+  defp hook_skip_behavior(_hook_name), do: "abort"
 
   defp handle_hook_command_result({_output, 0}, _workspace, _issue_id, _hook_name) do
     :ok

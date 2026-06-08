@@ -110,6 +110,60 @@ defmodule Rondo.PresenterTest do
     assert issue_payload.paused.interrupt.reason == "repeated_gate_failure"
   end
 
+  test "state API exposes action-policy guidance as first-class needs guidance entries" do
+    interrupt = %{
+      "reason" => "action_policy_guidance_required",
+      "guidance_severity" => "warning",
+      "question" => "Rondo needs operator guidance before continuing.",
+      "blocked_side_effect" => %{"action" => "tracker.issue.transition", "label" => "Tracker update"},
+      "policy" => %{"decision" => "ask", "reason" => "tracker write"},
+      "suggested_responses" => [%{"id" => "approve_once", "quick" => true}],
+      "upcoming_transitions" => %{"approve_once" => "Rondo will execute the tracker transition once."},
+      "resume" => %{"side_effect_id" => "tracker-transition:issue-58"}
+    }
+
+    snapshot = %{
+      running: [],
+      retrying: [],
+      paused: [
+        %{
+          issue_id: "issue-guidance",
+          identifier: "MT-GUIDANCE",
+          state: "Todo",
+          session_id: "session-guidance",
+          run_id: "run-guidance",
+          run_dir: "/tmp/rondo/.rondo_runs/MT-GUIDANCE/run",
+          workspace: "/tmp/rondo/MT-GUIDANCE",
+          paused_at: "2026-05-28T10:00:00Z",
+          retry_attempt: 1,
+          interrupt: interrupt,
+          event_log: [
+            %{at: ~U[2026-05-28 09:59:00Z], event: :assistant, message: "Turn 1 complete"}
+          ]
+        }
+      ],
+      archived: [],
+      claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    server_name = Module.concat(__MODULE__, :NeedsGuidanceSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+    assert payload.counts.needs_guidance == 1
+    assert [guidance] = payload.needs_guidance
+    assert guidance.issue_identifier == "MT-GUIDANCE"
+    assert guidance.guidance_severity == "warning"
+    assert guidance.blocked_side_effect.label == "Tracker update"
+    assert [%{id: "approve_once", quick: true}] = guidance.suggested_responses
+    assert [%{message: "Turn 1 complete"}] = guidance.event_log
+
+    assert {:ok, issue_payload} = RondoWeb.Presenter.issue_payload("MT-GUIDANCE", server_name, 1_000)
+    assert issue_payload.paused.interrupt.guidance_severity == "warning"
+    assert issue_payload.paused.interrupt.blocked_side_effect.label == "Tracker update"
+  end
+
   test "state API tolerates disk-reconstructed paused entries with missing or string keys" do
     snapshot = %{
       running: [],

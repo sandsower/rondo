@@ -25,6 +25,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_after_create: "git clone --depth 1 #{template_repo} ."
       )
 
@@ -63,6 +64,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_after_create: "echo first > README.md"
       )
 
@@ -166,6 +168,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_after_create: "echo nope && exit 17"
       )
 
@@ -186,12 +189,38 @@ defmodule Rondo.WorkspaceAndConfigTest do
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_timeout_ms: 10,
         hook_after_create: "sleep 1"
       )
 
       assert {:error, {:workspace_hook_timeout, "after_create", 10}} =
                Workspace.create_for_issue("MT-TIMEOUT")
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace hooks stop before execution when action policy asks for guidance" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-workspace-hook-policy-ask-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("ask"),
+        hook_after_create: "touch should-not-run"
+      )
+
+      assert {:error, {:action_policy_guidance_required, interrupt}} = Workspace.create_for_issue("MT-POLICY-ASK")
+      assert interrupt["reason"] == "action_policy_guidance_required"
+      assert interrupt["blocked_side_effect"]["action"] == "workspace.hook.after_create"
+      assert interrupt["blocked_side_effect"]["resume_safe"] == false
+      refute Enum.any?(interrupt["suggested_responses"], &(&1["id"] == "approve_once"))
+      refute File.exists?(Path.join([workspace_root, "MT-POLICY-ASK", "should-not-run"]))
     after
       File.rm_rf(workspace_root)
     end
@@ -532,6 +561,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_after_create: "echo after_create > after_create.log\necho call >> \"#{after_create_counter}\"",
         hook_before_remove: "echo before_remove > \"#{before_remove_marker}\""
       )
@@ -567,6 +597,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_before_remove: "echo failure && exit 17"
       )
 
@@ -592,6 +623,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_before_remove: "i=0; while [ $i -lt 3000 ]; do printf a; i=$((i+1)); done; exit 17"
       )
 
@@ -629,6 +661,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_before_remove: "sleep 1"
       )
 
@@ -1036,6 +1069,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_after_create: ~s(echo "ws={{ workspace.path }} id={{ issue.identifier }}" > marker.txt)
       )
 
@@ -1062,6 +1096,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_before_run: ~s(echo "ws={{ workspace.path }} id={{ issue.identifier }}" > before_run.txt)
       )
 
@@ -1075,6 +1110,31 @@ defmodule Rondo.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp fake_action_policy(decision) do
+    dir = Path.join(System.tmp_dir!(), "rondo-fake-action-policy-dir-#{System.unique_integer([:positive, :monotonic])}")
+    path = Path.join(dir, "beislid-fake")
+    File.mkdir_p!(dir)
+
+    File.write!(path, """
+    #!/bin/sh
+    action=""
+    mode=""
+    classes=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --action) action="$2"; shift 2 ;;
+        --mode) mode="$2"; shift 2 ;;
+        --class) classes="$classes${classes:+,}$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '{"decision":"#{decision}","action":"%s","mode":"%s","classes":["%s"],"log_level":"warning","requires_human":true,"reason":"test #{decision}","matched_rules":[]}' "$action" "$mode" "$classes"
+    """)
+
+    File.chmod!(path, 0o755)
+    path
   end
 
   defp expected_canonical_path(path) do

@@ -5,12 +5,13 @@ defmodule Rondo.RunOnce do
 
   require Logger
 
-  alias Rondo.{AgentRunner, Config, ExecutionRequest, Linear.Issue, RunLedger, Tracker}
+  alias Rondo.{AgentRunner, Config, ExecutionRequest, Linear.Issue, RunLedger, SideEffectPolicy, Tracker}
 
   @type run_result :: :ok | {:error, term()}
   @type deps :: %{
           fetch_issue_states_by_ids: ([String.t()] -> {:ok, [Issue.t()]} | {:error, term()}),
           update_issue_state: (String.t(), String.t() -> :ok | {:error, term()}),
+          action_policy_evaluator: (String.t(), [String.t()], keyword() -> {:ok, map()} | {:error, term()}),
           agent_runner: (Issue.t(), keyword() -> run_result() | no_return())
         }
 
@@ -57,6 +58,7 @@ defmodule Rondo.RunOnce do
     %{
       fetch_issue_states_by_ids: &Tracker.fetch_issue_states_by_ids/1,
       update_issue_state: &Tracker.update_issue_state/2,
+      action_policy_evaluator: &Rondo.ActionPolicy.evaluate/3,
       agent_runner: fn issue, agent_opts -> AgentRunner.run(issue, self(), agent_opts) end
     }
   end
@@ -108,16 +110,68 @@ defmodule Rondo.RunOnce do
   @spec maybe_transition_to_in_progress(Issue.t(), deps()) :: {:ok, Issue.t()} | {:error, term()}
   defp maybe_transition_to_in_progress(%Issue{state: state} = issue, deps) do
     if normalize_state(state) == "todo" do
-      case deps.update_issue_state.(issue.id, "In Progress") do
-        :ok ->
-          Logger.info("Transitioned #{issue_context(issue)} to In Progress for run-once")
-          {:ok, %{issue | state: "In Progress"}}
-
-        {:error, reason} ->
-          {:error, {:issue_transition_failed, issue_context(issue), reason}}
-      end
+      transition_todo_issue_to_in_progress(issue, deps)
     else
       {:ok, issue}
+    end
+  end
+
+  defp transition_todo_issue_to_in_progress(issue, deps) do
+    with :ok <- authorize_tracker_transition(issue, deps) do
+      update_issue_to_in_progress(issue, deps)
+    end
+  end
+
+  defp update_issue_to_in_progress(issue, deps) do
+    case deps.update_issue_state.(issue.id, "In Progress") do
+      :ok ->
+        Logger.info("Transitioned #{issue_context(issue)} to In Progress for run-once")
+        {:ok, %{issue | state: "In Progress"}}
+
+      {:error, reason} ->
+        {:error, {:issue_transition_failed, issue_context(issue), reason}}
+    end
+  end
+
+  @spec authorize_tracker_transition(Issue.t(), deps()) :: :ok | {:error, term()}
+  defp authorize_tracker_transition(%Issue{} = issue, deps) do
+    side_effect = %{
+      action: tracker_transition_action(),
+      classes: tracker_write_classes(),
+      label: "Tracker update",
+      operation: "Change issue #{issue.identifier || issue.id} from Todo to In Progress",
+      required: true,
+      resume_safe: true,
+      skip_behavior: "block",
+      side_effect_id: "tracker-transition:#{issue.id}:in-progress"
+    }
+
+    case SideEffectPolicy.evaluate(side_effect, evaluator: deps.action_policy_evaluator) do
+      {:ok, _decision} ->
+        :ok
+
+      {:blocked, %{block_reason: :action_policy_requires_guidance, interrupt: interrupt}} ->
+        {:error, {:action_policy_guidance_required, interrupt}}
+
+      {:blocked, %{block_reason: :action_policy_denied, envelope: envelope}} ->
+        {:error, {:action_policy_denied, envelope}}
+
+      {:blocked, %{block_reason: {:action_policy_failed, reason}}} ->
+        {:error, {:action_policy_failed, reason}}
+    end
+  end
+
+  defp tracker_transition_action do
+    case Config.tracker_kind() do
+      "memory" -> "file.read"
+      _ -> "tracker.issue.transition"
+    end
+  end
+
+  defp tracker_write_classes do
+    case Config.tracker_kind() do
+      "memory" -> ["read"]
+      _ -> ["git-remote"]
     end
   end
 

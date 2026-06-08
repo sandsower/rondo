@@ -2398,6 +2398,87 @@ defmodule Rondo.OrchestratorStatusTest do
     assert_receive {:memory_tracker_state_update, "issue-todo-transition", "In Progress"}, 10_000
   end
 
+  test "dispatch pauses as needs guidance when tracker transition policy asks" do
+    workspace_root = tmp_dir("orchestrator-transition-policy-ask")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: fake_claude_script(workspace_root, "transition-policy-ask-session", 0),
+      action_policy_command: fake_action_policy_script(workspace_root, "ask")
+    )
+
+    issue = %Issue{
+      id: "issue-transition-ask",
+      identifier: "MT-POLICY-ASK",
+      title: "Transition ask test",
+      description: "Should pause before transition",
+      state: "Todo",
+      url: "https://example.org/issues/MT-POLICY-ASK"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+    Application.put_env(:rondo, :memory_tracker_recipient, self())
+
+    orchestrator_name = Module.concat(__MODULE__, :TransitionPolicyAskOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_recipient)
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    state = :sys.get_state(pid)
+    state = %{state | max_concurrent_agents: 1, poll_interval_ms: 60_000}
+    :sys.replace_state(pid, fn _ -> state end)
+
+    send(pid, {:tick, state.tick_token})
+
+    paused_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).paused do
+          [entry | _] -> entry
+          _ -> nil
+        end
+      end)
+
+    assert paused_entry.issue_id == "issue-transition-ask"
+    assert paused_entry.interrupt["reason"] == "action_policy_guidance_required"
+    assert paused_entry.interrupt["blocked_side_effect"]["label"] == "Tracker update"
+    assert paused_entry.interrupt["suggested_responses"] |> Enum.any?(&(&1["id"] == "approve_once"))
+
+    manifest = paused_entry.run_dir |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "action_policy_decision"))
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "interrupt_created"))
+
+    refute_receive {:memory_tracker_state_update, "issue-transition-ask", "In Progress"}, 100
+    assert GenServer.call(pid, :snapshot).running == []
+    File.mkdir_p!(Path.join(workspace_root, "MT-POLICY-ASK"))
+
+    assert {:ok, %{status: :resumed}} = Orchestrator.submit_guidance(orchestrator_name, "issue-transition-ask", "approve_once")
+    assert_receive {:memory_tracker_state_update, "issue-transition-ask", "In Progress"}, 10_000
+
+    running_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).running do
+          [entry | _] -> entry
+          _ -> nil
+        end
+      end)
+
+    assert running_entry.issue_id == "issue-transition-ask"
+    assert GenServer.call(pid, :snapshot).paused == []
+
+    wait_until(fn ->
+      case GenServer.call(pid, :snapshot).running do
+        [] -> true
+        _ -> nil
+      end
+    end)
+  end
+
   test "completed agent runs appear in snapshot archived list" do
     issue_id = "issue-archive-test"
 
@@ -2495,6 +2576,27 @@ defmodule Rondo.OrchestratorStatusTest do
     path = Path.join(System.tmp_dir!(), "rondo-#{name}-#{System.unique_integer([:positive])}")
     File.rm_rf!(path)
     File.mkdir_p!(path)
+    path
+  end
+
+  defp fake_action_policy_script(root, decision) do
+    path = Path.join(root, "fake-action-policy.sh")
+
+    File.write!(path, """
+    #!/bin/sh
+    action=""
+    classes=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --action) action="$2"; shift 2 ;;
+        --class) classes="$classes${classes:+,}$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '{"decision":"#{decision}","action":"%s","classes":["%s"],"mode":"unattended-auto","log_level":"warning","requires_human":true,"reason":"test #{decision}","matched_rules":[]}' "$action" "$classes"
+    """)
+
+    File.chmod!(path, 0o755)
     path
   end
 

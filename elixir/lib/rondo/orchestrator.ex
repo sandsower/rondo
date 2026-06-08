@@ -7,7 +7,7 @@ defmodule Rondo.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias Rondo.{AgentRunner, Config, Interrupt, RunLedger, StatusDashboard, Tracker, Workspace}
+  alias Rondo.{AgentRunner, Config, Interrupt, RunLedger, SideEffectPolicy, StatusDashboard, Tracker, Workspace}
   alias Rondo.Linear.Issue
 
   @timeseries_sample_interval_ms 10_000
@@ -779,6 +779,27 @@ defmodule Rondo.Orchestrator do
     {ledger, dispatch_payload} = create_run_ledger(issue, attempt)
     ledger = write_run_ledger_checkpoint(ledger, :dispatch, dispatch_payload)
 
+    case transition_issue_to_in_progress(issue, ledger) do
+      {:ok, issue, ledger} ->
+        start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger)
+
+      {:paused, interrupt, ledger} ->
+        pause_action_policy_guidance(state, issue, interrupt, ledger)
+
+      {:blocked, reason, ledger} ->
+        ledger = complete_run_ledger(ledger, :failed, %{phase: "action_policy", reason: inspect(reason)})
+        _ledger = ledger
+
+        Logger.warning("Skipping dispatch; action policy blocked #{issue_context(issue)} reason=#{inspect(reason)}")
+
+        schedule_issue_retry(state, issue.id, nil, %{
+          identifier: issue.identifier,
+          error: "action policy blocked dispatch: #{inspect(reason)}"
+        })
+    end
+  end
+
+  defp start_agent_for_issue(%State{} = state, issue, attempt, attempt_metadata, recipient, ledger) do
     case Task.Supervisor.start_child(Rondo.TaskSupervisor, fn ->
            AgentRunner.run(issue, recipient, attempt: normalize_retry_attempt(attempt), run_dir: run_ledger_dir(ledger))
          end) do
@@ -792,8 +813,6 @@ defmodule Rondo.Orchestrator do
           })
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)}")
-
-        transition_issue_to_in_progress(issue)
 
         running =
           Map.put(state.running, issue.id, %{
@@ -974,6 +993,23 @@ defmodule Rondo.Orchestrator do
   defp failed_gate?(%{status: _status}), do: true
   defp failed_gate?(_gate), do: false
 
+  defp pause_action_policy_guidance(%State{} = state, %Issue{} = issue, interrupt, ledger) when is_map(interrupt) do
+    ledger = pause_run_ledger(ledger, interrupt, nil)
+    paused_entry = paused_entry_from_issue(issue, interrupt, ledger)
+
+    Logger.warning(
+      "Paused run for action-policy guidance #{issue_context(issue)} " <>
+        "run_dir=#{Map.get(paused_entry, :run_dir) || "n/a"} question=#{interrupt["question"]}"
+    )
+
+    %{
+      state
+      | paused_interrupts: Map.put(state.paused_interrupts, issue.id, paused_entry),
+        claimed: MapSet.put(state.claimed, issue.id),
+        retry_attempts: Map.delete(state.retry_attempts, issue.id)
+    }
+  end
+
   defp pause_running_entry(state, issue_id, running_entry, _reason) do
     interrupt = Interrupt.repeated_gate_failure(interrupt_context(running_entry))
     ledger = pause_run_ledger(Map.get(running_entry, :ledger), interrupt, Map.get(running_entry, :session_id))
@@ -1025,6 +1061,76 @@ defmodule Rondo.Orchestrator do
       latest_gate: Map.get(running_entry, :latest_gate),
       interrupt: interrupt,
       tracker_visibility: "known"
+    }
+  end
+
+  defp apply_guidance_response(state, issue_id, paused_entry, "approve_once") do
+    interrupt = Map.get(paused_entry, :interrupt, %{})
+    side_effect_id = get_in(interrupt, ["resume", "side_effect_id"])
+
+    if is_binary(side_effect_id) and String.starts_with?(side_effect_id, "tracker-transition:") do
+      approve_tracker_transition_guidance(state, issue_id, paused_entry)
+    else
+      {{:error, :unsupported_guidance_response}, state}
+    end
+  end
+
+  defp apply_guidance_response(state, issue_id, paused_entry, "abort_run") do
+    ledger = Map.get(paused_entry, :ledger)
+    ledger = complete_run_ledger(ledger, :aborted, %{reason: "operator guidance abort"})
+    _ledger = ledger
+
+    state = %{
+      state
+      | paused_interrupts: Map.delete(state.paused_interrupts, issue_id),
+        claimed: MapSet.delete(state.claimed, issue_id)
+    }
+
+    {{:ok, %{status: :aborted, issue_id: issue_id}}, state}
+  end
+
+  defp apply_guidance_response(state, _issue_id, _paused_entry, _guidance), do: {{:error, :unsupported_guidance_response}, state}
+
+  defp approve_tracker_transition_guidance(state, issue_id, paused_entry) do
+    issue = Map.get(paused_entry, :issue) || %Issue{id: issue_id, identifier: Map.get(paused_entry, :identifier), state: Map.get(paused_entry, :state)}
+    ledger = Map.get(paused_entry, :ledger)
+
+    case Tracker.update_issue_state(issue_id, "In Progress") do
+      :ok ->
+        ledger = write_run_ledger_checkpoint(ledger, :guidance_submitted, %{response: "approve_once", side_effect: "tracker.issue.transition"})
+        issue = %{issue | state: "In Progress"}
+
+        state = %{
+          state
+          | paused_interrupts: Map.delete(state.paused_interrupts, issue_id),
+            claimed: MapSet.delete(state.claimed, issue_id)
+        }
+
+        state = start_agent_for_issue(state, issue, Map.get(paused_entry, :retry_attempt, 0), [], self(), ledger)
+        {{:ok, %{status: :resumed, issue_id: issue_id}}, state}
+
+      {:error, reason} ->
+        {{:error, {:guidance_side_effect_failed, reason}}, state}
+    end
+  end
+
+  defp paused_entry_from_issue(%Issue{} = issue, interrupt, ledger) do
+    %{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      issue: issue,
+      state: issue.state,
+      session_id: nil,
+      run_id: run_ledger_id(ledger),
+      run_dir: run_ledger_dir(ledger),
+      workspace: expected_workspace_for_issue(issue),
+      paused_at: interrupt["created_at"],
+      retry_attempt: 0,
+      latest_gate: nil,
+      interrupt: interrupt,
+      tracker_visibility: "known",
+      event_log: [],
+      ledger: ledger
     }
   end
 
@@ -1330,6 +1436,20 @@ defmodule Rondo.Orchestrator do
     )
   end
 
+  @spec submit_guidance(String.t(), String.t()) :: {:ok, map()} | {:error, term()} | :unavailable
+  def submit_guidance(issue_id, guidance) do
+    submit_guidance(__MODULE__, issue_id, guidance)
+  end
+
+  @spec submit_guidance(GenServer.server(), String.t(), String.t()) :: {:ok, map()} | {:error, term()} | :unavailable
+  def submit_guidance(server, issue_id, guidance) when is_binary(issue_id) and is_binary(guidance) do
+    if Process.whereis(server) do
+      GenServer.call(server, {:submit_guidance, issue_id, guidance})
+    else
+      :unavailable
+    end
+  end
+
   @spec request_refresh() :: map() | :unavailable
   def request_refresh do
     request_refresh(__MODULE__)
@@ -1362,6 +1482,18 @@ defmodule Rondo.Orchestrator do
   end
 
   @impl true
+  def handle_call({:submit_guidance, issue_id, guidance}, _from, state) do
+    case Map.get(state.paused_interrupts, issue_id) do
+      nil ->
+        {:reply, {:error, :guidance_interrupt_not_found}, state}
+
+      paused_entry ->
+        {reply, state} = apply_guidance_response(state, issue_id, paused_entry, String.trim(guidance))
+        notify_dashboard()
+        {:reply, reply, state}
+    end
+  end
+
   def handle_call(:snapshot, _from, state) do
     state = refresh_runtime_config(state)
     now = DateTime.utc_now()
@@ -1418,7 +1550,8 @@ defmodule Rondo.Orchestrator do
           retry_attempt: Map.get(metadata, :retry_attempt),
           latest_gate: Map.get(metadata, :latest_gate),
           interrupt: Map.get(metadata, :interrupt, %{}),
-          tracker_visibility: Map.get(metadata, :tracker_visibility, "unknown")
+          tracker_visibility: Map.get(metadata, :tracker_visibility, "unknown"),
+          event_log: Map.get(metadata, :event_log, [])
         }
       end)
 
@@ -2072,18 +2205,66 @@ defmodule Rondo.Orchestrator do
     Path.join(Config.workspace_root(), ".rondo_archive")
   end
 
-  defp transition_issue_to_in_progress(%Issue{id: issue_id, state: state} = issue) do
+  defp transition_issue_to_in_progress(%Issue{state: state} = issue, ledger) do
     if normalize_state(state) == "todo" do
-      case Tracker.update_issue_state(issue_id, "In Progress") do
-        :ok ->
-          Logger.info("Transitioned #{issue_context(issue)} to In Progress")
-
-        {:error, reason} ->
-          Logger.warning("Failed to transition #{issue_context(issue)} to In Progress: #{inspect(reason)}")
-      end
+      authorize_and_transition_todo_issue(issue, ledger)
+    else
+      {:ok, issue, ledger}
     end
+  end
 
-    :ok
+  defp authorize_and_transition_todo_issue(issue, ledger) do
+    side_effect = tracker_transition_side_effect(issue)
+
+    case SideEffectPolicy.evaluate(side_effect, ledger: ledger, workspace: expected_workspace_for_issue(issue)) do
+      {:ok, decision} ->
+        do_transition_issue_to_in_progress(issue, Map.get(decision, :ledger, ledger))
+
+      {:blocked, %{block_reason: :action_policy_requires_guidance, interrupt: interrupt} = decision} ->
+        {:paused, interrupt, Map.get(decision, :ledger, ledger)}
+
+      {:blocked, %{block_reason: reason} = decision} ->
+        {:blocked, reason, Map.get(decision, :ledger, ledger)}
+    end
+  end
+
+  defp do_transition_issue_to_in_progress(%Issue{id: issue_id} = issue, ledger) do
+    case Tracker.update_issue_state(issue_id, "In Progress") do
+      :ok ->
+        Logger.info("Transitioned #{issue_context(issue)} to In Progress")
+        {:ok, %{issue | state: "In Progress"}, ledger}
+
+      {:error, reason} ->
+        Logger.warning("Failed to transition #{issue_context(issue)} to In Progress: #{inspect(reason)}")
+        {:blocked, {:issue_transition_failed, reason}, ledger}
+    end
+  end
+
+  defp tracker_transition_side_effect(%Issue{id: issue_id} = issue) do
+    %{
+      action: tracker_transition_action(),
+      classes: tracker_write_classes(),
+      label: "Tracker update",
+      operation: "Change issue #{issue.identifier || issue_id} from Todo to In Progress",
+      required: true,
+      resume_safe: true,
+      skip_behavior: "block",
+      side_effect_id: "tracker-transition:#{issue_id}:in-progress"
+    }
+  end
+
+  defp tracker_transition_action do
+    case Config.tracker_kind() do
+      "memory" -> "file.read"
+      _ -> "tracker.issue.transition"
+    end
+  end
+
+  defp tracker_write_classes do
+    case Config.tracker_kind() do
+      "memory" -> ["read"]
+      _ -> ["git-remote"]
+    end
   end
 
   defp normalize_state(state) when is_binary(state), do: state |> String.trim() |> String.downcase()

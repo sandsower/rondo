@@ -847,6 +847,7 @@ defmodule Rondo.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
         claude_command: claude_binary
       )
@@ -913,6 +914,7 @@ defmodule Rondo.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
         claude_command: claude_binary
       )
@@ -982,6 +984,7 @@ defmodule Rondo.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
         claude_command: claude_binary,
         max_turns: 3
@@ -1079,6 +1082,7 @@ defmodule Rondo.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
         claude_command: claude_binary,
         max_turns: 2
@@ -1200,5 +1204,30 @@ defmodule Rondo.CoreTest do
     # still show the issue as running.
     snapshot = Orchestrator.snapshot(Module.concat(__MODULE__, :MissingReconcile), 1_000)
     assert length(snapshot.running) == 1
+  end
+
+  defp fake_action_policy(decision) do
+    dir = Path.join(System.tmp_dir!(), "rondo-core-fake-action-policy-#{System.unique_integer([:positive, :monotonic])}")
+    path = Path.join(dir, "beislid-fake")
+    File.mkdir_p!(dir)
+
+    File.write!(path, """
+    #!/bin/sh
+    action=""
+    mode=""
+    classes=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --action) action="$2"; shift 2 ;;
+        --mode) mode="$2"; shift 2 ;;
+        --class) classes="$classes${classes:+,}$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '{"decision":"#{decision}","action":"%s","mode":"%s","classes":["%s"],"log_level":"warning","requires_human":true,"reason":"test #{decision}","matched_rules":[]}' "$action" "$mode" "$classes"
+    """)
+
+    File.chmod!(path, 0o755)
+    path
   end
 end

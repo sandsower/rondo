@@ -548,6 +548,16 @@ valid envelope, and persists evaluator envelopes in run artifacts. Host permissi
 `claude.permission_mode` and `claude.dangerously_skip_permissions` are not substitutes for this
 external policy enforcement.
 
+When policy returns `ask`, Rondo represents the boundary as an operator-guidance interrupt rather
+than as a binary approval prompt. The interrupt is paused state with `reason:
+"action_policy_guidance_required"`, a `guidance_severity`, blocked side-effect metadata, a curated
+policy summary, deterministic suggested responses, deterministic upcoming-transition copy, and resume
+metadata. Full evaluator envelopes remain in the run ledger. Exact automatic resume is only allowed
+for side effects with deterministic operation descriptors and revalidation; v1 supports this for
+orchestrator-owned tracker transitions. Non-resume-safe hooks, cleanup, shell, and destructive
+operations may capture guidance or abort/manual-resolve, but MUST NOT be replayed automatically from
+operator input alone.
+
 ### 5.4 Prompt Template Contract
 
 The Markdown body of `WORKFLOW.md` is the per-issue prompt template.

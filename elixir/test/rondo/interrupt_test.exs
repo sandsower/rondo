@@ -72,6 +72,101 @@ defmodule Rondo.InterruptTest do
     assert [%{"name" => "unit", "status" => "fail", "environment_failure" => false}] = interrupt["gate"]["results"]
   end
 
+  test "builds an action policy guidance interrupt for blocked side effects" do
+    interrupt =
+      Interrupt.action_policy_guidance_required(%{
+        timestamp: @now,
+        guidance_severity: "warning",
+        blocked_side_effect: %{
+          action: "tracker.issue.transition",
+          label: "Tracker update",
+          operation: "Change issue GH-58 from Todo to In Progress",
+          classes: ["tracker-write"],
+          required: true,
+          resume_safe: true,
+          skip_behavior: "block"
+        },
+        policy: %{
+          "decision" => "ask",
+          "reason" => "classes=tracker-write",
+          "log_level" => "warning",
+          "requires_human" => true,
+          "matched_rules" => [%{"class" => "tracker-write", "decision" => "ask"}]
+        },
+        suggested_responses: [
+          %{
+            id: "approve_once",
+            label: "Approve once",
+            guidance: "approve_once",
+            deterministic: true,
+            quick: true
+          },
+          %{
+            id: "skip_side_effect",
+            label: "Skip side effect",
+            guidance: "skip_side_effect",
+            deterministic: true,
+            quick: false
+          }
+        ],
+        upcoming_transitions: %{
+          approve_once: "Rondo will execute the tracker transition once, record the approval, and continue.",
+          skip_side_effect: "Rondo will leave this run blocked until the required transition is handled."
+        },
+        resume: %{run_id: "run-1", side_effect_id: "tracker-transition:GH-58"}
+      })
+
+    assert interrupt["reason"] == "action_policy_guidance_required"
+    assert interrupt["state"] == "paused"
+    assert interrupt["guidance_severity"] == "warning"
+    assert interrupt["created_at"] == "2026-05-28T10:11:12Z"
+    assert interrupt["question"] =~ "operator guidance"
+
+    assert interrupt["blocked_side_effect"] == %{
+             "action" => "tracker.issue.transition",
+             "label" => "Tracker update",
+             "operation" => "Change issue GH-58 from Todo to In Progress",
+             "classes" => ["tracker-write"],
+             "required" => true,
+             "resume_safe" => true,
+             "skip_behavior" => "block"
+           }
+
+    assert interrupt["policy"] == %{
+             "decision" => "ask",
+             "reason" => "classes=tracker-write",
+             "log_level" => "warning",
+             "requires_human" => true,
+             "matched_rules" => [%{"class" => "tracker-write", "decision" => "ask"}]
+           }
+
+    assert [approve_once, skip_side_effect] = interrupt["suggested_responses"]
+    assert approve_once["id"] == "approve_once"
+    assert approve_once["guidance"] == "approve_once"
+    assert approve_once["quick"] == true
+    assert approve_once["deterministic"] == true
+    assert skip_side_effect["id"] == "skip_side_effect"
+
+    assert interrupt["upcoming_transitions"] == %{
+             "approve_once" => "Rondo will execute the tracker transition once, record the approval, and continue.",
+             "skip_side_effect" => "Rondo will leave this run blocked until the required transition is handled."
+           }
+
+    assert interrupt["resume"] == %{"run_id" => "run-1", "side_effect_id" => "tracker-transition:GH-58"}
+  end
+
+  test "guidance interrupts tolerate missing policy maps" do
+    interrupt =
+      Interrupt.action_policy_guidance_required(%{
+        policy: "missing",
+        blocked_side_effect: %{action: "workspace.hook.after_run"},
+        suggested_responses: [],
+        upcoming_transitions: %{}
+      })
+
+    assert interrupt["policy"] == %{}
+  end
+
   test "normalizes map inputs and optional values" do
     interrupt =
       Interrupt.repeated_gate_failure(%{
