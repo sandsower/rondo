@@ -278,7 +278,8 @@ defmodule Rondo.CoreTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: test_root,
         tracker_active_states: ["Todo", "In Progress", "In Review"],
-        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"]
+        tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
+        action_policy_command: fake_action_policy("allow")
       )
 
       File.mkdir_p!(test_root)
@@ -526,6 +527,7 @@ defmodule Rondo.CoreTest do
       |> Map.put(:running, %{issue_id => running_entry})
       |> Map.put(:claimed, MapSet.new([issue_id]))
       |> Map.put(:retry_attempts, %{})
+      |> Map.put(:paused_interrupts, %{})
     end)
 
     reason = {:shutdown, {:gate_failed, %{status: :fail}}}

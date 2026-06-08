@@ -1940,6 +1940,7 @@ defmodule Rondo.OrchestratorStatusTest do
       workspace_root: workspace_root,
       claude_command: claude_bin,
       max_turns: 1,
+      action_policy_command: fake_action_policy_script(workspace_root, "allow"),
       gates: [%{name: "proof", command: "echo nope; exit 3", timeout_ms: 1_000}]
     )
 
@@ -2014,6 +2015,7 @@ defmodule Rondo.OrchestratorStatusTest do
       workspace_root: workspace_root,
       claude_command: claude_bin,
       max_turns: 1,
+      action_policy_command: fake_action_policy_script(workspace_root, "allow"),
       gates: [%{name: "proof", command: "echo nope; exit 3", timeout_ms: 1_000}]
     )
 

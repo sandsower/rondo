@@ -1,5 +1,5 @@
 defmodule Rondo.RunOnceTest do
-  use Rondo.TestSupport, async: true
+  use Rondo.TestSupport
 
   import ExUnit.CaptureLog
 
@@ -98,8 +98,27 @@ defmodule Rondo.RunOnceTest do
     assert_run_dir_option(agent_opts)
   end
 
+  test "records Todo transition action policy decisions in the run ledger" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-policy-ledger")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    assert :ok =
+             RunOnce.run("issue-todo",
+               deps: deps(issue("issue-todo", state: "Todo"), parent)
+             )
+
+    assert_received {:agent_run, %Issue{id: "issue-todo", state: "In Progress"}, agent_opts}
+    manifest = agent_opts |> Keyword.fetch!(:run_dir) |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "action_policy_decision"))
+  end
+
   test "blocks Todo transitions when action policy asks for guidance" do
     parent = self()
+    workspace_root = tmp_dir("run-once-policy-ask-ledger")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
     assert {:error, {:action_policy_guidance_required, interrupt}} =
              RunOnce.run("issue-todo",
@@ -112,6 +131,11 @@ defmodule Rondo.RunOnceTest do
     assert interrupt["suggested_responses"] |> Enum.any?(&(&1["id"] == "approve_once"))
     refute_received {:update_issue_state, _, _}
     refute_received {:agent_run, _, _}
+
+    manifest = latest_run_manifest!(workspace_root, "GH-1")
+    assert manifest["status"] == "paused"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "action_policy_decision"))
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "interrupt_created"))
   end
 
   test "blocks Todo transitions when action policy denies" do
@@ -331,6 +355,16 @@ defmodule Rondo.RunOnceTest do
 
   defp tmp_dir(name) do
     Path.join(System.tmp_dir!(), "rondo-#{name}-#{System.unique_integer([:positive])}")
+  end
+
+  defp latest_run_manifest!(workspace_root, _identifier) do
+    [manifest_path | _] =
+      workspace_root
+      |> Path.join(".rondo_runs/*/*/manifest.json")
+      |> Path.wildcard()
+      |> Enum.sort(:desc)
+
+    manifest_path |> File.read!() |> Jason.decode!()
   end
 
   defp write_manifest!(payload) do

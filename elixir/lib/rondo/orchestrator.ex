@@ -186,6 +186,10 @@ defmodule Rondo.Orchestrator do
                 delay_type: :continuation
               })
 
+            action_policy_guidance_exit?(reason) ->
+              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=action_policy_guidance")
+              pause_running_entry(state, issue_id, running_entry, reason)
+
             pause_after_gate_failure?(running_entry, reason) ->
               Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=repeated_gate_failure")
               pause_running_entry(state, issue_id, running_entry, reason)
@@ -801,7 +805,11 @@ defmodule Rondo.Orchestrator do
 
   defp start_agent_for_issue(%State{} = state, issue, attempt, attempt_metadata, recipient, ledger) do
     case Task.Supervisor.start_child(Rondo.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: normalize_retry_attempt(attempt), run_dir: run_ledger_dir(ledger))
+           AgentRunner.run(issue, recipient,
+             attempt: normalize_retry_attempt(attempt),
+             run_dir: run_ledger_dir(ledger),
+             run_ledger: ledger
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -983,6 +991,9 @@ defmodule Rondo.Orchestrator do
     previous_failure == :gate_failed and gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate))
   end
 
+  defp action_policy_guidance_exit?({:action_policy_guidance_required, interrupt}) when is_map(interrupt), do: true
+  defp action_policy_guidance_exit?(_reason), do: false
+
   defp retry_failure_reason(running_entry, reason) do
     if gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate)), do: :gate_failed
   end
@@ -1010,8 +1021,8 @@ defmodule Rondo.Orchestrator do
     }
   end
 
-  defp pause_running_entry(state, issue_id, running_entry, _reason) do
-    interrupt = Interrupt.repeated_gate_failure(interrupt_context(running_entry))
+  defp pause_running_entry(state, issue_id, running_entry, reason) do
+    interrupt = pause_interrupt_for_reason(running_entry, reason)
     ledger = pause_run_ledger(Map.get(running_entry, :ledger), interrupt, Map.get(running_entry, :session_id))
     paused_entry = paused_entry_from_running(issue_id, running_entry, interrupt, ledger)
 
@@ -1026,6 +1037,9 @@ defmodule Rondo.Orchestrator do
         claimed: MapSet.put(state.claimed, issue_id)
     }
   end
+
+  defp pause_interrupt_for_reason(_running_entry, {:action_policy_guidance_required, interrupt}) when is_map(interrupt), do: interrupt
+  defp pause_interrupt_for_reason(running_entry, _reason), do: Interrupt.repeated_gate_failure(interrupt_context(running_entry))
 
   defp interrupt_context(running_entry) do
     %{
