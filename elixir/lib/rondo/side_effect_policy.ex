@@ -136,7 +136,7 @@ defmodule Rondo.SideEffectPolicy do
   defp suggested_responses(side_effect) do
     side_effect
     |> approve_once_response()
-    |> Kernel.++([skip_side_effect_response(side_effect), abort_run_response()])
+    |> Kernel.++([abort_run_response()])
   end
 
   defp approve_once_response(%{resume_safe: true}) do
@@ -153,16 +153,6 @@ defmodule Rondo.SideEffectPolicy do
 
   defp approve_once_response(_side_effect), do: []
 
-  defp skip_side_effect_response(side_effect) do
-    %{
-      id: "skip_side_effect",
-      label: "Skip side effect",
-      guidance: "skip_side_effect",
-      deterministic: true,
-      quick: skip_behavior(side_effect) == "continue"
-    }
-  end
-
   defp abort_run_response do
     %{
       id: "abort_run",
@@ -176,7 +166,6 @@ defmodule Rondo.SideEffectPolicy do
   defp upcoming_transitions(side_effect) do
     %{
       approve_once: approve_once_transition(side_effect),
-      skip_side_effect: skip_transition(side_effect),
       abort_run: "Rondo will mark the run aborted and keep the workspace and run ledger."
     }
     |> drop_nil_values()
@@ -187,14 +176,6 @@ defmodule Rondo.SideEffectPolicy do
   end
 
   defp approve_once_transition(_side_effect), do: nil
-
-  defp skip_transition(side_effect) do
-    case skip_behavior(side_effect) do
-      "continue" -> "Rondo will skip this side effect and continue the run."
-      "abort" -> "Rondo will skip this side effect and abort the run."
-      "block" -> "Rondo will skip this side effect and leave the run blocked until it is handled."
-    end
-  end
 
   defp resume_payload(side_effect, opts) do
     opts

@@ -119,9 +119,15 @@ defmodule Rondo.RunOnce do
   end
 
   defp transition_todo_issue_to_in_progress(issue, deps, ledger) do
-    with {:ok, ledger} <- authorize_tracker_transition(issue, deps, ledger),
-         {:ok, issue} <- update_issue_to_in_progress(issue, deps) do
-      {:ok, issue, ledger}
+    with {:ok, ledger} <- authorize_tracker_transition(issue, deps, ledger) do
+      case update_issue_to_in_progress(issue, deps) do
+        {:ok, issue} ->
+          {:ok, issue, ledger}
+
+        {:error, reason} ->
+          _ledger = complete_run_once_ledger(ledger, {:error, reason})
+          {:error, reason}
+      end
     end
   end
 
@@ -210,6 +216,11 @@ defmodule Rondo.RunOnce do
       ledger = record_queued_updates(ledger, issue.id)
       complete_run_once_ledger_result(ledger, {:error, reason})
   catch
+    :exit, {:action_policy_guidance_required, interrupt} when is_map(interrupt) ->
+      ledger = record_queued_updates(ledger, issue.id)
+      _ledger = pause_run_once_ledger(ledger, interrupt)
+      {:error, {:action_policy_guidance_required, interrupt}}
+
     :exit, reason ->
       reason = {:agent_run_failed, {:exit, reason}}
       ledger = record_queued_updates(ledger, issue.id)

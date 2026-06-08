@@ -52,16 +52,14 @@ defmodule Rondo.SideEffectPolicyTest do
     assert interrupt["policy"]["decision"] == "ask"
     assert interrupt["resume"] == %{"run_id" => "run-1", "side_effect_id" => "tracker-transition:issue-58:in-progress"}
 
-    assert [approve_once, skip_side_effect, abort_run] = interrupt["suggested_responses"]
+    assert [approve_once, abort_run] = interrupt["suggested_responses"]
     assert approve_once["id"] == "approve_once"
     assert approve_once["quick"] == true
     assert approve_once["deterministic"] == true
-    assert skip_side_effect["id"] == "skip_side_effect"
-    assert skip_side_effect["quick"] == false
     assert abort_run["id"] == "abort_run"
   end
 
-  test "does not expose approve_once for non-resume-safe side effects and quick skip only for continue skips" do
+  test "does not expose approve_once or unsupported skip responses for non-resume-safe side effects" do
     side_effect = %{
       action: "workspace.hook.before_run",
       classes: ["workspace-write"],
@@ -81,7 +79,8 @@ defmodule Rondo.SideEffectPolicyTest do
 
     responses = decision.interrupt["suggested_responses"]
     refute Enum.any?(responses, &(&1["id"] == "approve_once"))
-    assert Enum.find(responses, &(&1["id"] == "skip_side_effect"))["quick"] == true
+    refute Enum.any?(responses, &(&1["id"] == "skip_side_effect"))
+    assert Enum.any?(responses, &(&1["id"] == "abort_run"))
   end
 
   test "derives critical/info severity and validates skip behavior fallbacks" do
@@ -103,7 +102,7 @@ defmodule Rondo.SideEffectPolicyTest do
     assert destructive_decision.interrupt["blocked_side_effect"]["label"] == "workspace.cleanup.remove_tmp"
     assert destructive_decision.interrupt["blocked_side_effect"]["skip_behavior"] == "block"
     assert destructive_decision.interrupt["resume"] == %{"side_effect_id" => "workspace.cleanup.remove_tmp"}
-    assert destructive_decision.interrupt["upcoming_transitions"]["skip_side_effect"] =~ "leave the run blocked"
+    refute Map.has_key?(destructive_decision.interrupt["upcoming_transitions"], "skip_side_effect")
 
     optional = %{
       action: "workspace.hook.after_run",

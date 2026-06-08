@@ -150,8 +150,11 @@ defmodule Rondo.RunOnceTest do
     refute_received {:agent_run, _, _}
   end
 
-  test "returns clear error when Todo transition fails" do
+  test "returns clear error and fails the ledger when Todo transition fails" do
     parent = self()
+    workspace_root = tmp_dir("run-once-transition-failure-ledger")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
     assert {:error, {:issue_transition_failed, _context, :boom}} =
              RunOnce.run("issue-todo",
@@ -159,6 +162,41 @@ defmodule Rondo.RunOnceTest do
              )
 
     refute_received {:agent_run, _, _}
+
+    manifest = latest_run_manifest!(workspace_root, "GH-1")
+    assert manifest["status"] == "failed"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "failed"))
+  end
+
+  test "pauses the ledger when agent workspace policy exits with guidance" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-agent-guidance-ledger")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    interrupt =
+      Rondo.SideEffectPolicy.guidance_interrupt(
+        %{
+          action: "workspace.hook.before_run",
+          classes: ["workspace-write"],
+          label: "Before-run hook",
+          required: true,
+          resume_safe: false,
+          skip_behavior: "abort"
+        },
+        %{"decision" => "ask", "action" => "workspace.hook.before_run", "mode" => "unattended-auto"}
+      )
+
+    agent_runner = fn _issue, _agent_opts -> exit({:action_policy_guidance_required, interrupt}) end
+
+    assert {:error, {:action_policy_guidance_required, ^interrupt}} =
+             RunOnce.run("issue-1",
+               deps: deps(issue("issue-1", state: "In Progress"), parent, agent_runner: agent_runner)
+             )
+
+    manifest = latest_run_manifest!(workspace_root, "GH-1")
+    assert manifest["status"] == "paused"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "interrupt_created"))
   end
 
   test "converts adapter exceptions into errors" do
