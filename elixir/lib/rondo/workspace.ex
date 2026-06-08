@@ -55,21 +55,21 @@ defmodule Rondo.Workspace do
     end
   end
 
-  @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term()} | {:error, term(), String.t()}
-  def remove(workspace) do
+  @spec remove(Path.t(), keyword()) :: {:ok, [String.t()]} | {:error, term()} | {:error, term(), String.t()}
+  def remove(workspace, opts \\ []) do
     if File.exists?(workspace) do
-      remove_existing_workspace(workspace)
+      remove_existing_workspace(workspace, opts)
     else
       File.rm_rf(workspace)
     end
   end
 
-  defp remove_existing_workspace(workspace) do
+  defp remove_existing_workspace(workspace, opts) do
     case validate_workspace_path(workspace) do
       :ok ->
         issue_context = %{issue_id: nil, issue_identifier: Path.basename(workspace)}
 
-        with :ok <- authorize_workspace_action(:remove, workspace, issue_context, []),
+        with :ok <- authorize_workspace_action(:remove, workspace, issue_context, opts),
              :ok <- maybe_run_before_remove_hook(workspace) do
           File.rm_rf(workspace)
         end
@@ -80,18 +80,21 @@ defmodule Rondo.Workspace do
   end
 
   @spec remove_issue_workspaces(term()) :: :ok
-  def remove_issue_workspaces(identifier) when is_binary(identifier) do
+  def remove_issue_workspaces(identifier), do: remove_issue_workspaces(identifier, [])
+
+  @spec remove_issue_workspaces(term(), keyword()) :: :ok
+  def remove_issue_workspaces(identifier, opts) when is_binary(identifier) do
     safe_id = safe_identifier(identifier)
 
     case workspace_path_for_issue(safe_id) do
-      {:ok, workspace} -> remove(workspace)
+      {:ok, workspace} -> remove(workspace, opts)
       {:error, _reason} -> :ok
     end
 
     :ok
   end
 
-  def remove_issue_workspaces(_identifier) do
+  def remove_issue_workspaces(_identifier, _opts) do
     :ok
   end
 
@@ -179,7 +182,7 @@ defmodule Rondo.Workspace do
               %{issue_id: nil, issue_identifier: Path.basename(workspace)},
               "before_remove"
             )
-            |> ignore_hook_failure()
+            |> ignore_optional_hook_failure()
         end
 
       false ->
@@ -189,6 +192,12 @@ defmodule Rondo.Workspace do
 
   defp ignore_hook_failure(:ok), do: :ok
   defp ignore_hook_failure({:error, _reason}), do: :ok
+
+  defp ignore_optional_hook_failure(:ok), do: :ok
+  defp ignore_optional_hook_failure({:error, {:action_policy_guidance_required, _interrupt} = reason}), do: {:error, reason}
+  defp ignore_optional_hook_failure({:error, {:action_policy_denied, _envelope} = reason}), do: {:error, reason}
+  defp ignore_optional_hook_failure({:error, {:action_policy_failed, _failure} = reason}), do: {:error, reason}
+  defp ignore_optional_hook_failure({:error, _reason}), do: :ok
 
   defp run_hook(command, workspace, issue_context, hook_name, opts \\ []) do
     timeout_ms = Config.workspace_hooks()[:timeout_ms]

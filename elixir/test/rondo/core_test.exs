@@ -285,6 +285,13 @@ defmodule Rondo.CoreTest do
       File.mkdir_p!(test_root)
       File.mkdir_p!(workspace)
 
+      assert {:ok, ledger} =
+               Rondo.RunLedger.create_run(
+                 %Issue{id: issue_id, identifier: issue_identifier, state: "In Progress", title: "Done"},
+                 workspace_root: test_root,
+                 random_suffix: "cleanup001"
+               )
+
       agent_pid =
         spawn(fn ->
           receive do
@@ -299,7 +306,8 @@ defmodule Rondo.CoreTest do
             ref: nil,
             identifier: issue_identifier,
             issue: %Issue{id: issue_id, state: "In Progress", identifier: issue_identifier},
-            started_at: DateTime.utc_now()
+            started_at: DateTime.utc_now(),
+            ledger: ledger
           }
         },
         claimed: MapSet.new([issue_id]),
@@ -322,6 +330,9 @@ defmodule Rondo.CoreTest do
       refute MapSet.member?(updated_state.claimed, issue_id)
       refute Process.alive?(agent_pid)
       refute File.exists?(workspace)
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "action_policy_decision"))
     after
       File.rm_rf(test_root)
     end

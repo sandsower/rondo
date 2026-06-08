@@ -310,6 +310,33 @@ defmodule Rondo.WorkspaceAndConfigTest do
     end
   end
 
+  test "before_remove hook policy asks stop deletion with guidance" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-before-remove-policy-ask-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      target_workspace = Path.join(workspace_root, "S_1")
+      File.mkdir_p!(target_workspace)
+      File.write!(Path.join(target_workspace, "marker.txt"), "keep")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("ask_hooks"),
+        hook_before_remove: "touch should-not-run"
+      )
+
+      assert {:error, {:action_policy_guidance_required, interrupt}} = Workspace.remove(target_workspace)
+      assert interrupt["blocked_side_effect"]["action"] == "workspace.hook.before_remove"
+      assert File.exists?(Path.join(target_workspace, "marker.txt"))
+      refute File.exists?(Path.join(target_workspace, "should-not-run"))
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace cleanup handles missing workspace root" do
     missing_root =
       Path.join(

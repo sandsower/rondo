@@ -514,7 +514,7 @@ defmodule Rondo.Orchestrator do
         state = archive_running_entry(state, running_entry, :terminated)
 
         if cleanup_workspace do
-          cleanup_issue_workspace(identifier)
+          cleanup_issue_workspace(identifier, Map.get(running_entry, :ledger))
         end
 
         if is_pid(pid) do
@@ -1106,26 +1106,49 @@ defmodule Rondo.Orchestrator do
   defp apply_guidance_response(state, _issue_id, _paused_entry, _guidance), do: {{:error, :unsupported_guidance_response}, state}
 
   defp approve_tracker_transition_guidance(state, issue_id, paused_entry) do
-    issue = Map.get(paused_entry, :issue) || %Issue{id: issue_id, identifier: Map.get(paused_entry, :identifier), state: Map.get(paused_entry, :state)}
     ledger = Map.get(paused_entry, :ledger)
 
-    case Tracker.update_issue_state(issue_id, "In Progress") do
-      :ok ->
-        ledger = write_run_ledger_checkpoint(ledger, :guidance_submitted, %{response: "approve_once", side_effect: "tracker.issue.transition"})
-        issue = %{issue | state: "In Progress"}
+    with {:ok, issue} <- revalidate_tracker_transition_guidance(issue_id, paused_entry),
+         :ok <- Tracker.update_issue_state(issue_id, "In Progress") do
+      ledger = write_run_ledger_checkpoint(ledger, :guidance_submitted, %{response: "approve_once", side_effect: "tracker.issue.transition"})
+      issue = %{issue | state: "In Progress"}
 
-        state = %{
-          state
-          | paused_interrupts: Map.delete(state.paused_interrupts, issue_id),
-            claimed: MapSet.delete(state.claimed, issue_id)
-        }
+      state = %{
+        state
+        | paused_interrupts: Map.delete(state.paused_interrupts, issue_id),
+          claimed: MapSet.delete(state.claimed, issue_id)
+      }
 
-        state = start_agent_for_issue(state, issue, Map.get(paused_entry, :retry_attempt, 0), [], self(), ledger)
-        {{:ok, %{status: :resumed, issue_id: issue_id}}, state}
-
+      state = start_agent_for_issue(state, issue, Map.get(paused_entry, :retry_attempt, 0), [], self(), ledger)
+      {{:ok, %{status: :resumed, issue_id: issue_id}}, state}
+    else
       {:error, reason} ->
         {{:error, {:guidance_side_effect_failed, reason}}, state}
     end
+  end
+
+  defp revalidate_tracker_transition_guidance(issue_id, paused_entry) do
+    paused_identifier = Map.get(paused_entry, :identifier)
+    terminal_states = terminal_state_set()
+
+    with {:ok, [%Issue{} = issue | _]} <- Tracker.fetch_issue_states_by_ids([issue_id]),
+         :ok <- ensure_guidance_issue_matches(issue, paused_identifier),
+         :ok <- ensure_guidance_issue_still_todo(issue),
+         true <- retry_candidate_issue?(issue, terminal_states) do
+      {:ok, issue}
+    else
+      {:ok, []} -> {:error, :guidance_issue_not_visible}
+      false -> {:error, :guidance_issue_not_dispatchable}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp ensure_guidance_issue_matches(%Issue{identifier: identifier}, identifier), do: :ok
+  defp ensure_guidance_issue_matches(%Issue{}, nil), do: :ok
+  defp ensure_guidance_issue_matches(%Issue{}, _identifier), do: {:error, :guidance_issue_changed}
+
+  defp ensure_guidance_issue_still_todo(%Issue{state: state}) do
+    if normalize_issue_state(state) == "todo", do: :ok, else: {:error, :guidance_issue_not_todo}
   end
 
   defp paused_entry_from_issue(%Issue{} = issue, interrupt, ledger) do
@@ -1291,7 +1314,7 @@ defmodule Rondo.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
-        cleanup_issue_workspace(issue.identifier)
+        cleanup_issue_workspace(issue.identifier, Map.get(metadata, :ledger))
         {:noreply, release_issue_claim(state, issue_id)}
 
       retry_candidate_issue?(issue, terminal_states) ->
@@ -1309,11 +1332,13 @@ defmodule Rondo.Orchestrator do
     {:noreply, release_issue_claim(state, issue_id)}
   end
 
-  defp cleanup_issue_workspace(identifier) when is_binary(identifier) do
-    Workspace.remove_issue_workspaces(identifier)
+  defp cleanup_issue_workspace(identifier, ledger \\ nil)
+
+  defp cleanup_issue_workspace(identifier, ledger) when is_binary(identifier) do
+    Workspace.remove_issue_workspaces(identifier, ledger: ledger)
   end
 
-  defp cleanup_issue_workspace(_identifier), do: :ok
+  defp cleanup_issue_workspace(_identifier, _ledger), do: :ok
 
   defp run_terminal_workspace_cleanup do
     case Tracker.fetch_issues_by_states(Config.tracker_terminal_states()) do

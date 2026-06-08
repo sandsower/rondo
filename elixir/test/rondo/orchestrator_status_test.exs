@@ -2481,6 +2481,61 @@ defmodule Rondo.OrchestratorStatusTest do
     end)
   end
 
+  test "approve_once guidance revalidates tracker transition before resume" do
+    workspace_root = tmp_dir("orchestrator-transition-policy-stale")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: fake_claude_script(workspace_root, "transition-policy-stale-session", 0),
+      action_policy_command: fake_action_policy_script(workspace_root, "ask")
+    )
+
+    issue = %Issue{
+      id: "issue-transition-stale",
+      identifier: "MT-POLICY-STALE",
+      title: "Transition stale test",
+      description: "Should not resume stale transition",
+      state: "Todo",
+      url: "https://example.org/issues/MT-POLICY-STALE"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+    Application.put_env(:rondo, :memory_tracker_recipient, self())
+
+    orchestrator_name = Module.concat(__MODULE__, :TransitionPolicyStaleOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_recipient)
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    state = :sys.get_state(pid)
+    state = %{state | max_concurrent_agents: 1, poll_interval_ms: 60_000}
+    :sys.replace_state(pid, fn _ -> state end)
+
+    send(pid, {:tick, state.tick_token})
+
+    wait_until(fn ->
+      case GenServer.call(pid, :snapshot).paused do
+        [_entry | _] -> true
+        _ -> nil
+      end
+    end)
+
+    Application.put_env(:rondo, :memory_tracker_issues, [%{issue | state: "Done"}])
+
+    assert {:error, {:guidance_side_effect_failed, :guidance_issue_not_todo}} =
+             Orchestrator.submit_guidance(orchestrator_name, "issue-transition-stale", "approve_once")
+
+    refute_receive {:memory_tracker_state_update, "issue-transition-stale", "In Progress"}, 100
+    assert [%{issue_id: "issue-transition-stale"}] = GenServer.call(pid, :snapshot).paused
+    assert GenServer.call(pid, :snapshot).running == []
+  end
+
   test "completed agent runs appear in snapshot archived list" do
     issue_id = "issue-archive-test"
 
