@@ -1485,8 +1485,15 @@ defmodule Rondo.Orchestrator do
   @spec submit_guidance(GenServer.server(), String.t(), String.t()) :: {:ok, map()} | {:error, term()} | :unavailable
   def submit_guidance(server, issue_id, guidance) when is_binary(issue_id) and is_binary(guidance) do
     case GenServer.whereis(server) do
-      pid when is_pid(pid) -> GenServer.call(pid, {:submit_guidance, issue_id, guidance})
-      _other -> :unavailable
+      pid when is_pid(pid) ->
+        try do
+          GenServer.call(pid, {:submit_guidance, issue_id, guidance})
+        catch
+          :exit, _reason -> :unavailable
+        end
+
+      _other ->
+        :unavailable
     end
   end
 
@@ -1498,8 +1505,15 @@ defmodule Rondo.Orchestrator do
   @spec request_refresh(GenServer.server()) :: map() | :unavailable
   def request_refresh(server) do
     case GenServer.whereis(server) do
-      pid when is_pid(pid) -> GenServer.call(pid, :request_refresh)
-      _other -> :unavailable
+      pid when is_pid(pid) ->
+        try do
+          GenServer.call(pid, :request_refresh)
+        catch
+          :exit, _reason -> :unavailable
+        end
+
+      _other ->
+        :unavailable
     end
   end
 

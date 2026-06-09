@@ -34,6 +34,41 @@ defmodule Rondo.OrchestratorStatusTest do
     assert {:error, :guidance_interrupt_not_found} = Orchestrator.submit_guidance(pid, "missing", "approve_once")
   end
 
+  test "guidance and refresh helpers return unavailable when calls exit" do
+    parent = self()
+    refresh_server = Module.concat(__MODULE__, :CrashingRefreshServer)
+
+    refresh_pid =
+      spawn(fn ->
+        Process.register(self(), refresh_server)
+        send(parent, :refresh_server_ready)
+
+        receive do
+          {:"$gen_call", _from, :request_refresh} -> exit(:boom)
+        end
+      end)
+
+    assert_receive :refresh_server_ready, 1_000
+    assert Orchestrator.request_refresh(refresh_server) == :unavailable
+    refute Process.alive?(refresh_pid)
+
+    guidance_server = Module.concat(__MODULE__, :CrashingGuidanceServer)
+
+    guidance_pid =
+      spawn(fn ->
+        Process.register(self(), guidance_server)
+        send(parent, :guidance_server_ready)
+
+        receive do
+          {:"$gen_call", _from, {:submit_guidance, "issue", "approve_once"}} -> exit(:boom)
+        end
+      end)
+
+    assert_receive :guidance_server_ready, 1_000
+    assert Orchestrator.submit_guidance(guidance_server, "issue", "approve_once") == :unavailable
+    refute Process.alive?(guidance_pid)
+  end
+
   test "orchestrator snapshot reflects last claude update and session id" do
     issue_id = "issue-snapshot"
 
