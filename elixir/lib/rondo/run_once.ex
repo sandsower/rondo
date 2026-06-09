@@ -5,12 +5,13 @@ defmodule Rondo.RunOnce do
 
   require Logger
 
-  alias Rondo.{AgentRunner, Config, ExecutionRequest, Linear.Issue, RunLedger, Tracker}
+  alias Rondo.{AgentRunner, Config, ExecutionRequest, Linear.Issue, RunLedger, SideEffectPolicy, Tracker}
 
   @type run_result :: :ok | {:error, term()}
   @type deps :: %{
           fetch_issue_states_by_ids: ([String.t()] -> {:ok, [Issue.t()]} | {:error, term()}),
           update_issue_state: (String.t(), String.t() -> :ok | {:error, term()}),
+          action_policy_evaluator: (String.t(), [String.t()], keyword() -> {:ok, map()} | {:error, term()}),
           agent_runner: (Issue.t(), keyword() -> run_result() | no_return())
         }
 
@@ -26,8 +27,9 @@ defmodule Rondo.RunOnce do
          :ok <- Config.validate!(),
          {:ok, issue} <- fetch_one_issue(issue_id, deps),
          :ok <- ensure_dispatchable(issue),
-         {:ok, issue} <- maybe_transition_to_in_progress(issue, deps) do
-      run_agent(issue, deps, agent_opts)
+         {:ok, ledger} <- create_run_once_ledger(issue),
+         {:ok, issue, ledger} <- maybe_transition_to_in_progress(issue, deps, ledger) do
+      do_run_agent_with_ledger(issue, deps, agent_opts, ledger)
     end
   end
 
@@ -57,6 +59,7 @@ defmodule Rondo.RunOnce do
     %{
       fetch_issue_states_by_ids: &Tracker.fetch_issue_states_by_ids/1,
       update_issue_state: &Tracker.update_issue_state/2,
+      action_policy_evaluator: &Rondo.ActionPolicy.evaluate/3,
       agent_runner: fn issue, agent_opts -> AgentRunner.run(issue, self(), agent_opts) end
     }
   end
@@ -105,35 +108,106 @@ defmodule Rondo.RunOnce do
     end
   end
 
-  @spec maybe_transition_to_in_progress(Issue.t(), deps()) :: {:ok, Issue.t()} | {:error, term()}
-  defp maybe_transition_to_in_progress(%Issue{state: state} = issue, deps) do
+  @spec maybe_transition_to_in_progress(Issue.t(), deps(), RunLedger.t()) ::
+          {:ok, Issue.t(), RunLedger.t()} | {:error, term()}
+  defp maybe_transition_to_in_progress(%Issue{state: state} = issue, deps, ledger) do
     if normalize_state(state) == "todo" do
-      case deps.update_issue_state.(issue.id, "In Progress") do
-        :ok ->
-          Logger.info("Transitioned #{issue_context(issue)} to In Progress for run-once")
-          {:ok, %{issue | state: "In Progress"}}
-
-        {:error, reason} ->
-          {:error, {:issue_transition_failed, issue_context(issue), reason}}
-      end
+      transition_todo_issue_to_in_progress(issue, deps, ledger)
     else
-      {:ok, issue}
+      {:ok, issue, ledger}
     end
   end
 
-  @spec run_agent(Issue.t(), deps(), keyword(), keyword()) :: run_result()
-  defp run_agent(issue, deps, agent_opts, ledger_opts \\ []) do
-    case RunLedger.create_run(issue, ledger_opts) do
-      {:ok, ledger} ->
-        do_run_agent_with_ledger(issue, deps, agent_opts, ledger)
+  defp transition_todo_issue_to_in_progress(issue, deps, ledger) do
+    with {:ok, ledger} <- authorize_tracker_transition(issue, deps, ledger) do
+      case update_issue_to_in_progress(issue, deps) do
+        {:ok, issue} ->
+          {:ok, issue, ledger}
+
+        {:error, reason} ->
+          _ledger = complete_run_once_ledger(ledger, {:error, reason})
+          {:error, reason}
+      end
+    end
+  end
+
+  defp update_issue_to_in_progress(issue, deps) do
+    case deps.update_issue_state.(issue.id, "In Progress") do
+      :ok ->
+        Logger.info("Transitioned #{issue_context(issue)} to In Progress for run-once")
+        {:ok, %{issue | state: "In Progress"}}
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, {:issue_transition_failed, issue_context(issue), reason}}
+    end
+  end
+
+  @spec authorize_tracker_transition(Issue.t(), deps(), RunLedger.t()) :: {:ok, RunLedger.t()} | {:error, term()}
+  defp authorize_tracker_transition(%Issue{} = issue, deps, ledger) do
+    side_effect = %{
+      action: tracker_transition_action(),
+      classes: tracker_write_classes(),
+      label: "Tracker update",
+      operation: "Change issue #{issue.identifier || issue.id} from Todo to In Progress",
+      required: true,
+      resume_safe: true,
+      skip_behavior: "block",
+      side_effect_id: "tracker-transition:#{issue.id}:in-progress"
+    }
+
+    case SideEffectPolicy.evaluate(side_effect, evaluator: deps.action_policy_evaluator, ledger: ledger) do
+      {:ok, decision} ->
+        {:ok, Map.get(decision, :ledger, ledger)}
+
+      {:blocked, %{block_reason: :action_policy_requires_guidance, interrupt: interrupt} = decision} ->
+        ledger = Map.get(decision, :ledger, ledger)
+        _ledger = pause_run_once_ledger(ledger, interrupt)
+        {:error, {:action_policy_guidance_required, interrupt}}
+
+      {:blocked, %{block_reason: :action_policy_denied, envelope: envelope} = decision} ->
+        ledger = Map.get(decision, :ledger, ledger)
+        _ledger = complete_run_once_ledger(ledger, {:error, {:action_policy_denied, envelope}})
+        {:error, {:action_policy_denied, envelope}}
+
+      {:blocked, %{block_reason: {:action_policy_failed, reason}}} ->
+        _ledger = complete_run_once_ledger(ledger, {:error, {:action_policy_failed, reason}})
+        {:error, {:action_policy_failed, reason}}
+    end
+  end
+
+  defp tracker_transition_action do
+    case Config.tracker_kind() do
+      "memory" -> "tracker.test.transition"
+      _ -> "tracker.issue.transition"
+    end
+  end
+
+  defp tracker_write_classes do
+    case Config.tracker_kind() do
+      "memory" -> ["test"]
+      _ -> ["git-remote"]
+    end
+  end
+
+  @spec create_run_once_ledger(Issue.t(), keyword()) :: {:ok, RunLedger.t()} | {:error, term()}
+  defp create_run_once_ledger(issue, ledger_opts \\ []) do
+    RunLedger.create_run(issue, ledger_opts)
+  end
+
+  @spec run_agent(Issue.t(), deps(), keyword(), keyword()) :: run_result()
+  defp run_agent(issue, deps, agent_opts, ledger_opts) do
+    with {:ok, ledger} <- create_run_once_ledger(issue, ledger_opts) do
+      do_run_agent_with_ledger(issue, deps, agent_opts, ledger)
     end
   end
 
   defp do_run_agent_with_ledger(issue, deps, agent_opts, ledger) do
-    result = deps.agent_runner.(issue, Keyword.put_new(agent_opts, :run_dir, ledger.run_dir))
+    agent_opts =
+      agent_opts
+      |> Keyword.put_new(:run_dir, ledger.run_dir)
+      |> Keyword.put_new(:run_ledger, ledger)
+
+    result = deps.agent_runner.(issue, agent_opts)
     ledger = record_queued_updates(ledger, issue.id)
     complete_run_once_ledger_result(ledger, result)
   rescue
@@ -142,6 +216,11 @@ defmodule Rondo.RunOnce do
       ledger = record_queued_updates(ledger, issue.id)
       complete_run_once_ledger_result(ledger, {:error, reason})
   catch
+    :exit, {:action_policy_guidance_required, interrupt} when is_map(interrupt) ->
+      ledger = record_queued_updates(ledger, issue.id)
+      _ledger = pause_run_once_ledger(ledger, interrupt)
+      {:error, {:action_policy_guidance_required, interrupt}}
+
     :exit, reason ->
       reason = {:agent_run_failed, {:exit, reason}}
       ledger = record_queued_updates(ledger, issue.id)
@@ -165,6 +244,13 @@ defmodule Rondo.RunOnce do
 
   defp complete_run_once_ledger(ledger, :ok), do: RunLedger.complete_run(ledger, :completed, %{mode: "run_once"})
   defp complete_run_once_ledger(ledger, {:error, reason}), do: RunLedger.complete_run(ledger, :failed, %{mode: "run_once", reason: inspect(reason)})
+
+  defp pause_run_once_ledger(ledger, interrupt) do
+    case RunLedger.pause_run(ledger, interrupt, source: %{interrupt: "action_policy"}) do
+      {:ok, ledger} -> ledger
+      {:error, _reason} -> ledger
+    end
+  end
 
   defp original_result(:ok), do: :ok
   defp original_result({:error, reason}), do: reason

@@ -15,16 +15,19 @@ defmodule RondoWeb.Presenter do
         retrying = Map.get(snapshot, :retrying, [])
         archived = Map.get(snapshot, :archived, [])
         paused = Map.get(snapshot, :paused, [])
+        needs_guidance = Enum.filter(paused, &action_policy_guidance_entry?/1)
 
         %{
           generated_at: generated_at,
           counts: %{
             running: length(running),
             retrying: length(retrying),
-            paused: length(paused)
+            paused: length(paused),
+            needs_guidance: length(needs_guidance)
           },
           running: Enum.map(running, &running_entry_payload/1),
           retrying: Enum.map(retrying, &retry_entry_payload/1),
+          needs_guidance: Enum.map(needs_guidance, &needs_guidance_entry_payload/1),
           paused: Enum.map(paused, &paused_entry_payload/1),
           archived: group_archived_by_ticket(archived),
           claude_totals: Map.get(snapshot, :claude_totals, %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}),
@@ -177,8 +180,36 @@ defmodule RondoWeb.Presenter do
       retry_attempt: Map.get(entry, :retry_attempt),
       tracker_visibility: Map.get(entry, :tracker_visibility),
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
-      interrupt: interrupt_payload(Map.get(entry, :interrupt))
+      interrupt: interrupt_payload(Map.get(entry, :interrupt)),
+      event_log: format_event_log(Map.get(entry, :event_log, []))
     }
+  end
+
+  defp needs_guidance_entry_payload(entry) do
+    paused = paused_entry_payload(entry)
+    interrupt = Map.get(paused, :interrupt, %{}) || %{}
+
+    paused
+    |> Map.take([
+      :issue_id,
+      :issue_identifier,
+      :state,
+      :session_id,
+      :run_id,
+      :run_dir,
+      :workspace,
+      :paused_at,
+      :retry_attempt,
+      :tracker_visibility,
+      :event_log
+    ])
+    |> Map.merge(%{
+      guidance_severity: Map.get(interrupt, :guidance_severity),
+      blocked_side_effect: Map.get(interrupt, :blocked_side_effect),
+      suggested_responses: Map.get(interrupt, :suggested_responses, []),
+      upcoming_transitions: Map.get(interrupt, :upcoming_transitions, %{}),
+      interrupt: interrupt
+    })
   end
 
   defp running_issue_payload(running) do
@@ -220,13 +251,20 @@ defmodule RondoWeb.Presenter do
   defp interrupt_payload(nil), do: nil
 
   defp interrupt_payload(interrupt) when is_map(interrupt) do
+    suggested_responses = payload_value(interrupt, :suggested_responses) || payload_value(interrupt, :options) || []
+
     %{
       reason: payload_value(interrupt, :reason),
       state: payload_value(interrupt, :state),
       question: payload_value(interrupt, :question),
-      options: payload_value(interrupt, :options) || [],
+      options: normalize_payload_list(payload_value(interrupt, :options) || []),
       recommendation: payload_value(interrupt, :recommendation),
-      resume: payload_value(interrupt, :resume),
+      guidance_severity: payload_value(interrupt, :guidance_severity),
+      blocked_side_effect: normalize_payload_map(payload_value(interrupt, :blocked_side_effect)),
+      policy: normalize_payload_map(payload_value(interrupt, :policy)),
+      suggested_responses: normalize_payload_list(suggested_responses),
+      upcoming_transitions: normalize_payload_map(payload_value(interrupt, :upcoming_transitions)),
+      resume: normalize_payload_map(payload_value(interrupt, :resume)),
       gate: payload_value(interrupt, :gate)
     }
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
@@ -238,6 +276,34 @@ defmodule RondoWeb.Presenter do
   defp payload_value(map, key) when is_map(map) and is_atom(key) do
     Map.get(map, key) || Map.get(map, Atom.to_string(key))
   end
+
+  defp action_policy_guidance_entry?(entry) when is_map(entry) do
+    entry
+    |> Map.get(:interrupt, Map.get(entry, "interrupt", %{}))
+    |> payload_value(:reason)
+    |> Kernel.==("action_policy_guidance_required")
+  end
+
+  defp action_policy_guidance_entry?(_entry), do: false
+
+  defp normalize_payload_list(values) when is_list(values), do: Enum.map(values, &normalize_payload_map/1)
+  defp normalize_payload_list(_values), do: []
+
+  defp normalize_payload_map(nil), do: nil
+
+  defp normalize_payload_map(map) when is_map(map) do
+    Map.new(map, fn {key, value} -> {normalize_payload_key(key), normalize_payload_value(value)} end)
+  end
+
+  defp normalize_payload_map(value), do: value
+
+  defp normalize_payload_value(value) when is_map(value), do: normalize_payload_map(value)
+  defp normalize_payload_value(value) when is_list(value), do: Enum.map(value, &normalize_payload_value/1)
+  defp normalize_payload_value(value), do: value
+
+  defp normalize_payload_key(key) when is_atom(key), do: key
+  defp normalize_payload_key(key) when is_binary(key), do: String.to_atom(key)
+  defp normalize_payload_key(key), do: key
 
   defp gate_payload(nil), do: nil
 

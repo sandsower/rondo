@@ -228,7 +228,11 @@ Notes:
 - Beislið owns the action-policy vocabulary and decision table; Rondo enforces it at Rondo-owned
   orchestration boundaries and persists the returned envelopes in run artifacts. Claude/pi
   permission flags are useful host controls, but they are not a substitute for external policy
-  enforcement.
+  enforcement. Policy `ask` decisions appear as **Needs Guidance** interruptions: Rondo pauses before
+  the side effect, records the full envelope, shows a curated blocked-side-effect summary and
+  deterministic suggested responses, and only auto-resumes operations with safe descriptors. V1 exact
+  resume is limited to orchestrator-owned tracker transitions; shell hooks, cleanup, and destructive
+  operations require manual/guidance handling unless later modeled with replay-safe descriptors.
 - `process_provider.kind` selects the process/work-contract provider. Default and only supported
   value for now: `native`. The native provider preserves standalone `WORKFLOW.md` behavior for flat
   gates, prompts, action-policy evaluation, model hints, and run metadata; richer guide/proof

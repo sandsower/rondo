@@ -122,7 +122,7 @@ defmodule Rondo.TestSupport do
           pi_command: "pi",
           pi_turn_timeout_ms: 3_600_000,
           pi_stall_timeout_ms: 300_000,
-          action_policy_command: "beislid",
+          action_policy_command: default_action_policy_command(),
           action_policy_run_mode: "unattended-auto",
           process_provider_kind: "native",
           process_provider_required: false,
@@ -242,6 +242,31 @@ defmodule Rondo.TestSupport do
       |> Enum.reject(&(&1 in [nil, ""]))
 
     Enum.join(sections, "\n") <> "\n"
+  end
+
+  defp default_action_policy_command do
+    dir = Path.join(System.tmp_dir!(), "rondo-default-action-policy-#{System.unique_integer([:positive, :monotonic])}")
+    path = Path.join(dir, "beislid-fake-allow")
+    File.mkdir_p!(dir)
+
+    File.write!(path, """
+    #!/bin/sh
+    action=""
+    mode=""
+    classes_json=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --action) action="$2"; shift 2 ;;
+        --mode) mode="$2"; shift 2 ;;
+        --class) classes_json="${classes_json}${classes_json:+,}\\\"$2\\\""; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '{"decision":"allow","action":"%s","mode":"%s","classes":[%s],"log_level":"info","requires_human":false,"reason":"test allow","matched_rules":[]}' "$action" "$mode" "$classes_json"
+    """)
+
+    File.chmod!(path, 0o755)
+    path
   end
 
   defp yaml_value(value) when is_binary(value) do

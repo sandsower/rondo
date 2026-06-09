@@ -24,6 +24,24 @@ defmodule RondoWeb.ObservabilityApiController do
     end
   end
 
+  @spec submit_guidance(Conn.t(), map()) :: Conn.t()
+  def submit_guidance(conn, %{"issue_id" => issue_id, "guidance" => guidance}) do
+    case Rondo.Orchestrator.submit_guidance(orchestrator(), issue_id, guidance) do
+      {:ok, payload} ->
+        json(conn, payload)
+
+      {:error, reason} ->
+        error_response(conn, 422, "guidance_rejected", inspect(reason))
+
+      :unavailable ->
+        error_response(conn, 503, "orchestrator_unavailable", "Orchestrator is unavailable")
+    end
+  end
+
+  def submit_guidance(conn, _params) do
+    error_response(conn, 400, "invalid_guidance", "issue_id and guidance are required")
+  end
+
   @spec refresh(Conn.t(), map()) :: Conn.t()
   def refresh(conn, _params) do
     case Presenter.refresh_payload(orchestrator()) do

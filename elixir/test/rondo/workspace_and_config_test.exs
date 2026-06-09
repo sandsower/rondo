@@ -25,6 +25,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_after_create: "git clone --depth 1 #{template_repo} ."
       )
 
@@ -44,7 +45,10 @@ defmodule Rondo.WorkspaceAndConfigTest do
         "rondo-elixir-workspace-deterministic-#{System.unique_integer([:positive])}"
       )
 
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      action_policy_command: fake_action_policy("allow")
+    )
 
     assert {:ok, first_workspace} = Workspace.create_for_issue("MT/Det")
     assert {:ok, second_workspace} = Workspace.create_for_issue("MT/Det")
@@ -63,6 +67,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_after_create: "echo first > README.md"
       )
 
@@ -102,7 +107,10 @@ defmodule Rondo.WorkspaceAndConfigTest do
       expected_workspace = Path.join(expected_canonical_path(workspace_root), "MT-STALE")
       File.write!(stale_workspace, "old state\n")
 
-      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow")
+      )
 
       assert {:ok, workspace} = Workspace.create_for_issue("MT-STALE")
       assert workspace == expected_workspace
@@ -166,6 +174,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_after_create: "echo nope && exit 17"
       )
 
@@ -186,12 +195,38 @@ defmodule Rondo.WorkspaceAndConfigTest do
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_timeout_ms: 10,
         hook_after_create: "sleep 1"
       )
 
       assert {:error, {:workspace_hook_timeout, "after_create", 10}} =
                Workspace.create_for_issue("MT-TIMEOUT")
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace hooks stop before execution when action policy asks for guidance" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-workspace-hook-policy-ask-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("ask_hooks"),
+        hook_after_create: "touch should-not-run"
+      )
+
+      assert {:error, {:action_policy_guidance_required, interrupt}} = Workspace.create_for_issue("MT-POLICY-ASK")
+      assert interrupt["reason"] == "action_policy_guidance_required"
+      assert interrupt["blocked_side_effect"]["action"] == "workspace.hook.after_create"
+      assert interrupt["blocked_side_effect"]["resume_safe"] == false
+      refute Enum.any?(interrupt["suggested_responses"], &(&1["id"] == "approve_once"))
+      refute File.exists?(Path.join([workspace_root, "MT-POLICY-ASK", "should-not-run"]))
     after
       File.rm_rf(workspace_root)
     end
@@ -206,7 +241,11 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
     try do
       File.mkdir_p!(workspace_root)
-      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow")
+      )
 
       workspace = Path.join(expected_canonical_path(workspace_root), "MT-608")
 
@@ -234,11 +273,65 @@ defmodule Rondo.WorkspaceAndConfigTest do
       File.write!(Path.join(target_workspace, "marker.txt"), "stale")
       File.write!(Path.join(untouched_workspace, "marker.txt"), "keep")
 
-      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow")
+      )
 
       assert :ok = Workspace.remove_issue_workspaces("S_1")
       refute File.exists?(target_workspace)
       assert File.exists?(untouched_workspace)
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "workspace cleanup stops before deletion when action policy denies" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-issue-workspace-cleanup-deny-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      target_workspace = Path.join(workspace_root, "S_1")
+      File.mkdir_p!(target_workspace)
+      File.write!(Path.join(target_workspace, "marker.txt"), "keep")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("deny")
+      )
+
+      assert {:error, {:action_policy_denied, %{"decision" => "deny"}}} = Workspace.remove(target_workspace)
+      assert File.exists?(Path.join(target_workspace, "marker.txt"))
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "before_remove hook policy asks stop deletion with guidance" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-before-remove-policy-ask-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      target_workspace = Path.join(workspace_root, "S_1")
+      File.mkdir_p!(target_workspace)
+      File.write!(Path.join(target_workspace, "marker.txt"), "keep")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("ask_hooks"),
+        hook_before_remove: "touch should-not-run"
+      )
+
+      assert {:error, {:action_policy_guidance_required, interrupt}} = Workspace.remove(target_workspace)
+      assert interrupt["blocked_side_effect"]["action"] == "workspace.hook.before_remove"
+      assert File.exists?(Path.join(target_workspace, "marker.txt"))
+      refute File.exists?(Path.join(target_workspace, "should-not-run"))
     after
       File.rm_rf(workspace_root)
     end
@@ -532,6 +625,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_after_create: "echo after_create > after_create.log\necho call >> \"#{after_create_counter}\"",
         hook_before_remove: "echo before_remove > \"#{before_remove_marker}\""
       )
@@ -567,6 +661,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_before_remove: "echo failure && exit 17"
       )
 
@@ -592,6 +687,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_before_remove: "i=0; while [ $i -lt 3000 ]; do printf a; i=$((i+1)); done; exit 17"
       )
 
@@ -629,6 +725,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_before_remove: "sleep 1"
       )
 
@@ -669,8 +766,9 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Config.claude_allowed_tools() == nil
     assert Config.claude_turn_timeout_ms() == 3_600_000
     assert Config.claude_stall_timeout_ms() == 300_000
-    assert Config.action_policy() == %{command: "beislid", run_mode: "unattended-auto"}
-    assert Config.action_policy_command() == "beislid"
+    assert %{command: action_policy_command, run_mode: "unattended-auto"} = Config.action_policy()
+    assert File.exists?(action_policy_command)
+    assert Config.action_policy_command() == action_policy_command
     assert Config.action_policy_run_mode() == "unattended-auto"
     assert Config.process_provider() == %{kind: "native", required: false}
     assert Config.process_provider_kind() == "native"
@@ -1036,6 +1134,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_after_create: ~s(echo "ws={{ workspace.path }} id={{ issue.identifier }}" > marker.txt)
       )
 
@@ -1062,6 +1161,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
         hook_before_run: ~s(echo "ws={{ workspace.path }} id={{ issue.identifier }}" > before_run.txt)
       )
 
@@ -1075,6 +1175,36 @@ defmodule Rondo.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp fake_action_policy(decision) do
+    dir = Path.join(System.tmp_dir!(), "rondo-fake-action-policy-dir-#{System.unique_integer([:positive, :monotonic])}")
+    path = Path.join(dir, "beislid-fake")
+    File.mkdir_p!(dir)
+
+    File.write!(path, """
+    #!/bin/sh
+    action=""
+    mode=""
+    classes=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --action) action="$2"; shift 2 ;;
+        --mode) mode="$2"; shift 2 ;;
+        --class) classes="$classes${classes:+,}$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    decision="#{decision}"
+    case "$decision:$action" in
+      ask_hooks:workspace.hook.*) decision="ask" ;;
+      ask_hooks:*) decision="allow" ;;
+    esac
+    printf '{"decision":"%s","action":"%s","mode":"%s","classes":["%s"],"log_level":"warning","requires_human":true,"reason":"test %s","matched_rules":[]}' "$decision" "$action" "$mode" "$classes" "$decision"
+    """)
+
+    File.chmod!(path, 0o755)
+    path
   end
 
   defp expected_canonical_path(path) do

@@ -30,6 +30,25 @@ defmodule Rondo.Interrupt do
     |> drop_nil_values()
   end
 
+  @spec action_policy_guidance_required(map()) :: payload()
+  def action_policy_guidance_required(context) when is_map(context) do
+    %{
+      "reason" => "action_policy_guidance_required",
+      "state" => "paused",
+      "guidance_severity" => value(context, :guidance_severity) || "warning",
+      "created_at" => timestamp(context),
+      "question" =>
+        value(context, :question) ||
+          "Rondo needs operator guidance before continuing. The side effect below has not been executed.",
+      "blocked_side_effect" => normalize_value(value(context, :blocked_side_effect) || %{}),
+      "policy" => policy_summary(value(context, :policy) || %{}),
+      "suggested_responses" => normalize_value(value(context, :suggested_responses) || []),
+      "upcoming_transitions" => normalize_value(value(context, :upcoming_transitions) || %{}),
+      "resume" => normalize_value(value(context, :resume) || %{})
+    }
+    |> drop_nil_values()
+  end
+
   defp timestamp(context) do
     context
     |> value(:timestamp)
@@ -63,6 +82,19 @@ defmodule Rondo.Interrupt do
   end
 
   defp issue_payload(_issue), do: %{}
+
+  defp policy_summary(policy) when is_map(policy) do
+    %{
+      "decision" => value(policy, :decision),
+      "reason" => value(policy, :reason),
+      "log_level" => value(policy, :log_level),
+      "requires_human" => value(policy, :requires_human),
+      "matched_rules" => normalize_value(value(policy, :matched_rules) || [])
+    }
+    |> drop_nil_values()
+  end
+
+  defp policy_summary(_policy), do: %{}
 
   defp resume_payload(context) do
     %{

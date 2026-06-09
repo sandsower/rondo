@@ -208,5 +208,9 @@ defmodule Rondo.ActionPolicyTest do
     path
   end
 
-  defp tmp_dir(name), do: Path.join(System.tmp_dir!(), "rondo-#{name}-#{System.unique_integer([:positive])}")
+  defp tmp_dir(name) do
+    path = Path.join(System.tmp_dir!(), "rondo-#{name}-#{System.unique_integer([:positive, :monotonic])}")
+    File.rm_rf!(path)
+    path
+  end
 end

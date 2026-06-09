@@ -21,6 +21,54 @@ defmodule Rondo.OrchestratorStatusTest do
     send(pid, :stop)
   end
 
+  test "public server helpers accept pid servers" do
+    orchestrator_name = Module.concat(__MODULE__, :PidServerHelperOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    assert %{running: []} = Orchestrator.snapshot(pid, 1_000)
+    assert %{queued: true} = Orchestrator.request_refresh(pid)
+    assert {:error, :guidance_interrupt_not_found} = Orchestrator.submit_guidance(pid, "missing", "approve_once")
+  end
+
+  test "guidance and refresh helpers return unavailable when calls exit" do
+    parent = self()
+    refresh_server = Module.concat(__MODULE__, :CrashingRefreshServer)
+
+    refresh_pid =
+      spawn(fn ->
+        Process.register(self(), refresh_server)
+        send(parent, :refresh_server_ready)
+
+        receive do
+          {:"$gen_call", _from, :request_refresh} -> exit(:boom)
+        end
+      end)
+
+    assert_receive :refresh_server_ready, 1_000
+    assert Orchestrator.request_refresh(refresh_server) == :unavailable
+    refute Process.alive?(refresh_pid)
+
+    guidance_server = Module.concat(__MODULE__, :CrashingGuidanceServer)
+
+    guidance_pid =
+      spawn(fn ->
+        Process.register(self(), guidance_server)
+        send(parent, :guidance_server_ready)
+
+        receive do
+          {:"$gen_call", _from, {:submit_guidance, "issue", "approve_once"}} -> exit(:boom)
+        end
+      end)
+
+    assert_receive :guidance_server_ready, 1_000
+    assert Orchestrator.submit_guidance(guidance_server, "issue", "approve_once") == :unavailable
+    refute Process.alive?(guidance_pid)
+  end
+
   test "orchestrator snapshot reflects last claude update and session id" do
     issue_id = "issue-snapshot"
 
@@ -1940,6 +1988,7 @@ defmodule Rondo.OrchestratorStatusTest do
       workspace_root: workspace_root,
       claude_command: claude_bin,
       max_turns: 1,
+      action_policy_command: fake_action_policy_script(workspace_root, "allow"),
       gates: [%{name: "proof", command: "echo nope; exit 3", timeout_ms: 1_000}]
     )
 
@@ -2014,6 +2063,7 @@ defmodule Rondo.OrchestratorStatusTest do
       workspace_root: workspace_root,
       claude_command: claude_bin,
       max_turns: 1,
+      action_policy_command: fake_action_policy_script(workspace_root, "allow"),
       gates: [%{name: "proof", command: "echo nope; exit 3", timeout_ms: 1_000}]
     )
 
@@ -2078,6 +2128,9 @@ defmodule Rondo.OrchestratorStatusTest do
     state = :sys.get_state(pid)
     refute Map.has_key?(state.running, issue.id)
     assert MapSet.member?(state.claimed, issue.id)
+    assert %Rondo.RunLedger{} = state.paused_interrupts[issue.id].ledger
+    assert state.paused_interrupts[issue.id].ledger.run_id == paused_entry.run_id
+    assert state.paused_interrupts[issue.id].ledger.run_dir == paused_entry.run_dir
 
     paused_manifest =
       [workspace_root, ".rondo_runs", "MT-GATE-PAUSE", "*", "manifest.json"]
@@ -2144,6 +2197,10 @@ defmodule Rondo.OrchestratorStatusTest do
 
     state = :sys.get_state(pid)
     assert MapSet.member?(state.claimed, issue.id)
+    assert %Rondo.RunLedger{} = state.paused_interrupts[issue.id].ledger
+    assert state.paused_interrupts[issue.id].ledger.run_id == ledger.run_id
+    assert state.paused_interrupts[issue.id].ledger.run_dir == ledger.run_dir
+    assert state.paused_interrupts[issue.id].ledger.next_seq == 2
 
     send(pid, {:tick, state.tick_token})
     Process.sleep(100)
@@ -2398,6 +2455,150 @@ defmodule Rondo.OrchestratorStatusTest do
     assert_receive {:memory_tracker_state_update, "issue-todo-transition", "In Progress"}, 10_000
   end
 
+  test "dispatch pauses as needs guidance when tracker transition policy asks" do
+    workspace_root = tmp_dir("orchestrator-transition-policy-ask")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: fake_claude_script(workspace_root, "transition-policy-ask-session", 0),
+      action_policy_command: fake_action_policy_script(workspace_root, "ask")
+    )
+
+    issue = %Issue{
+      id: "issue-transition-ask",
+      identifier: "MT-POLICY-ASK",
+      title: "Transition ask test",
+      description: "Should pause before transition",
+      state: "Todo",
+      url: "https://example.org/issues/MT-POLICY-ASK"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+    Application.put_env(:rondo, :memory_tracker_recipient, self())
+
+    orchestrator_name = Module.concat(__MODULE__, :TransitionPolicyAskOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_recipient)
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    state = :sys.get_state(pid)
+    state = %{state | max_concurrent_agents: 1, poll_interval_ms: 60_000}
+    :sys.replace_state(pid, fn _ -> state end)
+
+    send(pid, {:tick, state.tick_token})
+
+    paused_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).paused do
+          [entry | _] -> entry
+          _ -> nil
+        end
+      end)
+
+    assert paused_entry.issue_id == "issue-transition-ask"
+    paused_state = :sys.get_state(pid)
+    assert %Rondo.RunLedger{} = paused_state.paused_interrupts["issue-transition-ask"].ledger
+    assert paused_state.paused_interrupts["issue-transition-ask"].ledger.run_id == paused_entry.run_id
+    assert paused_state.paused_interrupts["issue-transition-ask"].ledger.run_dir == paused_entry.run_dir
+    assert paused_entry.interrupt["reason"] == "action_policy_guidance_required"
+    assert paused_entry.interrupt["blocked_side_effect"]["label"] == "Tracker update"
+    assert paused_entry.interrupt["suggested_responses"] |> Enum.any?(&(&1["id"] == "approve_once"))
+
+    manifest = paused_entry.run_dir |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "action_policy_decision"))
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "interrupt_created"))
+
+    refute_receive {:memory_tracker_state_update, "issue-transition-ask", "In Progress"}, 100
+    assert GenServer.call(pid, :snapshot).running == []
+    File.mkdir_p!(Path.join(workspace_root, "MT-POLICY-ASK"))
+
+    assert {:ok, %{status: :resumed}} = Orchestrator.submit_guidance(orchestrator_name, "issue-transition-ask", "approve_once")
+    assert_receive {:memory_tracker_state_update, "issue-transition-ask", "In Progress"}, 10_000
+
+    running_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).running do
+          [entry | _] -> entry
+          _ -> nil
+        end
+      end)
+
+    assert running_entry.issue_id == "issue-transition-ask"
+    assert GenServer.call(pid, :snapshot).paused == []
+
+    resumed_manifest = paused_entry.run_dir |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
+    assert Enum.any?(resumed_manifest["checkpoints"], &(&1["kind"] == "guidance_submitted"))
+    assert Enum.any?(resumed_manifest["checkpoints"], &(&1["kind"] == "spawned"))
+
+    wait_until(fn ->
+      case GenServer.call(pid, :snapshot).running do
+        [] -> true
+        _ -> nil
+      end
+    end)
+  end
+
+  test "approve_once guidance revalidates tracker transition before resume" do
+    workspace_root = tmp_dir("orchestrator-transition-policy-stale")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: fake_claude_script(workspace_root, "transition-policy-stale-session", 0),
+      action_policy_command: fake_action_policy_script(workspace_root, "ask")
+    )
+
+    issue = %Issue{
+      id: "issue-transition-stale",
+      identifier: "MT-POLICY-STALE",
+      title: "Transition stale test",
+      description: "Should not resume stale transition",
+      state: "Todo",
+      url: "https://example.org/issues/MT-POLICY-STALE"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+    Application.put_env(:rondo, :memory_tracker_recipient, self())
+
+    orchestrator_name = Module.concat(__MODULE__, :TransitionPolicyStaleOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_recipient)
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    state = :sys.get_state(pid)
+    state = %{state | max_concurrent_agents: 1, poll_interval_ms: 60_000}
+    :sys.replace_state(pid, fn _ -> state end)
+
+    send(pid, {:tick, state.tick_token})
+
+    wait_until(fn ->
+      case GenServer.call(pid, :snapshot).paused do
+        [_entry | _] -> true
+        _ -> nil
+      end
+    end)
+
+    Application.put_env(:rondo, :memory_tracker_issues, [%{issue | state: "Done"}])
+
+    assert {:error, {:guidance_side_effect_failed, :guidance_issue_not_todo}} =
+             Orchestrator.submit_guidance(orchestrator_name, "issue-transition-stale", "approve_once")
+
+    refute_receive {:memory_tracker_state_update, "issue-transition-stale", "In Progress"}, 100
+    assert [%{issue_id: "issue-transition-stale"}] = GenServer.call(pid, :snapshot).paused
+    assert GenServer.call(pid, :snapshot).running == []
+  end
+
   test "completed agent runs appear in snapshot archived list" do
     issue_id = "issue-archive-test"
 
@@ -2495,6 +2696,27 @@ defmodule Rondo.OrchestratorStatusTest do
     path = Path.join(System.tmp_dir!(), "rondo-#{name}-#{System.unique_integer([:positive])}")
     File.rm_rf!(path)
     File.mkdir_p!(path)
+    path
+  end
+
+  defp fake_action_policy_script(root, decision) do
+    path = Path.join(root, "fake-action-policy.sh")
+
+    File.write!(path, """
+    #!/bin/sh
+    action=""
+    classes=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --action) action="$2"; shift 2 ;;
+        --class) classes="$classes${classes:+,}$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '{"decision":"#{decision}","action":"%s","classes":["%s"],"mode":"unattended-auto","log_level":"warning","requires_human":true,"reason":"test #{decision}","matched_rules":[]}' "$action" "$classes"
+    """)
+
+    File.chmod!(path, 0o755)
     path
   end
 

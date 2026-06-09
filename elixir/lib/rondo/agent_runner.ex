@@ -14,26 +14,45 @@ defmodule Rondo.AgentRunner do
   def run(issue, claude_update_recipient \\ nil, opts \\ []) do
     Logger.info("Starting agent run for #{issue_context(issue)}")
 
-    case Workspace.create_for_issue(issue) do
+    workspace_opts = workspace_policy_opts(opts)
+
+    case Workspace.create_for_issue(issue, workspace_opts) do
       {:ok, workspace} ->
-        try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue),
-               :ok <- send_phase_update(claude_update_recipient, issue, :claude_starting),
-               :ok <- run_agent_turns(workspace, issue, claude_update_recipient, opts) do
-            :ok
-          else
-            {:error, reason} ->
-              Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-              raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        with :ok <- Workspace.run_before_run_hook(workspace, issue, workspace_opts),
+             :ok <- send_phase_update(claude_update_recipient, issue, :claude_starting) do
+          try do
+            case run_agent_turns(workspace, issue, claude_update_recipient, opts) do
+              :ok -> :ok
+              {:error, reason} -> handle_agent_run_error(issue, reason)
+            end
+          after
+            Workspace.run_after_run_hook(workspace, issue, workspace_opts)
           end
-        after
-          Workspace.run_after_run_hook(workspace, issue)
+        else
+          {:error, reason} ->
+            handle_agent_run_error(issue, reason)
         end
 
       {:error, reason} ->
-        Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-        raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        handle_agent_run_error(issue, reason)
     end
+  end
+
+  defp workspace_policy_opts(opts) do
+    case Keyword.get(opts, :run_ledger) do
+      nil -> []
+      ledger -> [ledger: ledger]
+    end
+  end
+
+  defp handle_agent_run_error(issue, {:action_policy_guidance_required, interrupt}) do
+    Logger.warning("Agent run needs guidance for #{issue_context(issue)}: #{inspect(interrupt["blocked_side_effect"])}")
+    exit({:action_policy_guidance_required, interrupt})
+  end
+
+  defp handle_agent_run_error(issue, reason) do
+    Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
+    raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
   end
 
   defp claude_event_handler(recipient, issue, completion_ref \\ nil) do

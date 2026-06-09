@@ -85,6 +85,20 @@ defmodule RondoWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("submit_guidance", %{"issue-id" => issue_id, "guidance" => guidance}, socket) do
+    socket =
+      case Rondo.Orchestrator.submit_guidance(issue_id, guidance) do
+        {:ok, _response} -> socket
+        {:error, reason} -> put_flash(socket, :error, "Failed to submit guidance: #{inspect(reason)}")
+        :unavailable -> put_flash(socket, :error, "Failed to submit guidance: orchestrator unavailable")
+      end
+
+    {:noreply,
+     socket
+     |> assign(:payload, load_payload())
+     |> assign(:now, DateTime.utc_now())}
+  end
+
   def handle_event("select_archived", %{"identifier" => identifier}, socket) do
     archived = Map.get(socket.assigns.payload, :archived, [])
     group = Enum.find(archived, &(&1.issue_identifier == identifier))
@@ -226,6 +240,76 @@ defmodule RondoWeb.DashboardLive do
             </div>
           </div>
         </div>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Needs guidance</h2>
+              <p class="section-copy">Paused runs waiting for operator guidance at action-policy boundaries.</p>
+            </div>
+          </div>
+
+          <%= if Map.get(@payload, :needs_guidance, []) == [] do %>
+            <p class="empty-state">No runs need guidance.</p>
+          <% else %>
+            <div class="table-wrap">
+              <table class="data-table" style="min-width: 760px;">
+                <thead>
+                  <tr>
+                    <th>Issue</th>
+                    <th>Severity</th>
+                    <th>Waiting on</th>
+                    <th>Blocked since</th>
+                    <th>Last turn</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr
+                    :for={entry <- @payload.needs_guidance}
+                    class={"data-table-row #{if @selected_issue == entry.issue_identifier, do: "data-table-row-selected", else: ""}"}
+                    phx-click="select_issue"
+                    phx-value-identifier={entry.issue_identifier}
+                    style="cursor: pointer;"
+                  >
+                    <td>
+                      <div class="issue-stack">
+                        <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"} onclick="event.stopPropagation()">JSON</a>
+                      </div>
+                    </td>
+                    <td>
+                      <span class={guidance_severity_class(entry.guidance_severity)}>
+                        <%= entry.guidance_severity || "warning" %>
+                      </span>
+                    </td>
+                    <td>
+                      <div class="detail-stack">
+                        <span class="event-text"><%= Map.get(entry.blocked_side_effect || %{}, :label) || "Side effect" %></span>
+                        <span class="muted event-meta"><%= Map.get(entry.blocked_side_effect || %{}, :action) || "action_policy.ask" %></span>
+                      </div>
+                    </td>
+                    <td class="mono"><%= entry.paused_at || "n/a" %></td>
+                    <td class="numeric"><%= length(entry.event_log || []) %> events</td>
+                    <td>
+                      <%= if quick_guidance_response(entry) do %>
+                        <button
+                          type="button"
+                          class="subtle-button"
+                          phx-click="submit_guidance"
+                          phx-value-issue-id={entry.issue_id}
+                          phx-value-guidance={quick_guidance_response(entry).guidance}
+                        >
+                          <%= quick_guidance_response(entry).label %>
+                        </button>
+                      <% end %>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          <% end %>
+        </section>
 
         <section class="section-card">
           <div class="section-header">
@@ -609,6 +693,17 @@ defmodule RondoWeb.DashboardLive do
       _ -> iso_string
     end
   end
+
+  defp quick_guidance_response(entry) do
+    entry
+    |> Map.get(:suggested_responses, [])
+    |> Enum.find(fn response -> Map.get(response, :quick) == true end)
+  end
+
+  defp guidance_severity_class("critical"), do: "state-badge state-badge-danger"
+  defp guidance_severity_class("warning"), do: "state-badge state-badge-warning"
+  defp guidance_severity_class("info"), do: "state-badge state-badge-active"
+  defp guidance_severity_class(_severity), do: "state-badge state-badge-warning"
 
   defp state_badge_class(state) do
     base = "state-badge"

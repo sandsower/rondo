@@ -1,5 +1,5 @@
 defmodule Rondo.RunOnceTest do
-  use Rondo.TestSupport, async: true
+  use Rondo.TestSupport
 
   import ExUnit.CaptureLog
 
@@ -92,13 +92,69 @@ defmodule Rondo.RunOnceTest do
                deps: deps(issue("issue-todo", state: "Todo"), parent)
              )
 
+    assert_received {:action_policy_evaluate, "tracker.issue.transition", ["git-remote"]}
     assert_received {:update_issue_state, "issue-todo", "In Progress"}
     assert_received {:agent_run, %Issue{id: "issue-todo", state: "In Progress"}, agent_opts}
     assert_run_dir_option(agent_opts)
   end
 
-  test "returns clear error when Todo transition fails" do
+  test "records Todo transition action policy decisions in the run ledger" do
     parent = self()
+    workspace_root = tmp_dir("run-once-policy-ledger")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    assert :ok =
+             RunOnce.run("issue-todo",
+               deps: deps(issue("issue-todo", state: "Todo"), parent)
+             )
+
+    assert_received {:agent_run, %Issue{id: "issue-todo", state: "In Progress"}, agent_opts}
+    manifest = agent_opts |> Keyword.fetch!(:run_dir) |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "action_policy_decision"))
+  end
+
+  test "blocks Todo transitions when action policy asks for guidance" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-policy-ask-ledger")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    assert {:error, {:action_policy_guidance_required, interrupt}} =
+             RunOnce.run("issue-todo",
+               deps: deps(issue("issue-todo", state: "Todo"), parent, policy_decision: "ask")
+             )
+
+    assert interrupt["reason"] == "action_policy_guidance_required"
+    assert interrupt["blocked_side_effect"]["action"] == "tracker.issue.transition"
+    assert interrupt["blocked_side_effect"]["resume_safe"] == true
+    assert interrupt["suggested_responses"] |> Enum.any?(&(&1["id"] == "approve_once"))
+    refute_received {:update_issue_state, _, _}
+    refute_received {:agent_run, _, _}
+
+    manifest = latest_run_manifest!(workspace_root, "GH-1")
+    assert manifest["status"] == "paused"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "action_policy_decision"))
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "interrupt_created"))
+  end
+
+  test "blocks Todo transitions when action policy denies" do
+    parent = self()
+
+    assert {:error, {:action_policy_denied, %{"decision" => "deny"}}} =
+             RunOnce.run("issue-todo",
+               deps: deps(issue("issue-todo", state: "Todo"), parent, policy_decision: "deny")
+             )
+
+    refute_received {:update_issue_state, _, _}
+    refute_received {:agent_run, _, _}
+  end
+
+  test "returns clear error and fails the ledger when Todo transition fails" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-transition-failure-ledger")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
     assert {:error, {:issue_transition_failed, _context, :boom}} =
              RunOnce.run("issue-todo",
@@ -106,6 +162,41 @@ defmodule Rondo.RunOnceTest do
              )
 
     refute_received {:agent_run, _, _}
+
+    manifest = latest_run_manifest!(workspace_root, "GH-1")
+    assert manifest["status"] == "failed"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "failed"))
+  end
+
+  test "pauses the ledger when agent workspace policy exits with guidance" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-agent-guidance-ledger")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    interrupt =
+      Rondo.SideEffectPolicy.guidance_interrupt(
+        %{
+          action: "workspace.hook.before_run",
+          classes: ["workspace-write"],
+          label: "Before-run hook",
+          required: true,
+          resume_safe: false,
+          skip_behavior: "abort"
+        },
+        %{"decision" => "ask", "action" => "workspace.hook.before_run", "mode" => "unattended-auto"}
+      )
+
+    agent_runner = fn _issue, _agent_opts -> exit({:action_policy_guidance_required, interrupt}) end
+
+    assert {:error, {:action_policy_guidance_required, ^interrupt}} =
+             RunOnce.run("issue-1",
+               deps: deps(issue("issue-1", state: "In Progress"), parent, agent_runner: agent_runner)
+             )
+
+    manifest = latest_run_manifest!(workspace_root, "GH-1")
+    assert manifest["status"] == "paused"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "interrupt_created"))
   end
 
   test "converts adapter exceptions into errors" do
@@ -304,6 +395,16 @@ defmodule Rondo.RunOnceTest do
     Path.join(System.tmp_dir!(), "rondo-#{name}-#{System.unique_integer([:positive])}")
   end
 
+  defp latest_run_manifest!(workspace_root, identifier) do
+    [manifest_path | _] =
+      workspace_root
+      |> Path.join(Path.join([".rondo_runs", identifier, "*", "manifest.json"]))
+      |> Path.wildcard()
+      |> Enum.sort(:desc)
+
+    manifest_path |> File.read!() |> Jason.decode!()
+  end
+
   defp write_manifest!(payload) do
     dir = tmp_dir("manifest")
     File.mkdir_p!(dir)
@@ -315,6 +416,7 @@ defmodule Rondo.RunOnceTest do
   defp deps(fetch_result, parent, opts \\ []) do
     update_result = Keyword.get(opts, :update_result, :ok)
     agent_runner = Keyword.get(opts, :agent_runner, :ok)
+    policy_decision = Keyword.get(opts, :policy_decision, "allow")
 
     %{
       fetch_issue_states_by_ids: fn issue_ids ->
@@ -324,6 +426,21 @@ defmodule Rondo.RunOnceTest do
       update_issue_state: fn issue_id, state_name ->
         send(parent, {:update_issue_state, issue_id, state_name})
         update_result
+      end,
+      action_policy_evaluator: fn action, classes, _opts ->
+        send(parent, {:action_policy_evaluate, action, classes})
+
+        {:ok,
+         %{
+           "decision" => policy_decision,
+           "action" => action,
+           "classes" => classes,
+           "mode" => "supervised-auto",
+           "log_level" => if(policy_decision == "deny", do: "error", else: "warning"),
+           "requires_human" => policy_decision == "ask",
+           "reason" => "test #{policy_decision}",
+           "matched_rules" => []
+         }}
       end,
       agent_runner: fn issue, agent_opts ->
         send(parent, {:agent_run, issue, agent_opts})
