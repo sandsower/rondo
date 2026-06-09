@@ -1060,6 +1060,7 @@ defmodule Rondo.Orchestrator do
 
   defp paused_entry_from_running(issue_id, running_entry, interrupt, ledger) do
     issue = Map.get(running_entry, :issue) || %Issue{id: issue_id, identifier: Map.get(running_entry, :identifier)}
+    ledger = ledger || Map.get(running_entry, :ledger)
 
     %{
       issue_id: issue_id,
@@ -1074,7 +1075,8 @@ defmodule Rondo.Orchestrator do
       retry_attempt: Map.get(running_entry, :retry_attempt),
       latest_gate: Map.get(running_entry, :latest_gate),
       interrupt: interrupt,
-      tracker_visibility: "known"
+      tracker_visibility: "known",
+      ledger: ledger
     }
   end
 
@@ -1482,10 +1484,9 @@ defmodule Rondo.Orchestrator do
 
   @spec submit_guidance(GenServer.server(), String.t(), String.t()) :: {:ok, map()} | {:error, term()} | :unavailable
   def submit_guidance(server, issue_id, guidance) when is_binary(issue_id) and is_binary(guidance) do
-    if Process.whereis(server) do
-      GenServer.call(server, {:submit_guidance, issue_id, guidance})
-    else
-      :unavailable
+    case GenServer.whereis(server) do
+      pid when is_pid(pid) -> GenServer.call(pid, {:submit_guidance, issue_id, guidance})
+      _other -> :unavailable
     end
   end
 
@@ -1496,10 +1497,9 @@ defmodule Rondo.Orchestrator do
 
   @spec request_refresh(GenServer.server()) :: map() | :unavailable
   def request_refresh(server) do
-    if Process.whereis(server) do
-      GenServer.call(server, :request_refresh)
-    else
-      :unavailable
+    case GenServer.whereis(server) do
+      pid when is_pid(pid) -> GenServer.call(pid, :request_refresh)
+      _other -> :unavailable
     end
   end
 
@@ -1508,15 +1508,17 @@ defmodule Rondo.Orchestrator do
 
   @spec snapshot(GenServer.server(), timeout()) :: map() | :timeout | :unavailable
   def snapshot(server, timeout) do
-    if Process.whereis(server) do
-      try do
-        GenServer.call(server, :snapshot, timeout)
-      catch
-        :exit, {:timeout, _} -> :timeout
-        :exit, _ -> :unavailable
-      end
-    else
-      :unavailable
+    case GenServer.whereis(server) do
+      pid when is_pid(pid) ->
+        try do
+          GenServer.call(pid, :snapshot, timeout)
+        catch
+          :exit, {:timeout, _} -> :timeout
+          :exit, _ -> :unavailable
+        end
+
+      _other ->
+        :unavailable
     end
   end
 
@@ -2088,16 +2090,17 @@ defmodule Rondo.Orchestrator do
     with {:ok, manifest} <- RunLedger.load_manifest(path),
          "paused" <- Map.get(manifest, "status"),
          %{"id" => issue_id} = issue_snapshot when is_binary(issue_id) <- Map.get(manifest, "issue"),
-         entry <- paused_entry_from_manifest(manifest, issue_snapshot) do
+         entry <- paused_entry_from_manifest(manifest, issue_snapshot, path) do
       {issue_id, entry}
     else
       _ -> nil
     end
   end
 
-  defp paused_entry_from_manifest(manifest, issue_snapshot) do
+  defp paused_entry_from_manifest(manifest, issue_snapshot, manifest_path) do
     issue = issue_from_manifest(issue_snapshot)
     interrupt = Map.get(manifest, "interrupt", %{})
+    ledger = run_ledger_from_manifest(manifest, manifest_path)
 
     %{
       issue_id: issue.id,
@@ -2105,16 +2108,42 @@ defmodule Rondo.Orchestrator do
       issue: issue,
       state: issue.state,
       session_id: get_in(manifest, ["agent", "session_id"]) || get_in(interrupt, ["resume", "session_id"]),
-      run_id: Map.get(manifest, "run_id"),
-      run_dir: Map.get(manifest, "run_dir"),
+      run_id: run_ledger_id(ledger) || Map.get(manifest, "run_id"),
+      run_dir: run_ledger_dir(ledger) || Map.get(manifest, "run_dir"),
       workspace: get_in(manifest, ["repo", "workspace"]),
       paused_at: get_in(manifest, ["timestamps", "paused_at"]),
       retry_attempt: get_in(interrupt, ["resume", "retry_attempt"]),
       latest_gate: Map.get(interrupt, "gate"),
       interrupt: interrupt,
-      tracker_visibility: "unknown"
+      tracker_visibility: "unknown",
+      ledger: ledger
     }
   end
+
+  defp run_ledger_from_manifest(%{"run_id" => run_id, "run_dir" => run_dir} = manifest, manifest_path)
+       when is_binary(run_id) and is_binary(run_dir) and is_binary(manifest_path) do
+    %RunLedger{
+      run_id: run_id,
+      run_dir: run_dir,
+      manifest_path: manifest_path,
+      next_seq: next_run_ledger_sequence(Map.get(manifest, "checkpoints", [])),
+      manifest: manifest
+    }
+  end
+
+  defp run_ledger_from_manifest(_manifest, _manifest_path), do: nil
+
+  defp next_run_ledger_sequence(checkpoints) when is_list(checkpoints) do
+    checkpoints
+    |> Enum.map(fn checkpoint -> Map.get(checkpoint, "seq") end)
+    |> Enum.filter(&is_integer/1)
+    |> case do
+      [] -> 1
+      sequences -> Enum.max(sequences) + 1
+    end
+  end
+
+  defp next_run_ledger_sequence(_checkpoints), do: 1
 
   defp issue_from_manifest(issue_snapshot) do
     %Issue{
@@ -2294,14 +2323,14 @@ defmodule Rondo.Orchestrator do
 
   defp tracker_transition_action do
     case Config.tracker_kind() do
-      "memory" -> "file.read"
+      "memory" -> "tracker.test.transition"
       _ -> "tracker.issue.transition"
     end
   end
 
   defp tracker_write_classes do
     case Config.tracker_kind() do
-      "memory" -> ["read"]
+      "memory" -> ["test"]
       _ -> ["git-remote"]
     end
   end

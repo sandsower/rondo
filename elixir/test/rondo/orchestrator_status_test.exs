@@ -21,6 +21,19 @@ defmodule Rondo.OrchestratorStatusTest do
     send(pid, :stop)
   end
 
+  test "public server helpers accept pid servers" do
+    orchestrator_name = Module.concat(__MODULE__, :PidServerHelperOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    assert %{running: []} = Orchestrator.snapshot(pid, 1_000)
+    assert %{queued: true} = Orchestrator.request_refresh(pid)
+    assert {:error, :guidance_interrupt_not_found} = Orchestrator.submit_guidance(pid, "missing", "approve_once")
+  end
+
   test "orchestrator snapshot reflects last claude update and session id" do
     issue_id = "issue-snapshot"
 
@@ -2080,6 +2093,9 @@ defmodule Rondo.OrchestratorStatusTest do
     state = :sys.get_state(pid)
     refute Map.has_key?(state.running, issue.id)
     assert MapSet.member?(state.claimed, issue.id)
+    assert %Rondo.RunLedger{} = state.paused_interrupts[issue.id].ledger
+    assert state.paused_interrupts[issue.id].ledger.run_id == paused_entry.run_id
+    assert state.paused_interrupts[issue.id].ledger.run_dir == paused_entry.run_dir
 
     paused_manifest =
       [workspace_root, ".rondo_runs", "MT-GATE-PAUSE", "*", "manifest.json"]
@@ -2146,6 +2162,10 @@ defmodule Rondo.OrchestratorStatusTest do
 
     state = :sys.get_state(pid)
     assert MapSet.member?(state.claimed, issue.id)
+    assert %Rondo.RunLedger{} = state.paused_interrupts[issue.id].ledger
+    assert state.paused_interrupts[issue.id].ledger.run_id == ledger.run_id
+    assert state.paused_interrupts[issue.id].ledger.run_dir == ledger.run_dir
+    assert state.paused_interrupts[issue.id].ledger.next_seq == 2
 
     send(pid, {:tick, state.tick_token})
     Process.sleep(100)
@@ -2447,6 +2467,10 @@ defmodule Rondo.OrchestratorStatusTest do
       end)
 
     assert paused_entry.issue_id == "issue-transition-ask"
+    paused_state = :sys.get_state(pid)
+    assert %Rondo.RunLedger{} = paused_state.paused_interrupts["issue-transition-ask"].ledger
+    assert paused_state.paused_interrupts["issue-transition-ask"].ledger.run_id == paused_entry.run_id
+    assert paused_state.paused_interrupts["issue-transition-ask"].ledger.run_dir == paused_entry.run_dir
     assert paused_entry.interrupt["reason"] == "action_policy_guidance_required"
     assert paused_entry.interrupt["blocked_side_effect"]["label"] == "Tracker update"
     assert paused_entry.interrupt["suggested_responses"] |> Enum.any?(&(&1["id"] == "approve_once"))
@@ -2472,6 +2496,10 @@ defmodule Rondo.OrchestratorStatusTest do
 
     assert running_entry.issue_id == "issue-transition-ask"
     assert GenServer.call(pid, :snapshot).paused == []
+
+    resumed_manifest = paused_entry.run_dir |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
+    assert Enum.any?(resumed_manifest["checkpoints"], &(&1["kind"] == "guidance_submitted"))
+    assert Enum.any?(resumed_manifest["checkpoints"], &(&1["kind"] == "spawned"))
 
     wait_until(fn ->
       case GenServer.call(pid, :snapshot).running do

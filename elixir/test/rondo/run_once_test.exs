@@ -395,10 +395,10 @@ defmodule Rondo.RunOnceTest do
     Path.join(System.tmp_dir!(), "rondo-#{name}-#{System.unique_integer([:positive])}")
   end
 
-  defp latest_run_manifest!(workspace_root, _identifier) do
+  defp latest_run_manifest!(workspace_root, identifier) do
     [manifest_path | _] =
       workspace_root
-      |> Path.join(".rondo_runs/*/*/manifest.json")
+      |> Path.join(Path.join([".rondo_runs", identifier, "*", "manifest.json"]))
       |> Path.wildcard()
       |> Enum.sort(:desc)
 

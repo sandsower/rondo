@@ -86,7 +86,12 @@ defmodule RondoWeb.DashboardLive do
 
   @impl true
   def handle_event("submit_guidance", %{"issue-id" => issue_id, "guidance" => guidance}, socket) do
-    _result = Rondo.Orchestrator.submit_guidance(issue_id, guidance)
+    socket =
+      case Rondo.Orchestrator.submit_guidance(issue_id, guidance) do
+        {:ok, _response} -> socket
+        {:error, reason} -> put_flash(socket, :error, "Failed to submit guidance: #{inspect(reason)}")
+        :unavailable -> put_flash(socket, :error, "Failed to submit guidance: orchestrator unavailable")
+      end
 
     {:noreply,
      socket
@@ -296,10 +301,6 @@ defmodule RondoWeb.DashboardLive do
                           phx-value-guidance={quick_guidance_response(entry).guidance}
                         >
                           <%= quick_guidance_response(entry).label %>
-                        </button>
-                      <% else %>
-                        <button type="button" class="subtle-button" onclick="event.stopPropagation();">
-                          Open
                         </button>
                       <% end %>
                     </td>

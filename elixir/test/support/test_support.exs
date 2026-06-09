@@ -253,16 +253,16 @@ defmodule Rondo.TestSupport do
     #!/bin/sh
     action=""
     mode=""
-    classes=""
+    classes_json=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --action) action="$2"; shift 2 ;;
         --mode) mode="$2"; shift 2 ;;
-        --class) classes="$classes${classes:+,}$2"; shift 2 ;;
+        --class) classes_json="${classes_json}${classes_json:+,}\\\"$2\\\""; shift 2 ;;
         *) shift ;;
       esac
     done
-    printf '{"decision":"allow","action":"%s","mode":"%s","classes":["%s"],"log_level":"info","requires_human":false,"reason":"test allow","matched_rules":[]}' "$action" "$mode" "$classes"
+    printf '{"decision":"allow","action":"%s","mode":"%s","classes":[%s],"log_level":"info","requires_human":false,"reason":"test allow","matched_rules":[]}' "$action" "$mode" "$classes_json"
     """)
 
     File.chmod!(path, 0o755)

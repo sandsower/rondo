@@ -177,14 +177,14 @@ defmodule Rondo.RunOnce do
 
   defp tracker_transition_action do
     case Config.tracker_kind() do
-      "memory" -> "file.read"
+      "memory" -> "tracker.test.transition"
       _ -> "tracker.issue.transition"
     end
   end
 
   defp tracker_write_classes do
     case Config.tracker_kind() do
-      "memory" -> ["read"]
+      "memory" -> ["test"]
       _ -> ["git-remote"]
     end
   end
