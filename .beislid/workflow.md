@@ -4,18 +4,23 @@
 
 ## Issue tracker
 
-GitHub Issues on `sandsower/rondo`, accessed via the `gh` CLI.
+Linear issues in the personal `teotl` workspace, team `rondo`, accessed via Linear MCP.
 
 ```beislid:ticket_source
-type: cli
-command: 'gh issue view {id} --json title,body,labels'
-id_pattern: '^\d+$'
-link_template: 'https://github.com/sandsower/rondo/issues/{id}'
+type: mcp
+tool: mcp__linear_personal__get_issue
+id_pattern: '^RON-\d+$'
+link_template: 'https://linear.app/teotl/issue/{id}'
+```
+
+```beislid:branch_pattern
+^[^/]+/([a-z]+-\d+)
 ```
 
 ```beislid:ticket_update
-type: cli
-comment_command: 'gh issue comment {id} --body-file {body_file}'
+type: mcp
+comment_tool: mcp__linear_personal__save_comment
+issue_tool: mcp__linear_personal__save_issue
 ```
 
 ## PR reviews
