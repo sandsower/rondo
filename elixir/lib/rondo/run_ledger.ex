@@ -248,7 +248,7 @@ defmodule Rondo.RunLedger do
       event: Map.get(update, :event, Map.get(update, "event")),
       adapter: agent_update_value(update, :adapter),
       run_ref: sanitize_value(agent_update_value(update, :run_ref)),
-      session_id: Map.get(update, :session_id, Map.get(update, "session_id")),
+      session_id: sanitize_value(Map.get(update, :session_id, Map.get(update, "session_id"))),
       usage: sanitize_value(Map.get(update, :usage, Map.get(update, "usage"))),
       capabilities: sanitize_value(agent_update_value(update, :capabilities)),
       final_report: sanitize_value(agent_update_value(update, :final_report)),
@@ -383,7 +383,7 @@ defmodule Rondo.RunLedger do
       "event" => event |> Map.get(:event, Map.get(event, "event")) |> kind_to_string(),
       "adapter" => sanitize_value(Map.get(event, :adapter, Map.get(event, "adapter"))),
       "run_ref" => sanitize_value(Map.get(event, :run_ref, Map.get(event, "run_ref"))),
-      "session_id" => Map.get(event, :session_id, Map.get(event, "session_id")),
+      "session_id" => sanitize_value(Map.get(event, :session_id, Map.get(event, "session_id"))),
       "usage" => sanitize_value(Map.get(event, :usage, Map.get(event, "usage"))),
       "raw" => event |> Map.get(:raw, Map.get(event, "raw", %{})) |> sanitize_agent_raw()
     }
@@ -397,11 +397,8 @@ defmodule Rondo.RunLedger do
       "run_id" => run_id,
       "status" => "running",
       "run_dir" => Path.expand(run_dir),
-      "issue" => issue_snapshot(issue),
-      "repo" => %{
-        "workspace_root" => Path.expand(workspace_root),
-        "workspace" => Path.expand(workspace)
-      },
+      "issue" => sanitize_value(issue_snapshot(issue)),
+      "repo" => repo_snapshot(workspace_root, workspace, opts),
       "tracker" => %{"adapter" => Keyword.get(opts, :tracker_adapter, Config.tracker_kind())},
       "agent" => %{
         "adapter" => Keyword.get(opts, :agent_adapter, Config.agent_adapter()),
@@ -448,6 +445,30 @@ defmodule Rondo.RunLedger do
       "labels" => issue_value(issue, :labels, []),
       "priority" => issue_value(issue, :priority)
     }
+  end
+
+  defp repo_snapshot(workspace_root, workspace, opts) do
+    runner = Keyword.get(opts, :git_runner, &run_git/2)
+
+    %{
+      "workspace_root" => Path.expand(workspace_root),
+      "workspace" => Path.expand(workspace),
+      "base_commit" => workspace_git_value(runner, workspace, ["rev-parse", "HEAD"]),
+      "base_branch" => workspace_git_value(runner, workspace, ["rev-parse", "--abbrev-ref", "HEAD"])
+    }
+  end
+
+  defp workspace_git_value(runner, workspace, args) do
+    with true <- File.dir?(workspace),
+         {output, 0} <- runner.(args, workspace) do
+      String.trim(output)
+    else
+      _other -> nil
+    end
+  end
+
+  defp run_git(args, workspace) do
+    System.cmd("git", args, cd: workspace, stderr_to_stdout: true)
   end
 
   defp process_provider_snapshot(opts) do

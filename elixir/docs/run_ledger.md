@@ -39,7 +39,7 @@ If `workspace.root` points at a temporary directory, ledgers are ephemeral with 
 - absolute `run_dir`
 - ticket snapshot: id, identifier, title, description, state, URL, labels, and priority
 - optional `source_contract` metadata for local execution-request / approved-slice manifest runs
-- workspace root and expected workspace path
+- workspace root, expected workspace path, and the run-start `base_commit`/`base_branch` (or `null` when the workspace is not a git repository at run start)
 - tracker and agent adapter names
 - agent/Claude mode settings
 - timestamps
@@ -98,16 +98,16 @@ Values are size-capped, secret-looking keys are redacted, and all persisted stri
 
 ## Patch artifact
 
-For completed `run-once` runs whose workspace has local git changes, Rondo captures the final diff for later clean evaluation:
+For completed runs (orchestrator-driven and `run-once`) whose workspace changed during the run, Rondo captures the final diff for later clean evaluation:
 
-- `artifacts/changes.patch` — `git diff --binary` output against the workspace `HEAD`, including untracked file contents (captured via intent-to-add). It applies with `git apply` on a clean checkout of the recorded base ref. Patch content is intentionally not redacted; a modified patch would no longer apply.
-- `artifacts/patch.json` — `rondo.patch/v0` metadata: `format` (`git-diff`), `base_ref` (workspace `HEAD` commit), `base_branch`, `includes_untracked`, `captured_at`, `changed_paths`, and `patch_path`.
+- `artifacts/changes.patch` — `git diff --binary` output against the run-start `repo.base_commit` recorded in the manifest (falling back to the capture-time `HEAD` when no base commit was recorded or it is no longer resolvable), so both work the agent committed during the run and uncommitted/untracked changes (captured via intent-to-add) are included. It applies with `git apply` on a clean checkout of the recorded `base_ref`. Patch content is intentionally not redacted; a modified patch would no longer apply.
+- `artifacts/patch.json` — `rondo.patch/v0` metadata: `format` (`git-diff`), `base_ref` (the commit the patch applies on), `head_ref` (workspace `HEAD` at capture time), `base_branch`, `includes_untracked`, `includes_committed`, `captured_at`, `changed_paths`, and `patch_path`.
 
-Both files are linked from the manifest with artifact kinds `patch` and `patch_metadata`. Capture is skipped (without failing the run) when the workspace is missing, not a git repository, has no commits, or has no local changes. See `Rondo.PatchArtifact`.
+Both files are linked from the manifest with artifact kinds `patch` and `patch_metadata`. Capture is skipped (without failing the run) when the workspace is missing, not a git repository, has no commits, or has no changes relative to the base. See `Rondo.PatchArtifact`.
 
 ## Final report artifact
 
-Completed `run-once` runs validate the adapter's final report against the `rondo.final_report/v0` schema (`Rondo.FinalReport`). The report is a JSON object — the whole final report string or its last fenced ```json block — with required fields `schema`, `summary`, `changed_files`, `gates_run`, `failures`, `risks`, and `next_state`.
+Completed runs (orchestrator-driven and `run-once`) validate the adapter's final report against the `rondo.final_report/v0` schema (`Rondo.FinalReport`). The report is a JSON object — the whole final report string or a fenced ```json block (the first candidate that validates wins; the last fenced block is preferred when several validate) — with required fields `schema`, `summary`, `changed_files`, `gates_run`, `failures`, `risks`, and `next_state`.
 
 Validation writes a `final_report_validated` checkpoint and a manifest `final_report` block with `status` `valid`, `invalid`, or `missing` plus validation `errors`. Valid reports are persisted (sanitized) to `artifacts/final-report.json` and linked with artifact kind `final_report`.
 

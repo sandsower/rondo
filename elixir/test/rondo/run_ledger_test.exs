@@ -52,6 +52,54 @@ defmodule Rondo.RunLedgerTest do
     assert ledger.next_seq == 2
   end
 
+  test "create_run records the run-start base commit and branch for git workspaces" do
+    workspace_root = tmp_dir("ledger-git-base")
+    workspace = Path.join(workspace_root, "MT-401")
+    File.mkdir_p!(workspace)
+    git!(workspace, ["init", "--quiet", "--initial-branch", "main"])
+    git!(workspace, ["config", "user.email", "test@example.org"])
+    git!(workspace, ["config", "user.name", "Rondo Test"])
+    File.write!(Path.join(workspace, "tracked.txt"), "original\n")
+    git!(workspace, ["add", "tracked.txt"])
+    git!(workspace, ["commit", "--quiet", "-m", "initial"])
+    base_commit = git!(workspace, ["rev-parse", "HEAD"])
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(), workspace_root: workspace_root, now: @now, random_suffix: "ba5e1234")
+
+    manifest = decode_json!(ledger.manifest_path)
+    assert manifest["repo"]["workspace"] == Path.expand(workspace)
+    assert manifest["repo"]["base_commit"] == base_commit
+    assert manifest["repo"]["base_branch"] == "main"
+  end
+
+  test "create_run records nil base commit when the workspace is missing or git fails" do
+    workspace_root = tmp_dir("ledger-no-git-base")
+
+    assert {:ok, missing_ledger} =
+             RunLedger.create_run(issue_fixture(), workspace_root: workspace_root, now: @now, random_suffix: "00000001")
+
+    manifest = decode_json!(missing_ledger.manifest_path)
+    assert manifest["repo"]["base_commit"] == nil
+    assert manifest["repo"]["base_branch"] == nil
+
+    workspace = Path.join(workspace_root, "MT-401")
+    File.mkdir_p!(workspace)
+    failing_runner = fn _args, ^workspace -> {"fatal: not a git repository\n", 128} end
+
+    assert {:ok, failed_ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "00000002",
+               git_runner: failing_runner
+             )
+
+    manifest = decode_json!(failed_ledger.manifest_path)
+    assert manifest["repo"]["base_commit"] == nil
+    assert manifest["repo"]["base_branch"] == nil
+  end
+
   test "create_run accepts string-keyed issue maps" do
     workspace_root = tmp_dir("ledger-string-map")
 
@@ -780,6 +828,11 @@ defmodule Rondo.RunLedgerTest do
   end
 
   defp decode_json!(path), do: path |> File.read!() |> Jason.decode!()
+
+  defp git!(cd, args) do
+    {output, 0} = System.cmd("git", args, cd: cd, stderr_to_stdout: true)
+    String.trim(output)
+  end
 
   defp tmp_dir(name) do
     path = Path.join(System.tmp_dir!(), "rondo-#{name}-#{System.unique_integer([:positive])}")
