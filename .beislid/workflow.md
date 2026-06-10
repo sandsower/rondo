@@ -67,6 +67,8 @@ Cheap gates first for iteration; `elixir-ci` is the pre-PR aggregate matching CI
 
 Sonnet-tier models handle implementation, review-fix, and babysit-style work (validated by the 2026-06-10 envelope batch); planning and adversarial skills prefer a stronger model. `mode: prefer` everywhere — fall back with disclosure rather than block.
 
+TRANSITIONAL VOCABULARY: the model aliases below are placeholders for the provider-neutral capability tiers (`light` / `standard` / `heavy` / `frontier`) decided in the 2026-06-10 poke-holes session. Today's model_routing contract only validates portable aliases and provider strings; once BEI-76 ships the tier→candidates mapping table and RON-30 the resolution plumbing, rewrite this block in tier vocabulary (sonnet → standard; opus → heavy) and delete this note.
+
 ```beislid:model_routing
 defaults:
   models: [sonnet]
