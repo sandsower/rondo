@@ -69,3 +69,25 @@ modes:
 ```beislid:probe_cache
 ttl_hours: 24
 ```
+
+
+## Babysit
+
+Allow `/babysit` to use the configured review-response/gate loop and close out automatically when policy permits.
+
+```beislid:babysit
+loop:
+  use_review_response: true
+  run_configured_gates_before_push: true
+  wait_interval_seconds: 60
+closeout:
+  merge:
+    mode: auto
+    method: repo-default
+    delete_branch: true
+  memento:
+    mode: auto
+  retro:
+    mode: auto
+    apply_findings: auto
+```
