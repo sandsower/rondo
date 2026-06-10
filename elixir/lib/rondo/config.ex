@@ -185,7 +185,9 @@ defmodule Rondo.Config do
                                keys: [
                                  enabled: [type: :boolean, default: @default_clean_eval_enabled],
                                  base_ref: [type: {:or, [:string, nil]}, default: nil],
-                                 gates: [type: {:list, :map}, default: []]
+                                 # nil (absent) falls back to top-level gates; an
+                                 # explicit [] means apply-only clean evaluation.
+                                 gates: [type: {:or, [{:list, :map}, nil]}, default: nil]
                                ]
                              ],
                              observability: [
@@ -371,8 +373,10 @@ defmodule Rondo.Config do
     validated_workflow_options()
     |> get_in([:clean_eval, :gates])
     |> case do
-      [_ | _] = gates -> Enum.map(gates, &normalize_gate/1)
-      _empty -> gates()
+      # An explicit `clean_eval.gates: []` means apply-only evaluation; only an
+      # absent key falls back to the top-level gates.
+      gates when is_list(gates) -> Enum.map(gates, &normalize_gate/1)
+      _absent -> gates()
     end
   end
 

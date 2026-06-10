@@ -272,8 +272,10 @@ Notes:
   checkpoint, and a manifest `clean_eval` pass/fail block). Patch apply failures are recorded as
   evaluator failures; runs without a patch artifact record `skipped`. Optional keys:
   `clean_eval.base_ref` overrides the patch metadata base ref, and `clean_eval.gates` (same shape
-  as top-level `gates`) overrides which gates run during clean evaluation (default: top-level
-  `gates`).
+  as top-level `gates`) overrides which gates run during clean evaluation. When `clean_eval.gates`
+  is absent the top-level `gates` run; an explicit `clean_eval.gates: []` means apply-only
+  evaluation (pass if the patch applies cleanly). Gate timeouts are recorded as environment
+  errors, not evaluator failures.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
 - `tracker.repo` is required for `tracker.kind: github` and uses `owner/repo` syntax.
 - `tracker.state_label_prefix` defaults to `status:` for GitHub label-emulated workflow states.

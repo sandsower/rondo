@@ -257,6 +257,12 @@ defmodule Rondo.RunOnce do
         Logger.warning("Failed to record run-once clean eval #{ledger_context(ledger)} reason=#{inspect(reason)}")
         ledger
     end
+  rescue
+    # Clean eval is reporting-only: it must never change the run result, even
+    # if it crashes. Log and keep the ledger unchanged.
+    error ->
+      Logger.warning("Run-once clean eval crashed #{ledger_context(ledger)} reason=#{Exception.message(error)}")
+      ledger
   end
 
   defp complete_run_once_ledger_result(ledger, result) do

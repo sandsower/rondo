@@ -35,6 +35,22 @@ defmodule Rondo.CleanEvalTest do
     assert Config.clean_eval_base_ref() == "main"
   end
 
+  test "explicitly empty clean_eval gates mean apply-only evaluation" do
+    context =
+      setup_run("clean-eval-empty-gates",
+        gates: [%{name: "would fail", command: "false"}],
+        clean_eval_enabled: true,
+        clean_eval_gates: []
+      )
+
+    write_patch_artifacts!(context)
+
+    assert Config.clean_eval_gates() == []
+    assert {:ok, _ledger, result} = CleanEval.run(context.ledger)
+    assert result.status == :pass
+    assert result.gates == nil
+  end
+
   test "rejects invalid clean_eval config" do
     write_workflow_file!(Workflow.workflow_file_path(),
       clean_eval_enabled: "maybe",
@@ -204,6 +220,30 @@ defmodule Rondo.CleanEvalTest do
 
     File.write!(metadata_path, Jason.encode!(%{"schema" => "rondo.patch/v0"}))
     assert {:ok, _ledger, %{status: :error, reason: "missing_base_ref"}} = CleanEval.run(context.ledger)
+  end
+
+  test "recovers from a stale worktree registration left by an interrupted run" do
+    context = setup_run("clean-eval-stale-worktree")
+    write_patch_artifacts!(context)
+
+    # Simulate a prior run that crashed between worktree creation and cleanup:
+    # the directory is gone but git still has the path registered.
+    stale = eval_workspace(context)
+    git!(context.workspace, ["worktree", "add", "--detach", stale, context.base_ref])
+    File.rm_rf!(stale)
+
+    assert {:ok, _ledger, result} = CleanEval.run(context.ledger)
+    assert result.status == :pass
+    refute File.exists?(stale)
+  end
+
+  test "errors when the manifest lacks a workspace root" do
+    context = setup_run("clean-eval-no-workspace-root")
+    write_patch_artifacts!(context)
+    {_root, manifest} = pop_in(context.ledger.manifest, ["repo", "workspace_root"])
+    ledger = %{context.ledger | manifest: manifest}
+
+    assert {:ok, _ledger, %{status: :error, reason: "missing_workspace_root"}} = CleanEval.run(ledger)
   end
 
   test "errors when the clean worktree cannot be created" do

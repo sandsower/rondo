@@ -371,6 +371,8 @@ defmodule Rondo.TestSupport do
 
   defp clean_eval_gates_yaml(nil), do: nil
 
+  defp clean_eval_gates_yaml([]), do: "  gates: []"
+
   defp clean_eval_gates_yaml(gates) when is_list(gates) do
     entries =
       Enum.map_join(gates, "\n", fn gate ->

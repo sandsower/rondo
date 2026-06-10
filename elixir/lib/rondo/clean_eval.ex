@@ -19,6 +19,8 @@ defmodule Rondo.CleanEval do
   Patch apply failures are evaluator failures (`:fail`), not crashes. A missing
   patch artifact (run with no changes) yields `:skipped`. Infrastructure problems
   (missing workspace, worktree creation failure, unreadable metadata) yield `:error`.
+  Gate timeouts are classified as environment failures (`:error`, not `:fail`),
+  consistent with `Rondo.Gates`' retryable/environment-failure classification.
 
   The gate runner is an injectable seam (`:gate_runner`, defaulting to
   `Rondo.Gates.run/3` — `(gates, workspace, opts) -> {:ok, summary} | {:error,
@@ -82,13 +84,19 @@ defmodule Rondo.CleanEval do
     %{
       run_dir: ledger.run_dir,
       workspace: Keyword.get(opts, :workspace, get_in(ledger.manifest, ["repo", "workspace"])),
-      eval_workspace: Path.join([workspace_root, @eval_root_dirname, ledger.run_id]),
+      eval_workspace: eval_workspace_path(workspace_root, ledger.run_id),
       base_ref_override: Keyword.get(opts, :base_ref, Config.clean_eval_base_ref()),
       gates: Keyword.get_lazy(opts, :gates, &Config.clean_eval_gates/0),
       gate_runner: Keyword.get(opts, :gate_runner, &Gates.run/3),
       runner: Keyword.get(opts, :runner, &run_git/2)
     }
   end
+
+  defp eval_workspace_path(workspace_root, run_id) when is_binary(workspace_root) do
+    Path.join([workspace_root, @eval_root_dirname, run_id])
+  end
+
+  defp eval_workspace_path(_workspace_root, _run_id), do: nil
 
   defp evaluate(context) do
     case load_patch(context) do
@@ -108,6 +116,7 @@ defmodule Rondo.CleanEval do
 
     cond do
       !File.regular?(patch_path) -> {:skipped, "missing_patch_artifact"}
+      is_nil(context.eval_workspace) -> {:error, "missing_workspace_root"}
       !is_binary(context.workspace) or !File.dir?(context.workspace) -> {:error, "missing_workspace"}
       true -> load_patch_metadata(context, patch_path)
     end
@@ -164,6 +173,9 @@ defmodule Rondo.CleanEval do
 
   defp create_eval_workspace(context, base_ref) do
     _removed = File.rm_rf(context.eval_workspace)
+    # Drop stale registrations from prior interrupted runs so `worktree add`
+    # does not fail with "already registered" for the same run_id path.
+    _pruned = git(context, context.workspace, ["worktree", "prune"])
 
     case git(context, context.workspace, ["worktree", "add", "--detach", context.eval_workspace, base_ref]) do
       {:ok, _output} -> :ok
