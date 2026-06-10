@@ -31,6 +31,7 @@ test:
 e2e:
 	@if [ "$$RONDO_RUN_LIVE_E2E" != "1" ]; then \
 		echo 'live E2E disabled: set RONDO_RUN_LIVE_E2E=1 (plus LINEAR_API_KEY, RONDO_E2E_LINEAR_TEAM, RONDO_E2E_LINEAR_PROJECT) to run the live Linear + Claude profile; see README "Live end-to-end test"'; \
+		exit 0; \
 	fi
 	$(MIX) test --only live_e2e
 

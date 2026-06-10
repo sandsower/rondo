@@ -380,6 +380,11 @@ defmodule Rondo.LiveE2E do
     end
   end
 
+  def cleanup_issue(other, _graphql) do
+    Logger.warning("live E2E cleanup_issue/2 called with unrecognised input: #{inspect(other)}; skipping")
+    {:error, {:invalid_issue_reference, other}}
+  end
+
   defp run_graphql(graphql, query, variables, operation) do
     case graphql.(query, variables) do
       {:ok, %{"errors" => errors} = body} when is_list(errors) and errors != [] ->
