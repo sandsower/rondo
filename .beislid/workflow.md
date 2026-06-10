@@ -6,6 +6,8 @@
 
 Linear issues in the personal `teotl` workspace, team `rondo`, accessed via Linear MCP.
 
+Tracker duality: these Linear issues mirror GitHub issues on `sandsower/rondo`. **Linear is canonical for state** (Todo/In Progress/Done); **GitHub is canonical for issue body and discussion** — fetch the GH body via `gh issue view` when the Linear description says "see Source link". When work completes, close both sides. Closing an envelope ticket (`[Envelope] ...`) never closes the implementation ticket it wraps — the envelope is the approval artifact, not the implementation (see the RON-10 reconciliation, 2026-06-10).
+
 ```beislid:ticket_source
 type: mcp
 tool: mcp__linear_personal__get_issue
@@ -41,11 +43,38 @@ rerequest_command: 'gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewe
 
 ## Quality gates
 
-Run the same verification as CI before shipping.
+Cheap gates first for iteration; `elixir-ci` is the pre-PR aggregate matching CI.
 
 ```beislid:gates
+- name: format
+  command: 'cd elixir && mix format --check-formatted'
+  cost: cheap
+  parallel_safe: true
+- name: credo
+  command: 'cd elixir && mix credo --strict'
+  cost: cheap
+  parallel_safe: true
+- name: test
+  command: 'cd elixir && mix test'
+  cost: expensive
 - name: elixir-ci
+  stage: pre-pr
   command: 'cd elixir && make all'
+  cost: expensive
+```
+
+## Model routing
+
+Sonnet-tier models handle implementation, review-fix, and babysit-style work (validated by the 2026-06-10 envelope batch); planning and adversarial skills prefer a stronger model. `mode: prefer` everywhere — fall back with disclosure rather than block.
+
+```beislid:model_routing
+defaults:
+  models: [sonnet]
+  mode: prefer
+overrides:
+  - skills: [spec, blueprint, poke-holes]
+    models: [opus]
+    mode: prefer
 ```
 
 ## Action policy
