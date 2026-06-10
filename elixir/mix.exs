@@ -51,7 +51,8 @@ defmodule Rondo.MixProject do
       ],
       test_ignore_filters: [
         "test/support/snapshot_support.exs",
-        "test/support/test_support.exs"
+        "test/support/test_support.exs",
+        "test/support/live_e2e.exs"
       ],
       dialyzer: [
         plt_add_apps: [:mix]
