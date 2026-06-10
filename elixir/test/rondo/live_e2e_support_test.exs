@@ -36,42 +36,93 @@ defmodule Rondo.LiveE2ESupportTest do
     end
   end
 
-  describe "load_context/1" do
+  # Injects a find_executable stub that resolves "beislid" to a fixed path.
+  defp find_executable_found(name) do
+    case name do
+      "beislid" -> "/usr/local/bin/beislid"
+      _ -> nil
+    end
+  end
+
+  defp find_executable_missing(_name), do: nil
+
+  describe "load_context/2" do
     test "lists every missing required variable" do
-      assert {:error, {:missing_env, missing}} = LiveE2E.load_context(env(%{"LINEAR_API_KEY" => " "}))
+      assert {:error, {:missing_env, missing}} =
+               LiveE2E.load_context(env(%{"LINEAR_API_KEY" => " "}), &find_executable_found/1)
 
       assert missing == ["LINEAR_API_KEY", "RONDO_E2E_LINEAR_TEAM", "RONDO_E2E_LINEAR_PROJECT"]
     end
 
     test "rejects the unit-test placeholder Linear key" do
       assert {:error, :placeholder_linear_api_key} =
-               LiveE2E.load_context(env(full_env(%{"LINEAR_API_KEY" => "test-linear-api-key"})))
+               LiveE2E.load_context(
+                 env(full_env(%{"LINEAR_API_KEY" => "test-linear-api-key"})),
+                 &find_executable_found/1
+               )
     end
 
-    test "returns context with defaults" do
-      assert {:ok, context} = LiveE2E.load_context(env(full_env()))
+    test "probes for beislid when no override is set; uses it when present" do
+      assert {:ok, context} =
+               LiveE2E.load_context(env(full_env()), &find_executable_found/1)
+
+      assert context.action_policy_command == "/usr/local/bin/beislid"
+    end
+
+    test "fails with a clear message when beislid is absent and no override is set" do
+      assert {:error, {:action_policy_command_missing, override_var}} =
+               LiveE2E.load_context(env(full_env()), &find_executable_missing/1)
+
+      assert override_var == LiveE2E.action_policy_override_var()
+      assert override_var == "RONDO_E2E_ACTION_POLICY_COMMAND"
+    end
+
+    test "explicit RONDO_E2E_ACTION_POLICY_COMMAND=fake opts in to the allow-all stub" do
+      override = %{"RONDO_E2E_ACTION_POLICY_COMMAND" => LiveE2E.action_policy_fake_value()}
+
+      assert {:ok, context} =
+               LiveE2E.load_context(env(full_env(override)), &find_executable_missing/1)
+
+      assert context.action_policy_command == :fake
+    end
+
+    test "explicit non-fake RONDO_E2E_ACTION_POLICY_COMMAND uses that path directly" do
+      override = %{"RONDO_E2E_ACTION_POLICY_COMMAND" => "/opt/bin/beislid"}
+
+      assert {:ok, context} =
+               LiveE2E.load_context(env(full_env(override)), &find_executable_missing/1)
+
+      assert context.action_policy_command == "/opt/bin/beislid"
+    end
+
+    test "returns context with correct defaults for other fields" do
+      assert {:ok, context} = LiveE2E.load_context(env(full_env()), &find_executable_found/1)
 
       assert context.team_key == "RONT"
       assert context.project_name == "Rondo E2E"
       assert context.claude_command == "claude"
       assert context.claude_max_turns == 10
-      assert context.action_policy_command == nil
     end
 
     test "honors optional overrides and falls back on invalid max turns" do
       overrides = %{
         "RONDO_E2E_CLAUDE_COMMAND" => "/usr/local/bin/claude",
         "RONDO_E2E_CLAUDE_MAX_TURNS" => "5",
-        "RONDO_E2E_ACTION_POLICY_COMMAND" => "beislid"
+        "RONDO_E2E_ACTION_POLICY_COMMAND" => "/opt/bin/beislid"
       }
 
-      assert {:ok, context} = LiveE2E.load_context(env(full_env(overrides)))
+      assert {:ok, context} =
+               LiveE2E.load_context(env(full_env(overrides)), &find_executable_missing/1)
+
       assert context.claude_command == "/usr/local/bin/claude"
       assert context.claude_max_turns == 5
-      assert context.action_policy_command == "beislid"
+      assert context.action_policy_command == "/opt/bin/beislid"
 
       assert {:ok, context} =
-               LiveE2E.load_context(env(full_env(%{"RONDO_E2E_CLAUDE_MAX_TURNS" => "zero"})))
+               LiveE2E.load_context(
+                 env(full_env(%{"RONDO_E2E_CLAUDE_MAX_TURNS" => "zero"})),
+                 &find_executable_found/1
+               )
 
       assert context.claude_max_turns == 10
     end

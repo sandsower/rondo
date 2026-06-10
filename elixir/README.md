@@ -352,9 +352,13 @@ Optional knobs:
 
 - `RONDO_E2E_CLAUDE_COMMAND` — Claude CLI binary (default `claude`)
 - `RONDO_E2E_CLAUDE_MAX_TURNS` — max Claude turns for the short task (default `10`)
-- `RONDO_E2E_ACTION_POLICY_COMMAND` — use a real action-policy evaluator (e.g.
-  `beislid`); by default the test uses an allow-all stub so the run exercises the
-  Linear + Claude path without a Beislið install
+- `RONDO_E2E_ACTION_POLICY_COMMAND` — action-policy evaluator override. The live
+  profile is **fail-closed** by default: it probes for `beislid` on `$PATH` and uses
+  it automatically. If `beislid` is not installed the test **fails** with a clear
+  message directing you here. To run without Beislið installed, set this variable to
+  `fake` — an explicit, auditable opt-in to the allow-all stub that approves every
+  action without evaluation. Any other value is used as the evaluator command path
+  directly.
 
 What it does and mutates:
 

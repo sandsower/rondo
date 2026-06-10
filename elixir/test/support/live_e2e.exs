@@ -15,6 +15,8 @@ defmodule Rondo.LiveE2E do
   @enable_var "RONDO_RUN_LIVE_E2E"
   @required_env ["LINEAR_API_KEY", "RONDO_E2E_LINEAR_TEAM", "RONDO_E2E_LINEAR_PROJECT"]
   @placeholder_api_key "test-linear-api-key"
+  @action_policy_override_var "RONDO_E2E_ACTION_POLICY_COMMAND"
+  @action_policy_fake_value "fake"
   @title_prefix "[rondo-e2e]"
   @start_state_name "Todo"
   @in_progress_state_name "In Progress"
@@ -114,12 +116,37 @@ defmodule Rondo.LiveE2E do
   @doc """
   Validates required live-run environment and returns the run context.
 
-  Returns `{:error, {:missing_env, names}}` listing every missing variable, or
+  Returns `{:error, {:missing_env, names}}` listing every missing variable,
   `{:error, :placeholder_linear_api_key}` when the test-suite placeholder key
-  is still in place.
+  is still in place, or `{:error, {:action_policy_command_missing, var}}` when
+  `beislid` is not installed and no explicit override is set.
+
+  ### Action-policy resolution
+
+  The live profile is fail-closed on action-policy by default:
+
+  1. If `#{@action_policy_override_var}` is set to `"#{@action_policy_fake_value}"`, the
+     allow-all `TestSupport` stub is used — an explicit, auditable opt-in.
+  2. If `#{@action_policy_override_var}` is set to any other value, that path is
+     used as the evaluator command directly.
+  3. Otherwise `beislid` is probed on `$PATH`. If found, it is used with no env
+     var required. If absent, context loading **fails** with
+     `{:error, {:action_policy_command_missing, "#{@action_policy_override_var}"}}` and
+     a clear message so the caller can decide whether to opt in to the fake.
+
+  The resolved value is stored as `:fake` (atom) when the stub is requested, or
+  as a binary command path otherwise.
   """
   @spec load_context((String.t() -> String.t() | nil)) :: {:ok, map()} | {:error, term()}
   def load_context(env \\ &System.get_env/1) do
+    load_context(env, &System.find_executable/1)
+  end
+
+  @spec load_context(
+          (String.t() -> String.t() | nil),
+          (String.t() -> String.t() | nil)
+        ) :: {:ok, map()} | {:error, term()}
+  def load_context(env, find_executable) do
     missing = Enum.filter(@required_env, &blank?(env.(&1)))
 
     cond do
@@ -130,14 +157,50 @@ defmodule Rondo.LiveE2E do
         {:error, :placeholder_linear_api_key}
 
       true ->
-        {:ok,
-         %{
-           team_key: env.("RONDO_E2E_LINEAR_TEAM"),
-           project_name: env.("RONDO_E2E_LINEAR_PROJECT"),
-           claude_command: env.("RONDO_E2E_CLAUDE_COMMAND") || "claude",
-           claude_max_turns: parse_max_turns(env.("RONDO_E2E_CLAUDE_MAX_TURNS")),
-           action_policy_command: env.("RONDO_E2E_ACTION_POLICY_COMMAND")
-         }}
+        case resolve_action_policy_command(env.(@action_policy_override_var), find_executable) do
+          {:ok, action_policy_command} ->
+            {:ok,
+             %{
+               team_key: env.("RONDO_E2E_LINEAR_TEAM"),
+               project_name: env.("RONDO_E2E_LINEAR_PROJECT"),
+               claude_command: env.("RONDO_E2E_CLAUDE_COMMAND") || "claude",
+               claude_max_turns: parse_max_turns(env.("RONDO_E2E_CLAUDE_MAX_TURNS")),
+               action_policy_command: action_policy_command
+             }}
+
+          {:error, _} = error ->
+            error
+        end
+    end
+  end
+
+  @doc """
+  Returns the name of the env var used to override the action-policy command.
+  """
+  @spec action_policy_override_var() :: String.t()
+  def action_policy_override_var, do: @action_policy_override_var
+
+  @doc """
+  Returns the sentinel value that opts in to the allow-all fake evaluator.
+  """
+  @spec action_policy_fake_value() :: String.t()
+  def action_policy_fake_value, do: @action_policy_fake_value
+
+  defp resolve_action_policy_command(@action_policy_fake_value, _find_executable) do
+    {:ok, :fake}
+  end
+
+  defp resolve_action_policy_command(override, _find_executable) when is_binary(override) do
+    {:ok, override}
+  end
+
+  defp resolve_action_policy_command(nil, find_executable) do
+    case find_executable.("beislid") do
+      path when is_binary(path) ->
+        {:ok, path}
+
+      nil ->
+        {:error, {:action_policy_command_missing, @action_policy_override_var}}
     end
   end
 

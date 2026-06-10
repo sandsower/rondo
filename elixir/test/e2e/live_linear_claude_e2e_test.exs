@@ -95,6 +95,13 @@ defmodule Rondo.LiveLinearClaudeE2ETest do
 
       {:error, :placeholder_linear_api_key} ->
         flunk("live E2E enabled but LINEAR_API_KEY is the test placeholder; export a real key")
+
+      {:error, {:action_policy_command_missing, var}} ->
+        flunk(
+          "live E2E requires beislid (the action-policy evaluator) to be installed on PATH. " <>
+            "Install beislid, or set #{var}=#{LiveE2E.action_policy_fake_value()} to use the " <>
+            "allow-all test stub (unsafe — every action will be approved without evaluation)."
+        )
     end
   end
 
@@ -127,7 +134,9 @@ defmodule Rondo.LiveLinearClaudeE2ETest do
 
     overrides =
       case context.action_policy_command do
-        nil -> overrides
+        # :fake means use the TestSupport allow-all stub; omit the override so
+        # write_workflow_file!/2 picks up its default_action_policy_command().
+        :fake -> overrides
         command -> Keyword.put(overrides, :action_policy_command, command)
       end
 
