@@ -902,6 +902,42 @@ defmodule Rondo.Orchestrator do
     end
   end
 
+  defp finalize_run_ledger_artifacts(nil, _status, _final_report), do: nil
+
+  defp finalize_run_ledger_artifacts(%RunLedger{} = ledger, :completed, final_report) do
+    ledger
+    |> capture_run_ledger_patch()
+    |> record_run_ledger_final_report(final_report)
+  end
+
+  defp finalize_run_ledger_artifacts(ledger, _status, _final_report), do: ledger
+
+  defp capture_run_ledger_patch(%RunLedger{} = ledger) do
+    case Rondo.PatchArtifact.capture(ledger) do
+      {:ok, ledger, status} ->
+        Logger.info("Run ledger patch artifact capture #{ledger_context(ledger)} status=#{status}")
+        ledger
+
+      {:error, reason} ->
+        Logger.warning("Run ledger patch artifact capture failed #{ledger_context(ledger)} reason=#{inspect(reason)}")
+        ledger
+    end
+  end
+
+  defp record_run_ledger_final_report(%RunLedger{} = ledger, final_report) do
+    final_report = final_report || get_in(ledger.manifest, ["agent", "final_report"])
+
+    case RunLedger.record_final_report(ledger, final_report) do
+      {:ok, ledger, status} ->
+        Logger.info("Run ledger final report validation #{ledger_context(ledger)} status=#{status}")
+        ledger
+
+      {:error, reason} ->
+        Logger.warning("Run ledger final report record failed #{ledger_context(ledger)} reason=#{inspect(reason)}")
+        ledger
+    end
+  end
+
   defp complete_run_ledger(nil, _status, _payload), do: nil
 
   defp complete_run_ledger(%RunLedger{} = ledger, status, payload) do
@@ -1671,6 +1707,7 @@ defmodule Rondo.Orchestrator do
         last_claude_message: summarize_claude_update(update),
         session_id: session_id_for_update(running_entry.session_id, update),
         run_ref: run_ref_for_update(Map.get(running_entry, :run_ref), update),
+        final_report: final_report_for_update(Map.get(running_entry, :final_report), update),
         last_claude_event: event,
         claude_input_tokens: claude_input_tokens + token_delta.input_tokens,
         claude_output_tokens: claude_output_tokens + token_delta.output_tokens,
@@ -1740,6 +1777,13 @@ defmodule Rondo.Orchestrator do
   defp run_ref_for_update(_existing, %{run_ref: run_ref}) when not is_nil(run_ref), do: run_ref
   defp run_ref_for_update(_existing, %{"run_ref" => run_ref}) when not is_nil(run_ref), do: run_ref
   defp run_ref_for_update(existing, _update), do: existing
+
+  defp final_report_for_update(existing, update) do
+    case Map.get(update, :final_report) || Map.get(update, "final_report") do
+      nil -> existing
+      final_report -> final_report
+    end
+  end
 
   defp latest_gate_for_update(_running_entry, %{event: :gates_completed, raw: raw}) when is_map(raw) do
     %{
@@ -1993,9 +2037,12 @@ defmodule Rondo.Orchestrator do
 
     archive_path = persist_archived_run(archived_entry)
 
+    ledger_status = run_ledger_status(reason)
+
     running_entry
     |> Map.get(:ledger)
-    |> complete_run_ledger(run_ledger_status(reason), %{
+    |> finalize_run_ledger_artifacts(ledger_status, Map.get(running_entry, :final_report))
+    |> complete_run_ledger(ledger_status, %{
       exit_reason: archive_exit_reason(reason),
       session_id: Map.get(running_entry, :session_id),
       turn_count: Map.get(running_entry, :turn_count, 0)

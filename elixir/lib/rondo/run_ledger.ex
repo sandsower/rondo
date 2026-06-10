@@ -7,9 +7,11 @@ defmodule Rondo.RunLedger do
   workspace root.
   """
 
-  alias Rondo.{Config, Linear.Issue, ProcessProvider}
+  alias Rondo.{Config, FinalReport, Linear.Issue, ProcessProvider, Redaction}
 
   @schema_version 1
+  @events_schema "rondo.events/v0"
+  @final_report_relative_path "artifacts/final-report.json"
   @max_string_bytes 2_048
   @max_map_entries 50
   @max_list_entries 50
@@ -175,6 +177,7 @@ defmodule Rondo.RunLedger do
       manifest =
         ledger.manifest
         |> Map.put("status", status_string)
+        |> maybe_put_terminal_failure_classification(status_string, opts)
         |> put_in(["timestamps", "updated_at"], iso_timestamp)
         |> put_in(["timestamps", "finished_at"], iso_timestamp)
 
@@ -183,6 +186,12 @@ defmodule Rondo.RunLedger do
       end
     end
   end
+
+  defp maybe_put_terminal_failure_classification(manifest, "failed", opts) do
+    Map.put(manifest, "failure_classification", Keyword.get(opts, :failure_classification, "task_failure"))
+  end
+
+  defp maybe_put_terminal_failure_classification(manifest, _status, _opts), do: manifest
 
   @spec link_archive(t(), Path.t() | nil) :: {:ok, t()} | {:error, term()}
   def link_archive(%__MODULE__{} = ledger, nil), do: {:ok, ledger}
@@ -239,7 +248,7 @@ defmodule Rondo.RunLedger do
       event: Map.get(update, :event, Map.get(update, "event")),
       adapter: agent_update_value(update, :adapter),
       run_ref: sanitize_value(agent_update_value(update, :run_ref)),
-      session_id: Map.get(update, :session_id, Map.get(update, "session_id")),
+      session_id: sanitize_value(Map.get(update, :session_id, Map.get(update, "session_id"))),
       usage: sanitize_value(Map.get(update, :usage, Map.get(update, "usage"))),
       capabilities: sanitize_value(agent_update_value(update, :capabilities)),
       final_report: sanitize_value(agent_update_value(update, :final_report)),
@@ -303,11 +312,84 @@ defmodule Rondo.RunLedger do
   defp checkpoint_kind_for_event("gates_completed"), do: "gates_completed"
   defp checkpoint_kind_for_event(_event), do: nil
 
+  @doc "Returns the normalized agent event JSONL schema identifier."
+  @spec events_schema() :: String.t()
+  def events_schema, do: @events_schema
+
+  @doc "Returns the run-dir-relative path of the validated final report artifact."
+  @spec final_report_relative_path() :: String.t()
+  def final_report_relative_path, do: @final_report_relative_path
+
+  @spec record_final_report(t(), term()) :: {:ok, t(), :valid | :invalid | :missing} | {:error, term()}
+  def record_final_report(%__MODULE__{} = ledger, source) do
+    case FinalReport.extract(source) do
+      {:ok, report} ->
+        persist_valid_final_report(ledger, report)
+
+      {:error, :missing} ->
+        record_final_report_validation(ledger, :missing, ["final report missing or not parseable as #{FinalReport.schema()} JSON"])
+
+      {:error, {:invalid, errors}} ->
+        record_final_report_validation(ledger, :invalid, errors)
+    end
+  end
+
+  defp persist_valid_final_report(ledger, report) do
+    path = Path.join(ledger.run_dir, @final_report_relative_path)
+
+    with :ok <- write_json_file(path, sanitize_value(report)),
+         {:ok, ledger} <- link_artifacts(ledger, [%{"kind" => "final_report", "path" => @final_report_relative_path}]) do
+      record_final_report_validation(ledger, :valid, [])
+    end
+  end
+
+  defp record_final_report_validation(ledger, status, errors) do
+    status_string = Atom.to_string(status)
+    sanitized_errors = sanitize_value(errors)
+
+    validation =
+      %{
+        "status" => status_string,
+        "errors" => sanitized_errors,
+        "path" => if(status == :valid, do: @final_report_relative_path)
+      }
+      |> drop_nil_values()
+
+    manifest_update = fn manifest ->
+      manifest
+      |> Map.put("final_report", validation)
+      |> maybe_put_final_report_classification(status)
+    end
+
+    checkpoint_payload = %{schema: FinalReport.schema(), status: status_string, errors: sanitized_errors}
+
+    case write_checkpoint(ledger, :final_report_validated, checkpoint_payload,
+           source: %{validator: FinalReport.schema()},
+           manifest_update: manifest_update
+         ) do
+      {:ok, ledger} -> {:ok, ledger, status}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp maybe_put_final_report_classification(manifest, :valid) do
+    case Map.get(manifest, "failure_classification") do
+      "final_report_missing" -> Map.delete(manifest, "failure_classification")
+      "final_report_invalid" -> Map.delete(manifest, "failure_classification")
+      _other -> manifest
+    end
+  end
+  defp maybe_put_final_report_classification(manifest, :missing), do: Map.put(manifest, "failure_classification", "final_report_missing")
+  defp maybe_put_final_report_classification(manifest, :invalid), do: Map.put(manifest, "failure_classification", "final_report_invalid")
+
   defp agent_event_payload(event, timestamp) do
     %{
+      "schema" => @events_schema,
       "timestamp" => timestamp,
       "event" => event |> Map.get(:event, Map.get(event, "event")) |> kind_to_string(),
-      "session_id" => Map.get(event, :session_id, Map.get(event, "session_id")),
+      "adapter" => sanitize_value(Map.get(event, :adapter, Map.get(event, "adapter"))),
+      "run_ref" => sanitize_value(Map.get(event, :run_ref, Map.get(event, "run_ref"))),
+      "session_id" => sanitize_value(Map.get(event, :session_id, Map.get(event, "session_id"))),
       "usage" => sanitize_value(Map.get(event, :usage, Map.get(event, "usage"))),
       "raw" => event |> Map.get(:raw, Map.get(event, "raw", %{})) |> sanitize_agent_raw()
     }
@@ -321,11 +403,8 @@ defmodule Rondo.RunLedger do
       "run_id" => run_id,
       "status" => "running",
       "run_dir" => Path.expand(run_dir),
-      "issue" => issue_snapshot(issue),
-      "repo" => %{
-        "workspace_root" => Path.expand(workspace_root),
-        "workspace" => Path.expand(workspace)
-      },
+      "issue" => sanitize_value(issue_snapshot(issue)),
+      "repo" => repo_snapshot(workspace_root, workspace, opts),
       "tracker" => %{"adapter" => Keyword.get(opts, :tracker_adapter, Config.tracker_kind())},
       "agent" => %{
         "adapter" => Keyword.get(opts, :agent_adapter, Config.agent_adapter()),
@@ -372,6 +451,30 @@ defmodule Rondo.RunLedger do
       "labels" => issue_value(issue, :labels, []),
       "priority" => issue_value(issue, :priority)
     }
+  end
+
+  defp repo_snapshot(workspace_root, workspace, opts) do
+    runner = Keyword.get(opts, :git_runner, &run_git/2)
+
+    %{
+      "workspace_root" => Path.expand(workspace_root),
+      "workspace" => Path.expand(workspace),
+      "base_commit" => workspace_git_value(runner, workspace, ["rev-parse", "HEAD"]),
+      "base_branch" => workspace_git_value(runner, workspace, ["rev-parse", "--abbrev-ref", "HEAD"])
+    }
+  end
+
+  defp workspace_git_value(runner, workspace, args) do
+    with true <- File.dir?(workspace),
+         {output, 0} <- runner.(args, workspace) do
+      String.trim(output)
+    else
+      _other -> nil
+    end
+  end
+
+  defp run_git(args, workspace) do
+    System.cmd("git", args, cd: workspace, stderr_to_stdout: true)
   end
 
   defp process_provider_snapshot(opts) do
@@ -602,6 +705,12 @@ defmodule Rondo.RunLedger do
   defp safe_raw_key?(_key), do: false
 
   defp cap_string(value) do
+    value
+    |> Redaction.redact()
+    |> truncate_string()
+  end
+
+  defp truncate_string(value) do
     if byte_size(value) <= @max_string_bytes do
       value
     else
