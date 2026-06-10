@@ -16,7 +16,7 @@ defmodule Rondo.Redaction do
   @min_env_secret_bytes 8
 
   @secret_patterns [
-    ~r/sk-[A-Za-z0-9_-]{16,}/,
+    ~r/(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}/,
     ~r/\bbearer\s+[A-Za-z0-9._~+\/=-]{16,}/i,
     ~r/\bgh[pousr]_[A-Za-z0-9]{20,}/,
     ~r/\bgithub_pat_[A-Za-z0-9_]{20,}/,

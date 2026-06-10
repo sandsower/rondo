@@ -42,14 +42,10 @@ defmodule Rondo.FinalReport do
   def extract(report) when is_map(report), do: validate(report)
 
   def extract(report) when is_binary(report) do
-    report
-    |> candidate_json_documents()
-    |> Enum.reduce_while({:error, :missing}, fn candidate, acc ->
-      case Jason.decode(candidate) do
-        {:ok, decoded} when is_map(decoded) -> {:halt, validate(decoded)}
-        _other -> {:cont, acc}
-      end
-    end)
+    case decoded_candidates(report) do
+      [] -> {:error, :missing}
+      candidates -> first_valid_candidate(candidates)
+    end
   end
 
   def extract(_report), do: {:error, :missing}
@@ -60,6 +56,34 @@ defmodule Rondo.FinalReport do
     case validation_errors(report) do
       [] -> {:ok, report}
       errors -> {:error, {:invalid, errors}}
+    end
+  end
+
+  # Decodes every JSON candidate and prefers the first one that validates as a
+  # final report, so unrelated JSON blocks in the agent output cannot shadow a
+  # valid report. When none validates, the first decodable map's errors win.
+  defp decoded_candidates(report) do
+    report
+    |> candidate_json_documents()
+    |> Enum.flat_map(fn candidate ->
+      case Jason.decode(candidate) do
+        {:ok, decoded} when is_map(decoded) -> [decoded]
+        _other -> []
+      end
+    end)
+  end
+
+  defp first_valid_candidate([first | _rest] = candidates) do
+    candidates
+    |> Enum.find_value(fn candidate ->
+      case validate(candidate) do
+        {:ok, report} -> {:ok, report}
+        {:error, _reason} -> nil
+      end
+    end)
+    |> case do
+      nil -> validate(first)
+      result -> result
     end
   end
 

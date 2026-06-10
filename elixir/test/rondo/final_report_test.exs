@@ -41,8 +41,8 @@ defmodule Rondo.FinalReportTest do
     assert report["next_state"] == "ready_for_review"
   end
 
-  test "prefers the last fenced json block" do
-    other = Map.put(@valid_report, "summary", "second block wins")
+  test "prefers a validating json block over other JSON candidates" do
+    other = Map.put(@valid_report, "summary", "valid block wins")
 
     text = """
     ```json
@@ -53,8 +53,9 @@ defmodule Rondo.FinalReportTest do
     ```
     """
 
-    assert {:ok, %{"summary" => "second block wins"}} = FinalReport.extract(text)
+    assert {:ok, %{"summary" => "valid block wins"}} = FinalReport.extract(text)
 
+    # a trailing unrelated JSON block cannot shadow an earlier valid report
     reversed = """
     ```json
     #{Jason.encode!(other)}
@@ -64,7 +65,37 @@ defmodule Rondo.FinalReportTest do
     ```
     """
 
-    assert {:error, {:invalid, _errors}} = FinalReport.extract(reversed)
+    assert {:ok, %{"summary" => "valid block wins"}} = FinalReport.extract(reversed)
+  end
+
+  test "prefers the last fenced json block when several reports validate" do
+    first = Map.put(@valid_report, "summary", "first report")
+    last = Map.put(@valid_report, "summary", "last report")
+
+    text = """
+    ```json
+    #{Jason.encode!(first)}
+    ```
+    ```json
+    #{Jason.encode!(last)}
+    ```
+    """
+
+    assert {:ok, %{"summary" => "last report"}} = FinalReport.extract(text)
+  end
+
+  test "reports validation errors when no candidate validates" do
+    text = """
+    ```json
+    {"schema": "rondo.final_report/v0"}
+    ```
+    ```json
+    {"not": "a report"}
+    ```
+    """
+
+    assert {:error, {:invalid, errors}} = FinalReport.extract(text)
+    assert Enum.any?(errors, &(&1 =~ "summary must be a non-empty string"))
   end
 
   test "classifies prose, nil, and non-string input as missing" do

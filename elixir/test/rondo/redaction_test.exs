@@ -45,6 +45,12 @@ defmodule Rondo.RedactionTest do
     assert Redaction.redact("ran make all in elixir/", @no_env) == "ran make all in elixir/"
   end
 
+  test "leaves identifiers that merely contain sk- untouched" do
+    assert Redaction.redact("task-abcdef1234567890 queued", @no_env) == "task-abcdef1234567890 queued"
+    assert Redaction.redact("desk-organizer-2026-rollout branch", @no_env) == "desk-organizer-2026-rollout branch"
+    assert Redaction.redact("kiosk-deployment-checklist.md", @no_env) == "kiosk-deployment-checklist.md"
+  end
+
   test "redacts values of secret-named env vars" do
     env = %{"ANTHROPIC_API_KEY" => "value-1234567890", "HOME" => "/Users/someone"}
 
