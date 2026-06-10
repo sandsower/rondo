@@ -135,15 +135,15 @@ Probe metadata should explain each feature separately instead of collapsing all 
 
 ### Pre-agent-turn preflight
 
-RON-9 must add an explicit provider preflight after provider resolution and before the first prompt/agent invocation. The preflight should load or validate the configured Beislið source, call the provider probe/load path, and decide strict vs optional behavior before the agent adapter can modify the workspace or provider-selected gates/action-policy decisions can run.
+RON-9 must add an explicit provider preflight inside `run_agent_turns/4`, after provider resolution and before the first prompt/agent invocation. The preflight should load or validate the configured Beislið source, call the provider probe/load path, and decide strict vs optional behavior before the agent adapter can modify the workspace or provider-selected gates/action-policy decisions can run.
 
 Preflight expectations:
 
 - `process_provider.required: true` plus missing, invalid, unapproved, paused, superseded, or unsupported required Beislið input fails before adapter invocation.
 - `process_provider.required: false` may continue with degraded status or native fallback only after recording the unavailable capability and fallback reason.
 - Preflight failures should be visible as operator errors or run-ledger/checkpoint metadata rather than late post-turn gate failures.
-- Existing workspace creation and configured `before_run` hooks currently happen before provider resolution in `Rondo.AgentRunner`; RON-9 must either keep the preflight boundary scoped to agent/provider execution or deliberately move preflight earlier if required Beislið input should block hooks too.
-- Tests should prove required-mode invalid fixtures prevent the agent adapter from being invoked at all, and should pin whether `before_run` hooks are expected to run or be skipped on preflight failure.
+- The preflight boundary is deliberately scoped to agent/provider execution for RON-9. `Rondo.AgentRunner.run/3` may still create the workspace and run configured `before_run` hooks through `Workspace.run_before_run_hook/3` before `run_agent_turns/4` resolves the process provider.
+- Tests should prove required-mode invalid fixtures prevent the agent adapter from being invoked at all, and should assert that existing `before_run` hooks still run when strict Beislið preflight fails.
 
 ### `select_gates/1`
 
@@ -192,6 +192,22 @@ The chosen path should include provider id, source artifact/schema/ref when safe
 ### `evaluate_action_policy/3`
 
 Use Beislið's action-policy evaluator boundary for configured side effects. The adapter should return the same decision envelope shape Rondo already validates and persists.
+
+The decision envelope must include these string keys:
+
+```elixir
+%{
+  "decision" => "allow" | "ask" | "deny",
+  "action" => action_id,
+  "mode" => mode
+}
+```
+
+`"action"` is the stable action identifier and `"mode"` is the execution mode. Rondo gate validation must treat the envelope as follows:
+
+- `"decision" => "allow"` permits the action to proceed.
+- `"decision" => "ask"` or `"deny"` blocks with `{:error, {:action_policy_blocked, decision}, envelope}`.
+- Missing keys, non-string `"action"`/`"mode"`, or a `"decision"` outside `"allow" | "ask" | "deny"` fail with `{:error, {:action_policy_failed, :invalid_evaluator_envelope}, envelope}`.
 
 If Beislið policy evaluation is unavailable:
 
