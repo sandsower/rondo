@@ -368,6 +368,7 @@ defmodule Rondo.RunOnceTest do
 
     assert_received {:agent_run, %Issue{id: "slice-123", identifier: "slice-123", state: "In Progress"}, agent_opts}
     assert_run_dir_option(agent_opts)
+    assert %{schema: "rondo-execution-request-v1", slice_id: "slice-123", path: ^manifest_path} = Keyword.fetch!(agent_opts, :source_contract)
     assert {:ok, []} = agent_opts |> Keyword.fetch!(:issue_state_fetcher) |> then(& &1.(["slice-123"]))
     refute_received {:fetch_issue_states_by_ids, _}
     refute_received {:update_issue_state, _, _}

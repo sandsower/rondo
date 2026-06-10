@@ -197,9 +197,13 @@ defmodule Rondo.RunOnce do
   @spec run_agent(Issue.t(), deps(), keyword(), keyword()) :: run_result()
   defp run_agent(issue, deps, agent_opts, ledger_opts) do
     with {:ok, ledger} <- create_run_once_ledger(issue, ledger_opts) do
+      agent_opts = maybe_put_source_contract_agent_opt(agent_opts, Keyword.get(ledger_opts, :source_contract))
       do_run_agent_with_ledger(issue, deps, agent_opts, ledger)
     end
   end
+
+  defp maybe_put_source_contract_agent_opt(agent_opts, nil), do: agent_opts
+  defp maybe_put_source_contract_agent_opt(agent_opts, source_contract) when is_map(source_contract), do: Keyword.put_new(agent_opts, :source_contract, source_contract)
 
   defp do_run_agent_with_ledger(issue, deps, agent_opts, ledger) do
     agent_opts =

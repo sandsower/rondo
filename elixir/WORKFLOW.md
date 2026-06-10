@@ -46,6 +46,10 @@ pi:
   command: pi
   turn_timeout_ms: 3600000
   stall_timeout_ms: 300000
+process_provider:
+  kind: native
+  required: false
+  artifact_path: null
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`

@@ -4,6 +4,7 @@ defmodule Rondo.AgentAdapterTest do
   alias Rondo.Agent.Adapter
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.PiAdapter
+  alias Rondo.ProcessProvider.Beislid
 
   defmodule FakeAdapter do
     @behaviour Rondo.Agent.Adapter
@@ -638,6 +639,62 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  test "agent runner does not fallback when optional beislid artifact has malformed action policy" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-beislid-bad-policy-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-BEISLID-BAD-POLICY/run-1")
+      artifact_path = Path.join(test_root, "bad-policy.json")
+      File.mkdir_p!(workspace_root)
+
+      File.write!(
+        artifact_path,
+        Jason.encode!(%{
+          "schema" => "beislid-process-artifact-v1",
+          "id" => "bad-policy",
+          "status" => "approved",
+          "gates" => [%{"name" => "bad-policy-gate", "command" => "echo bad > bad-policy.txt"}],
+          "action_policy" => %{"decision" => "maybe"}
+        })
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        process_provider_kind: "beislid",
+        process_provider_required: false,
+        process_provider_artifact_path: artifact_path,
+        gates: [%{name: "native-proof", command: "echo native > native-gate.txt", timeout_ms: 1_000}]
+      )
+
+      issue = %Issue{
+        id: "issue-beislid-bad-policy",
+        identifier: "MT-BEISLID-BAD-POLICY",
+        title: "Bad policy proof",
+        description: "Malformed present action_policy should fail closed",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert_raise RuntimeError, ~r/process_provider_gate_selection_failed.*invalid_artifact_field.*action_policy/, fn ->
+        AgentRunner.run(issue, self(),
+          agent_adapter: FakeAdapter,
+          process_provider: Beislid,
+          issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+          run_dir: run_dir,
+          test_pid: self()
+        )
+      end
+
+      {:ok, workspace} = Rondo.PathSafety.canonicalize(Path.join(workspace_root, "MT-BEISLID-BAD-POLICY"))
+      refute File.exists?(Path.join(workspace, "native-gate.txt"))
+      refute File.exists?(Path.join(workspace, "bad-policy.txt"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner persists all-skipped provider gate selection explanations" do
     test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-empty-gates-#{System.unique_integer([:positive])}")
 
@@ -680,6 +737,268 @@ defmodule Rondo.AgentAdapterTest do
 
       results_json = run_dir |> Path.join("artifacts/gates/turn-0001/results.json") |> File.read!() |> Jason.decode!()
       assert results_json["gate_selection"]["skipped"] == [%{"name" => "slow-proof", "reason" => "not needed for documentation-only turn"}]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner preflights required beislid provider before adapter invocation" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-beislid-preflight-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-BEISLID/run-1")
+      hook_marker = "before-run-marker.txt"
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        process_provider_kind: "beislid",
+        process_provider_required: true,
+        process_provider_artifact_path: fixture_path("unapproved.json"),
+        hook_before_run: "echo hook-ran > #{hook_marker}"
+      )
+
+      issue = %Issue{
+        id: "issue-beislid-preflight",
+        identifier: "MT-BEISLID",
+        title: "Beislid preflight proof",
+        description: "Strict provider preflight should stop before adapter invocation",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert_raise RuntimeError, ~r/process_provider_preflight_failed.*beislid.*artifact_not_approved/, fn ->
+        AgentRunner.run(issue, self(),
+          agent_adapter: FakeAdapter,
+          process_provider: Beislid,
+          issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+          run_dir: run_dir,
+          test_pid: self()
+        )
+      end
+
+      {:ok, workspace} = Rondo.PathSafety.canonicalize(Path.join(workspace_root, "MT-BEISLID"))
+      assert File.read!(Path.join(workspace, hook_marker)) == "hook-ran\n"
+      refute_received {:fake_adapter_invoked, _, _, _, _}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner uses source_contract artifact for beislid gate selection" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-beislid-source-contract-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-BEISLID-SOURCE/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        process_provider_kind: "beislid",
+        process_provider_artifact_path: fixture_path("unapproved.json")
+      )
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-beislid-source",
+        identifier: "MT-BEISLID-SOURCE",
+        title: "Beislid source contract proof",
+        description: "Provider gates should use source_contract artifact",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: Beislid,
+                 source_contract: %{process_provider: %{"artifact_path" => fixture_path("approved.json")}},
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 run_dir: run_dir,
+                 test_pid: parent
+               )
+
+      {:ok, workspace} = Rondo.PathSafety.canonicalize(Path.join(workspace_root, "MT-BEISLID-SOURCE"))
+      assert File.read!(Path.join(workspace, "beislid-gate.txt")) == "beislid\n"
+
+      assert_receive {
+                       :claude_worker_update,
+                       "issue-beislid-source",
+                       %{event: :gates_completed, raw: %{gate_selection: gate_selection}}
+                     },
+                     500
+
+      assert gate_selection.metadata.artifact_id == "beislid-fixture-approved"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner uses native action policy when beislid artifact has no fixture policy" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-beislid-no-policy-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-BEISLID-NO-POLICY/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        process_provider_kind: "beislid",
+        process_provider_artifact_path: fixture_path("no_policy.json"),
+        action_policy_command: fake_action_policy("allow")
+      )
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-beislid-no-policy",
+        identifier: "MT-BEISLID-NO-POLICY",
+        title: "Beislid no policy proof",
+        description: "Provider gates should fall back to native action policy",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: Beislid,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 run_dir: run_dir,
+                 test_pid: parent
+               )
+
+      {:ok, workspace} = Rondo.PathSafety.canonicalize(Path.join(workspace_root, "MT-BEISLID-NO-POLICY"))
+      assert File.read!(Path.join(workspace, "no-policy-gate.txt")) == "no-policy\n"
+
+      assert_receive {
+                       :claude_worker_update,
+                       "issue-beislid-no-policy",
+                       %{event: :gates_completed, raw: %{results: [result], gate_selection: gate_selection}}
+                     },
+                     500
+
+      assert result.policy_decision["decision"] == "allow"
+      refute result.policy_decision["provider"] == "beislid"
+      assert gate_selection.metadata.action_policy_provider == "native"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner uses beislid provider artifact for prompt, gates, and policy" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-beislid-success-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-BEISLID-OK/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        process_provider_kind: "beislid",
+        process_provider_artifact_path: fixture_path("approved.json")
+      )
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-beislid-ok",
+        identifier: "MT-BEISLID-OK",
+        title: "Beislid success proof",
+        description: "Provider selects fixture gate",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: Beislid,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 run_dir: run_dir,
+                 test_pid: parent
+               )
+
+      {:ok, workspace} = Rondo.PathSafety.canonicalize(Path.join(workspace_root, "MT-BEISLID-OK"))
+      assert File.read!(Path.join(workspace, "beislid-gate.txt")) == "beislid\n"
+      assert_receive {:fake_adapter_invoked, 1, prompt, ^workspace, nil}, 500
+      assert prompt =~ "Beislið process context"
+
+      assert_receive {
+                       :claude_worker_update,
+                       "issue-beislid-ok",
+                       %{event: :gates_completed, raw: %{results: [result], gate_selection: gate_selection}}
+                     },
+                     500
+
+      assert result.policy_decision["provider"] == "beislid"
+      assert gate_selection.metadata.provider == "beislid"
+      assert gate_selection.metadata.artifact_id == "beislid-fixture-approved"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner falls back to native gates when optional beislid artifact is unavailable" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-beislid-optional-fallback-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-BEISLID-FALLBACK/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        process_provider_kind: "beislid",
+        process_provider_required: false,
+        process_provider_artifact_path: "/tmp/rondo-missing-beislid-fallback.json",
+        gates: [%{name: "native-proof", command: "echo native > native-gate.txt", timeout_ms: 1_000}]
+      )
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-beislid-fallback",
+        identifier: "MT-BEISLID-FALLBACK",
+        title: "Beislid optional fallback proof",
+        description: "Missing optional artifact should fall back to native gates",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: Beislid,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 run_dir: run_dir,
+                 test_pid: parent
+               )
+
+      {:ok, workspace} = Rondo.PathSafety.canonicalize(Path.join(workspace_root, "MT-BEISLID-FALLBACK"))
+      assert File.read!(Path.join(workspace, "native-gate.txt")) == "native\n"
+
+      assert_receive {
+                       :claude_worker_update,
+                       "issue-beislid-fallback",
+                       %{event: :gates_completed, raw: %{results: [result], gate_selection: gate_selection}}
+                     },
+                     500
+
+      assert result.policy_decision["decision"] == "allow"
+      refute result.policy_decision["provider"] == "beislid"
+      assert gate_selection.metadata.fallback_from == "beislid"
+      assert gate_selection.metadata.fallback_reason =~ "read_failed"
     after
       File.rm_rf(test_root)
     end
@@ -1047,6 +1366,10 @@ defmodule Rondo.AgentAdapterTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp fixture_path(filename) do
+    Path.expand(Path.join([__DIR__, "..", "fixtures", "beislid_process_provider", filename]))
   end
 
   test "agent runner fails explicitly when a non-resumable adapter is asked to continue" do

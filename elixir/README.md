@@ -96,7 +96,7 @@ P0 manifest loading accepts local JSON with `schema: "rondo-execution-request-v1
   "dependencies": [],
   "proof_requirements": ["mix test"],
   "allowed_actions": {"run_mode": "supervised-auto"},
-  "process_provider": {},
+  "process_provider": {"artifact_path": "./beislid-process.json"},
   "memory_provider": {},
   "output_expectations": {}
 }
@@ -233,15 +233,20 @@ Notes:
   deterministic suggested responses, and only auto-resumes operations with safe descriptors. V1 exact
   resume is limited to orchestrator-owned tracker transitions; shell hooks, cleanup, and destructive
   operations require manual/guidance handling unless later modeled with replay-safe descriptors.
-- `process_provider.kind` selects the process/work-contract provider. Default and only supported
-  value for now: `native`. The native provider preserves standalone `WORKFLOW.md` behavior for flat
-  gates, prompts, action-policy evaluation, model hints, and run metadata; richer guide/proof
-  provider features report unsupported until a future provider implements them. Gate selection flows
-  through this provider boundary and gate artifacts include selected/skipped explanations, warnings,
-  and provider metadata when gates run.
+- `process_provider.kind` selects the process/work-contract provider. Default: `native`. Supported
+  values are `native` and fixture-backed `beislid`. The native provider preserves standalone
+  `WORKFLOW.md` behavior for flat gates, prompts, action-policy evaluation, model hints, and run
+  metadata. The Beislið provider consumes an explicit approved process artifact and maps its gate,
+  guide/proof metadata, prompt context, and fixture action-policy decision onto the same boundary;
+  it does not run a Beislið exporter/runtime or make Beislið required for Rondo.
+- `process_provider.artifact_path` optionally points at an approved Beislið process artifact JSON
+  when `kind: beislid`. For manifest runs, `source_contract.process_provider.artifact_path` takes
+  precedence; `source_contract.path` is used only when that file is explicitly a Beislið process
+  artifact schema.
 - `process_provider.required` controls provider failure behavior. Default: `false`. Optional provider
-  gate-selection failures can warn and fall back to native flat gates; required provider failures stop
-  the run clearly instead of falling back.
+  gate-selection failures can warn and fall back to native flat gates only when doing so does not
+  ignore loaded approved required constraints; required provider failures stop the run clearly before
+  agent invocation or gate execution.
 - `agent.max_turns` caps how many back-to-back agent turns Rondo will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Rondo uses a default prompt template that includes the issue
@@ -289,7 +294,22 @@ action_policy:
 process_provider:
   kind: native
   required: false
+  artifact_path: null
 ```
+
+For early Beislið integration scaffolding, use an explicit approved artifact:
+
+```yaml
+process_provider:
+  kind: beislid
+  required: false
+  artifact_path: ./beislid-process.json
+```
+
+Fixture-backed Beislið artifacts use `schema: "beislid-process-artifact-v1"`, `status:
+"approved"`, an `id`, and optional `gates`, `skipped`, `warnings`, `guides`,
+`proof_requirements`, `model_routing_hints`, `metadata`, and `action_policy` sections. Unknown
+fields are ignored for forward compatibility, but consumed sections are validated before use.
 
 - If `WORKFLOW.md` is missing, has invalid YAML, or contains invalid configured values, startup
   and scheduling are halted until fixed. Invalid live reloads keep the last known good workflow and

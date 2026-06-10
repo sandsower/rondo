@@ -1,0 +1,13 @@
+{
+  "schema": "beislid-process-artifact-v1",
+  "id": "beislid-fixture-no-policy",
+  "status": "approved",
+  "gates": [
+    {
+      "name": "beislid-no-policy",
+      "command": "echo no-policy > no-policy-gate.txt",
+      "timeout_ms": 1000,
+      "reason": "selected without fixture policy"
+    }
+  ]
+}

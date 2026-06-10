@@ -1,0 +1,6 @@
+{
+  "schema": "beislid-process-artifact-v1",
+  "id": "beislid-fixture-draft",
+  "status": "draft",
+  "gates": []
+}
