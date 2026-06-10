@@ -345,6 +345,54 @@ fields are ignored for forward compatibility, but consumed sections are validate
 make all
 ```
 
+### Live end-to-end test (opt-in)
+
+`make e2e` proves the full production path against real services: Linear issue fetch,
+workspace prep, a real Claude subprocess, the tracker `Todo -> In Progress` transition,
+and cleanup. It is **never** run by default — `mix test` and CI exclude the `:live_e2e`
+tag, and even `make e2e` skips with a clear reason unless explicitly enabled:
+
+```bash
+export RONDO_RUN_LIVE_E2E=1                 # the opt-in gate
+export LINEAR_API_KEY=lin_api_...           # real Linear API key
+export RONDO_E2E_LINEAR_TEAM=RONT           # key of a dedicated *test* team
+export RONDO_E2E_LINEAR_PROJECT="Rondo E2E" # project (by name) for disposable issues
+make e2e
+```
+
+Optional knobs:
+
+- `RONDO_E2E_CLAUDE_COMMAND` — Claude CLI binary (default `claude`)
+- `RONDO_E2E_CLAUDE_MAX_TURNS` — max Claude turns for the short task (default `10`)
+- `RONDO_E2E_ACTION_POLICY_COMMAND` — action-policy evaluator override. The live
+  profile is **fail-closed** by default: it probes for `beislid` on `$PATH` and uses
+  it automatically. If `beislid` is not installed the test **fails** with a clear
+  message directing you here. To run without Beislið installed, set this variable to
+  `fake` — an explicit, auditable opt-in to the allow-all stub that approves every
+  action without evaluation. Any other value is used as the evaluator command path
+  directly.
+
+What it does and mutates:
+
+- Creates one disposable issue titled `[rondo-e2e] disposable run <timestamp>` in the
+  configured test team/project, pinned to `Todo`. The team must have `Todo` and
+  `In Progress` workflow states.
+- Runs Rondo's run-once path in-process with a temporary `WORKFLOW.md` whose
+  `tracker.project_slug` scopes every query to the test project — the normal Rondo
+  project is never read or written.
+- The Claude task only writes `rondo_e2e_marker.txt` into a temporary workspace; the
+  test asserts the marker content and that the issue reached `In Progress`. Note the
+  Claude subprocess inherits the workflow defaults `permission_mode: bypassPermissions`
+  and `dangerously_skip_permissions: true` (acceptable for this sandboxed, single-file
+  task; the prompt forbids any other action and turns are capped).
+- Cleanup runs in `on_exit` even when the test fails: the disposable issue is deleted
+  (moved to Linear's trash, recoverable) and the temporary workspace is removed.
+  Cleanup is best-effort; failures are logged with the issue URL so you can delete it
+  manually.
+
+Failures include the issue identifier/URL, workspace root, and the full run result to
+debug tracker, workspace, or Claude launch errors.
+
 ## FAQ
 
 ### Why Elixir?
