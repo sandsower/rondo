@@ -406,6 +406,7 @@ defmodule Rondo.RunOnceTest do
       git.(["init"])
       git.(["config", "user.email", "run-once@example.com"])
       git.(["config", "user.name", "Run Once"])
+      git.(["config", "commit.gpgsign", "false"])
       File.write!(Path.join(workspace, "file.txt"), "one\n")
       git.(["add", "--all"])
       git.(["commit", "-m", "base"])

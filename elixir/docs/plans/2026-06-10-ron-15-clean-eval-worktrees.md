@@ -46,7 +46,7 @@ Flow per run:
    `rm -rf` + `git worktree prune`. Recorded in result (`cleanup.removed`, `cleanup.method`).
 7. Persist `clean_eval/result.json` (schema `rondo.clean_eval/v0`: status, reason,
    base_ref, base_branch, patch_path, patch_status, apply_exit_status, apply_output,
-   gates summary, eval_workspace, cleanup, started_at/finished_at), link manifest
+   gates summary, cleanup, started_at/finished_at), link manifest
    artifacts (`clean_eval_result`, `clean_eval_gate_results`), write a
    `clean_eval_completed` checkpoint, and set a manifest `"clean_eval"` block
    `{"status", "result_path"}` so pass/fail is reported in the run ledger.
