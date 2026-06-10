@@ -372,7 +372,13 @@ defmodule Rondo.RunLedger do
     end
   end
 
-  defp maybe_put_final_report_classification(manifest, :valid), do: manifest
+  defp maybe_put_final_report_classification(manifest, :valid) do
+    case Map.get(manifest, "failure_classification") do
+      "final_report_missing" -> Map.delete(manifest, "failure_classification")
+      "final_report_invalid" -> Map.delete(manifest, "failure_classification")
+      _other -> manifest
+    end
+  end
   defp maybe_put_final_report_classification(manifest, :missing), do: Map.put(manifest, "failure_classification", "final_report_missing")
   defp maybe_put_final_report_classification(manifest, :invalid), do: Map.put(manifest, "failure_classification", "final_report_invalid")
 

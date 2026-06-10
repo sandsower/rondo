@@ -52,7 +52,7 @@ events/checkpoints/manifest strings, and manifest linkage for every artifact.
   `{:ok, report}`, `{:error, :missing}`, or `{:error, {:invalid, errors}}`.
 - `Rondo.PatchArtifact` — `capture/2` runs git in the run workspace:
   `status --porcelain` → no changes → `:no_changes`; otherwise
-  `git add --intent-to-add .`, `git diff --binary HEAD`, `git reset -q`,
+  `git add --intent-to-add .`, `git diff --binary <base_ref>`, `git reset -q`,
   writes `artifacts/changes.patch` + `artifacts/patch.json`
   (schema `rondo.patch/v0`, `base_ref`, `base_branch`, `format: "git-diff"`,
   `includes_untracked: true`, `captured_at`, `changed_paths`), links both from
@@ -98,15 +98,21 @@ logged, never fatal. Terminal run status semantics are unchanged.
 - Patch content is **not** redacted (a redacted patch is unusable for clean
   evaluation); the patch is workspace code authored by the run. Redaction
   applies to events/checkpoints/manifest/final-report strings.
-- Patch capture uses `git add --intent-to-add .` + `git diff --binary HEAD` +
+- Patch capture uses `git add --intent-to-add .` + `git diff --binary <base_ref>` +
   `git reset -q` to include untracked file contents; this mutates the (already
-  terminal) run workspace index only.
+  terminal) run workspace index only. `<base_ref>` is resolved from
+  `manifest.repo.base_commit` (the run-start base commit) or falls back to
+  capture-time `HEAD`.
 - JSONL lines carry no per-line `seq`; ordering is line order (append-only),
   avoiding a signature change to `append_agent_event/3`.
-- Final-report validation and patch capture are wired into the `RunOnce`
-  path (the AFK/envelope runner); orchestrator runs gain the JSONL schema,
-  redaction, and `task_failure` classification automatically via RunLedger but
-  not final-report validation (out of conservative scope).
+- Final-report validation and patch capture are wired into both the `RunOnce`
+  path (AFK/envelope runner) and the `Orchestrator` path. In the orchestrator,
+  `finalize_run_ledger_artifacts/3` (on `:completed`) calls
+  `record_run_ledger_final_report/2`, which delegates to
+  `RunLedger.record_final_report/2` (uses `FinalReport.extract` to parse/extract,
+  persists `final_report`, and writes the `:final_report_validated` checkpoint
+  with `status: valid|invalid|missing` plus `failure_classification`). All runs
+  gain JSONL schema, redaction, and `task_failure` classification via RunLedger.
 - Prompt templates are user-configurable workflow data; not modified. The
   extractor accepts raw JSON or fenced ```json blocks so adapters/envelopes
   can instruct agents to emit the report.
