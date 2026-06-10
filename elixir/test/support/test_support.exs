@@ -133,6 +133,9 @@ defmodule Rondo.TestSupport do
           hook_before_remove: nil,
           hook_timeout_ms: 60_000,
           gates: nil,
+          clean_eval_enabled: nil,
+          clean_eval_base_ref: nil,
+          clean_eval_gates: nil,
           observability_enabled: true,
           observability_refresh_ms: 1_000,
           observability_render_interval_ms: 16,
@@ -183,6 +186,9 @@ defmodule Rondo.TestSupport do
     hook_before_remove = Keyword.get(config, :hook_before_remove)
     hook_timeout_ms = Keyword.get(config, :hook_timeout_ms)
     gates = Keyword.get(config, :gates)
+    clean_eval_enabled = Keyword.get(config, :clean_eval_enabled)
+    clean_eval_base_ref = Keyword.get(config, :clean_eval_base_ref)
+    clean_eval_gates = Keyword.get(config, :clean_eval_gates)
     observability_enabled = Keyword.get(config, :observability_enabled)
     observability_refresh_ms = Keyword.get(config, :observability_refresh_ms)
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
@@ -237,6 +243,7 @@ defmodule Rondo.TestSupport do
         "  artifact_path: #{yaml_value(process_provider_artifact_path)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         gates_yaml(gates),
+        clean_eval_yaml(clean_eval_enabled, clean_eval_base_ref, clean_eval_gates),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
         "---",
@@ -347,6 +354,35 @@ defmodule Rondo.TestSupport do
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
+  end
+
+  defp clean_eval_yaml(nil, nil, nil), do: nil
+
+  defp clean_eval_yaml(enabled, base_ref, gates) do
+    [
+      "clean_eval:",
+      enabled != nil && "  enabled: #{yaml_value(enabled)}",
+      base_ref && "  base_ref: #{yaml_value(base_ref)}",
+      clean_eval_gates_yaml(gates)
+    ]
+    |> Enum.reject(&(&1 in [nil, false]))
+    |> Enum.join("\n")
+  end
+
+  defp clean_eval_gates_yaml(nil), do: nil
+
+  defp clean_eval_gates_yaml([]), do: "  gates: []"
+
+  defp clean_eval_gates_yaml(gates) when is_list(gates) do
+    entries =
+      Enum.map_join(gates, "\n", fn gate ->
+        gate
+        |> gate_yaml()
+        |> String.split("\n")
+        |> Enum.map_join("\n", &("  " <> &1))
+      end)
+
+    "  gates:\n" <> entries
   end
 
   defp observability_yaml(enabled, refresh_ms, render_interval_ms) do

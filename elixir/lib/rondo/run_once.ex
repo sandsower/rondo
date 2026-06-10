@@ -5,7 +5,7 @@ defmodule Rondo.RunOnce do
 
   require Logger
 
-  alias Rondo.{AgentRunner, Config, ExecutionRequest, Linear.Issue, PatchArtifact, RunLedger, SideEffectPolicy, Tracker}
+  alias Rondo.{AgentRunner, CleanEval, Config, ExecutionRequest, Linear.Issue, PatchArtifact, RunLedger, SideEffectPolicy, Tracker}
 
   @type run_result :: :ok | {:error, term()}
   @type deps :: %{
@@ -214,6 +214,7 @@ defmodule Rondo.RunOnce do
     result = deps.agent_runner.(issue, agent_opts)
     {ledger, updates} = record_queued_updates(ledger, issue.id)
     ledger = finalize_run_artifacts(ledger, result, updates)
+    ledger = maybe_run_clean_eval(ledger, result)
     complete_run_once_ledger_result(ledger, result)
   rescue
     error ->
@@ -235,6 +236,34 @@ defmodule Rondo.RunOnce do
       reason = {:agent_run_failed, {kind, reason}}
       {ledger, _updates} = record_queued_updates(ledger, issue.id)
       complete_run_once_ledger_result(ledger, {:error, reason})
+  end
+
+  defp maybe_run_clean_eval(ledger, :ok) do
+    if CleanEval.enabled?() do
+      run_clean_eval(ledger)
+    else
+      ledger
+    end
+  end
+
+  defp maybe_run_clean_eval(ledger, _result), do: ledger
+
+  defp run_clean_eval(ledger) do
+    case CleanEval.run(ledger) do
+      {:ok, ledger, result} ->
+        Logger.info("Run-once clean eval #{ledger_context(ledger)} status=#{result.status}")
+        ledger
+
+      {:error, reason} ->
+        Logger.warning("Failed to record run-once clean eval #{ledger_context(ledger)} reason=#{inspect(reason)}")
+        ledger
+    end
+  rescue
+    # Clean eval is reporting-only: it must never change the run result, even
+    # if it crashes. Log and keep the ledger unchanged.
+    error ->
+      Logger.warning("Run-once clean eval crashed #{ledger_context(ledger)} reason=#{Exception.message(error)}")
+      ledger
   end
 
   defp finalize_run_artifacts(ledger, :ok, updates) do

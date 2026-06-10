@@ -264,6 +264,18 @@ Notes:
   (default: 60000). Legacy flat gates default to Beislið `read`/`file.read` policy; gates that
   mutate state should declare `action_id` and `action_classes` such as `dependency.install` with
   `workspace-write`/`dependency-install`.
+- Opt into post-run clean evaluation with `clean_eval.enabled: true`. After a successful run-once
+  run, Rondo re-applies the run's `rondo.patch/v0` patch artifact on a pristine detached git
+  worktree of the recorded base ref (created under `<workspace.root>/.rondo_clean_eval/<run_id>`
+  and always removed afterwards), runs evaluator gates there, and records the outcome in the run
+  ledger (`clean_eval/result.json`, gate logs under `clean_eval/gates/`, a `clean_eval_completed`
+  checkpoint, and a manifest `clean_eval` pass/fail block). Patch apply failures are recorded as
+  evaluator failures; runs without a patch artifact record `skipped`. Optional keys:
+  `clean_eval.base_ref` overrides the patch metadata base ref, and `clean_eval.gates` (same shape
+  as top-level `gates`) overrides which gates run during clean evaluation. When `clean_eval.gates`
+  is absent the top-level `gates` run; an explicit `clean_eval.gates: []` means apply-only
+  evaluation (pass if the patch applies cleanly). Gate timeouts are recorded as environment
+  errors, not evaluator failures.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
 - `tracker.repo` is required for `tracker.kind: github` and uses `owner/repo` syntax.
 - `tracker.state_label_prefix` defaults to `status:` for GitHub label-emulated workflow states.

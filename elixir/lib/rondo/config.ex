@@ -47,6 +47,7 @@ defmodule Rondo.Config do
   @default_process_provider_kind "native"
   @default_process_provider_required false
   @valid_process_provider_kinds ["native", "beislid"]
+  @default_clean_eval_enabled false
   @default_debug false
   @default_observability_enabled true
   @default_observability_refresh_ms 1_000
@@ -177,6 +178,17 @@ defmodule Rondo.Config do
                              gates: [
                                type: {:list, :map},
                                default: []
+                             ],
+                             clean_eval: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 enabled: [type: :boolean, default: @default_clean_eval_enabled],
+                                 base_ref: [type: {:or, [:string, nil]}, default: nil],
+                                 # nil (absent) falls back to top-level gates; an
+                                 # explicit [] means apply-only clean evaluation.
+                                 gates: [type: {:or, [{:list, :map}, nil]}, default: nil]
+                               ]
                              ],
                              observability: [
                                type: :map,
@@ -333,15 +345,39 @@ defmodule Rondo.Config do
   def gates do
     validated_workflow_options()
     |> Map.get(:gates, [])
-    |> Enum.map(fn gate ->
-      %{
-        name: Map.fetch!(gate, :name),
-        command: Map.fetch!(gate, :command),
-        timeout_ms: Map.get(gate, :timeout_ms, @default_gate_timeout_ms),
-        action_id: Map.get(gate, :action_id),
-        action_classes: Map.get(gate, :action_classes, ["read"])
-      }
-    end)
+    |> Enum.map(&normalize_gate/1)
+  end
+
+  defp normalize_gate(gate) do
+    %{
+      name: Map.fetch!(gate, :name),
+      command: Map.fetch!(gate, :command),
+      timeout_ms: Map.get(gate, :timeout_ms, @default_gate_timeout_ms),
+      action_id: Map.get(gate, :action_id),
+      action_classes: Map.get(gate, :action_classes, ["read"])
+    }
+  end
+
+  @spec clean_eval_enabled?() :: boolean()
+  def clean_eval_enabled? do
+    get_in(validated_workflow_options(), [:clean_eval, :enabled])
+  end
+
+  @spec clean_eval_base_ref() :: String.t() | nil
+  def clean_eval_base_ref do
+    get_in(validated_workflow_options(), [:clean_eval, :base_ref])
+  end
+
+  @spec clean_eval_gates() :: [gate()]
+  def clean_eval_gates do
+    validated_workflow_options()
+    |> get_in([:clean_eval, :gates])
+    |> case do
+      # An explicit `clean_eval.gates: []` means apply-only evaluation; only an
+      # absent key falls back to the top-level gates.
+      gates when is_list(gates) -> Enum.map(gates, &normalize_gate/1)
+      _absent -> gates()
+    end
   end
 
   @spec max_concurrent_agents() :: pos_integer()
@@ -791,6 +827,7 @@ defmodule Rondo.Config do
       process_provider: extract_process_provider_options(section_map(config, "process_provider")),
       hooks: extract_hooks_options(section_map(config, "hooks")),
       gates: extract_gates_options(Map.get(config, "gates")),
+      clean_eval: extract_clean_eval_options(section_map(config, "clean_eval")),
       observability: extract_observability_options(section_map(config, "observability")),
       server: extract_server_options(section_map(config, "server"))
     }
@@ -897,6 +934,16 @@ defmodule Rondo.Config do
 
   defp extract_gates_options(_gates), do: []
 
+  defp extract_clean_eval_options(section) do
+    %{}
+    |> put_if_present(:enabled, boolean_value(Map.get(section, "enabled")))
+    |> put_if_present(:base_ref, scalar_string_value(Map.get(section, "base_ref")))
+    |> put_if_present(:gates, clean_eval_gates_value(Map.get(section, "gates")))
+  end
+
+  defp clean_eval_gates_value(gates) when is_list(gates), do: extract_gates_options(gates)
+  defp clean_eval_gates_value(_gates), do: :omit
+
   defp extract_observability_options(section) do
     %{}
     |> put_if_present(:dashboard_enabled, boolean_value(Map.get(section, "dashboard_enabled")))
@@ -921,6 +968,7 @@ defmodule Rondo.Config do
     process_provider = section_map(config, "process_provider")
     hooks = section_map(config, "hooks")
     gates = Map.get(config, "gates")
+    clean_eval = section_map(config, "clean_eval")
     observability = section_map(config, "observability")
     server = section_map(config, "server")
 
@@ -935,6 +983,10 @@ defmodule Rondo.Config do
       validate_section_map(config, "process_provider"),
       validate_section_map(config, "hooks"),
       validate_gates_field(gates),
+      validate_section_map(config, "clean_eval"),
+      validate_boolean_field(clean_eval, "clean_eval.enabled"),
+      validate_string_field(clean_eval, "clean_eval.base_ref"),
+      validate_clean_eval_gates_field(clean_eval),
       validate_section_map(config, "observability"),
       validate_section_map(config, "server"),
       validate_string_field(tracker, "tracker.kind"),
@@ -1154,18 +1206,27 @@ defmodule Rondo.Config do
     end
   end
 
-  defp validate_gates_field(nil), do: []
-
-  defp validate_gates_field(gates) when is_list(gates) do
-    gates
-    |> Enum.with_index()
-    |> Enum.flat_map(fn {gate, index} -> validate_gate_entry(gate, index) end)
+  defp validate_clean_eval_gates_field(clean_eval) do
+    case Map.fetch(clean_eval, "gates") do
+      {:ok, gates} -> validate_gates_field(gates, "clean_eval.gates")
+      :error -> []
+    end
   end
 
-  defp validate_gates_field(gates), do: [config_error("gates", gates, "must be a list of gate maps")]
+  defp validate_gates_field(gates, field_path \\ "gates")
 
-  defp validate_gate_entry(gate, index) when is_map(gate) do
-    path = "gates.#{index}"
+  defp validate_gates_field(nil, _field_path), do: []
+
+  defp validate_gates_field(gates, field_path) when is_list(gates) do
+    gates
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {gate, index} -> validate_gate_entry(gate, index, field_path) end)
+  end
+
+  defp validate_gates_field(gates, field_path), do: [config_error(field_path, gates, "must be a list of gate maps")]
+
+  defp validate_gate_entry(gate, index, field_path) when is_map(gate) do
+    path = "#{field_path}.#{index}"
 
     [
       validate_required_string_field(gate, "#{path}.name", "name"),
@@ -1177,7 +1238,7 @@ defmodule Rondo.Config do
     |> List.flatten()
   end
 
-  defp validate_gate_entry(gate, index), do: [config_error("gates.#{index}", gate, "must be a map")]
+  defp validate_gate_entry(gate, index, field_path), do: [config_error("#{field_path}.#{index}", gate, "must be a map")]
 
   defp validate_required_string_field(section, path, key) do
     case Map.fetch(section, key) do

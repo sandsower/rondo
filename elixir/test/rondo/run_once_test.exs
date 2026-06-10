@@ -388,6 +388,69 @@ defmodule Rondo.RunOnceTest do
     refute_received {:update_issue_state, _, _}
   end
 
+  test "runs clean eval after successful runs when enabled and reports it in the ledger" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-clean-eval")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      clean_eval_enabled: true
+    )
+
+    agent_runner = fn run_issue, agent_opts ->
+      run_dir = Keyword.fetch!(agent_opts, :run_dir)
+      workspace = Path.join(workspace_root, run_issue.identifier)
+      File.mkdir_p!(workspace)
+      git = fn args -> {_output, 0} = System.cmd("git", args, cd: workspace, stderr_to_stdout: true) end
+      git.(["init"])
+      git.(["config", "user.email", "run-once@example.com"])
+      git.(["config", "user.name", "Run Once"])
+      git.(["config", "commit.gpgsign", "false"])
+      File.write!(Path.join(workspace, "file.txt"), "one\n")
+      git.(["add", "--all"])
+      git.(["commit", "-m", "base"])
+      {base_ref, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace)
+      File.write!(Path.join(workspace, "file.txt"), "one\ntwo\n")
+      {diff, 0} = System.cmd("git", ["diff", "--binary", "HEAD"], cd: workspace)
+      File.write!(Path.join(run_dir, "artifacts/changes.patch"), diff)
+
+      metadata = %{"schema" => "rondo.patch/v0", "base_ref" => String.trim(base_ref), "patch_path" => "artifacts/changes.patch"}
+      File.write!(Path.join(run_dir, "artifacts/patch.json"), Jason.encode!(metadata))
+      :ok
+    end
+
+    log =
+      capture_log(fn ->
+        assert :ok =
+                 RunOnce.run("issue-1",
+                   deps: deps(issue("issue-1", state: "In Progress"), parent, agent_runner: agent_runner)
+                 )
+      end)
+
+    assert log =~ "Run-once clean eval"
+    assert log =~ "status=pass"
+
+    manifest = latest_run_manifest!(workspace_root, "GH-1")
+    assert manifest["clean_eval"] == %{"status" => "pass", "result_path" => "clean_eval/result.json"}
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "clean_eval_completed"))
+  end
+
+  test "does not run clean eval when disabled" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-clean-eval-disabled")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    assert :ok =
+             RunOnce.run("issue-1",
+               deps: deps(issue("issue-1", state: "In Progress"), parent)
+             )
+
+    manifest = latest_run_manifest!(workspace_root, "GH-1")
+    refute Map.has_key?(manifest, "clean_eval")
+  end
+
   test "captures patch and final report artifacts for completed runs with local changes" do
     parent = self()
     workspace_root = tmp_dir("run-once-artifacts")
