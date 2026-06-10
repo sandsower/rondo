@@ -139,9 +139,11 @@ defmodule Rondo.ProcessProviderTest do
   end
 
   test "beislid provider reports missing, unapproved, and unsupported required model artifacts" do
+    missing_path = Path.join(System.tmp_dir!(), "rondo-missing-beislid-#{System.unique_integer([:positive])}.json")
+
     write_workflow_file!(Workflow.workflow_file_path(),
       process_provider_kind: "beislid",
-      process_provider_artifact_path: "/tmp/rondo-missing-beislid.json"
+      process_provider_artifact_path: missing_path
     )
 
     assert %{status: :missing, checks: %{artifact: {:error, {:read_failed, _path, :enoent}}}} =
@@ -190,6 +192,7 @@ defmodule Rondo.ProcessProviderTest do
 
     assert %{status: :ok} = Beislid.probe(source_contract: %{path: rondo_manifest_path})
     assert %{status: :ok} = Beislid.probe(source_contract: %{path: approved_path})
+    assert %{status: :ok} = Beislid.probe(source_contract: %{manifest_path: approved_path})
     assert {:ok, [%{"id" => "review-guide"}]} = Beislid.select_guides()
     assert %{} = Beislid.model_routing_hints()
     assert {:ok, [%{"id" => "unit-proof"}]} = Beislid.proof_requirements()
@@ -300,6 +303,7 @@ defmodule Rondo.ProcessProviderTest do
     for {filename, payload, reason} <- [
           {"unsupported.json", %{"schema" => "future-v1"}, {:unsupported_artifact_schema, "future-v1"}},
           {"invalid.json", [], :invalid_artifact},
+          {"missing-id.json", approved_payload(%{"id" => nil}), :invalid_artifact_id},
           {"bad-gates.json", approved_payload(%{"gates" => "bad"}), {:invalid_artifact_field, "gates"}},
           {"bad-gate.json", approved_payload(%{"gates" => [%{"name" => "missing-command"}]}), {:invalid_artifact_field, "gates"}},
           {"blank-gate.json", approved_payload(%{"gates" => [%{"name" => " ", "command" => "true"}]}), {:invalid_artifact_field, "gates"}},

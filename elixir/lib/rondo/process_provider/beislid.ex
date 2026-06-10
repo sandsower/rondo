@@ -193,6 +193,7 @@ defmodule Rondo.ProcessProvider.Beislid do
     end
   end
 
+  defp normalize_artifact(%{"schema" => @artifact_schema, "status" => "approved"}, _path, _source), do: {:error, :invalid_artifact_id}
   defp normalize_artifact(%{"schema" => @artifact_schema, "status" => status}, _path, _source), do: {:error, {:artifact_not_approved, status}}
   defp normalize_artifact(%{"schema" => schema}, _path, _source), do: {:error, {:unsupported_artifact_schema, schema}}
   defp normalize_artifact(_payload, _path, _source), do: {:error, :invalid_artifact}
@@ -357,7 +358,9 @@ defmodule Rondo.ProcessProvider.Beislid do
     end
   end
 
-  defp source_contract_path(source_contract) when is_map(source_contract), do: map_value(source_contract, :path)
+  defp source_contract_path(source_contract) when is_map(source_contract) do
+    map_value(source_contract, :manifest_path) || map_value(source_contract, :path)
+  end
 
   defp map_value(map, key) when is_map(map) and is_atom(key), do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
 
