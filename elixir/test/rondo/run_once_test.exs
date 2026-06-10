@@ -388,8 +388,158 @@ defmodule Rondo.RunOnceTest do
     refute_received {:update_issue_state, _, _}
   end
 
+  test "captures patch and final report artifacts for completed runs with local changes" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-artifacts")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    report = %{
+      "schema" => "rondo.final_report/v0",
+      "summary" => "Implemented the change",
+      "changed_files" => ["tracked.txt"],
+      "gates_run" => [],
+      "failures" => [],
+      "risks" => [],
+      "next_state" => "ready_for_review"
+    }
+
+    agent_runner = fn issue, _agent_opts ->
+      workspace = Path.join(workspace_root, issue.identifier)
+      File.mkdir_p!(workspace)
+      git!(workspace, ["init", "--quiet"])
+      git!(workspace, ["config", "user.email", "test@example.org"])
+      git!(workspace, ["config", "user.name", "Rondo Test"])
+      File.write!(Path.join(workspace, "tracked.txt"), "before\n")
+      git!(workspace, ["add", "tracked.txt"])
+      git!(workspace, ["commit", "--quiet", "-m", "initial"])
+      File.write!(Path.join(workspace, "tracked.txt"), "after\n")
+
+      send(
+        self(),
+        {:claude_worker_update, issue.id,
+         %{
+           event: :invocation_completed,
+           timestamp: DateTime.utc_now(),
+           adapter: "claude_code",
+           session_id: "session-final",
+           usage: nil,
+           final_report: "Done.\n```json\n#{Jason.encode!(report)}\n```\n",
+           raw: %{}
+         }}
+      )
+
+      :ok
+    end
+
+    assert :ok =
+             RunOnce.run("issue-1",
+               deps: deps(issue("issue-1", state: "In Progress"), parent, agent_runner: agent_runner)
+             )
+
+    manifest = latest_run_manifest!(workspace_root, "GH-1")
+    assert manifest["status"] == "completed"
+    refute Map.has_key?(manifest, "failure_classification")
+
+    artifact_kinds = Enum.map(manifest["artifacts"], & &1["kind"])
+    assert "patch" in artifact_kinds
+    assert "patch_metadata" in artifact_kinds
+    assert "final_report" in artifact_kinds
+    assert manifest["final_report"] == %{"status" => "valid", "errors" => [], "path" => "artifacts/final-report.json"}
+
+    run_dir = manifest["run_dir"]
+    assert File.read!(Path.join(run_dir, "artifacts/changes.patch")) =~ "after"
+    patch_metadata = Path.join(run_dir, "artifacts/patch.json") |> File.read!() |> Jason.decode!()
+    assert patch_metadata["schema"] == "rondo.patch/v0"
+    assert patch_metadata["changed_paths"] == ["tracked.txt"]
+    persisted_report = Path.join(run_dir, "artifacts/final-report.json") |> File.read!() |> Jason.decode!()
+    assert persisted_report["summary"] == "Implemented the change"
+
+    events_lines = Path.join(run_dir, "artifacts/agent-events.ndjson") |> File.read!() |> String.split("\n", trim: true)
+    assert events_lines != []
+
+    Enum.each(events_lines, fn line ->
+      assert Jason.decode!(line)["schema"] == "rondo.events/v0"
+    end)
+  end
+
+  test "classifies malformed final reports distinctly while keeping the run completed" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-bad-report")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    agent_runner = fn issue, _agent_opts ->
+      send(
+        self(),
+        {:claude_worker_update, issue.id,
+         %{
+           event: :invocation_completed,
+           timestamp: DateTime.utc_now(),
+           adapter: "claude_code",
+           session_id: "session-bad",
+           usage: nil,
+           final_report: ~s(```json\n{"schema": "rondo.final_report/v0", "summary": ""}\n```),
+           raw: %{}
+         }}
+      )
+
+      :ok
+    end
+
+    assert :ok =
+             RunOnce.run("issue-1",
+               deps: deps(issue("issue-1", state: "In Progress"), parent, agent_runner: agent_runner)
+             )
+
+    manifest = latest_run_manifest!(workspace_root, "GH-1")
+    assert manifest["status"] == "completed"
+    assert manifest["failure_classification"] == "final_report_invalid"
+    assert manifest["final_report"]["status"] == "invalid"
+    assert Enum.any?(manifest["final_report"]["errors"], &(&1 =~ "summary must be"))
+  end
+
+  test "classifies absent final reports as missing and keeps task failures distinct" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-missing-report")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    assert :ok =
+             RunOnce.run("issue-1",
+               deps: deps(issue("issue-1", state: "In Progress"), parent)
+             )
+
+    assert {:error, {:agent_run_failed, "agent exploded"}} =
+             RunOnce.run("issue-1",
+               deps: deps(issue("issue-1", state: "In Progress"), parent, agent_runner: :raise)
+             )
+
+    manifests = all_run_manifests!(workspace_root, "GH-1")
+
+    completed_manifest = Enum.find(manifests, &(&1["status"] == "completed"))
+    assert completed_manifest["failure_classification"] == "final_report_missing"
+    assert completed_manifest["final_report"]["status"] == "missing"
+
+    failed_manifest = Enum.find(manifests, &(&1["status"] == "failed"))
+    assert failed_manifest["failure_classification"] == "task_failure"
+    refute Map.has_key?(failed_manifest, "final_report")
+  end
+
   defp assert_run_dir_option(agent_opts) do
     assert agent_opts |> Keyword.fetch!(:run_dir) |> File.dir?()
+  end
+
+  defp git!(cd, args) do
+    {output, 0} = System.cmd("git", args, cd: cd, stderr_to_stdout: true)
+    String.trim(output)
+  end
+
+  defp all_run_manifests!(workspace_root, identifier) do
+    workspace_root
+    |> Path.join(Path.join([".rondo_runs", identifier, "*", "manifest.json"]))
+    |> Path.wildcard()
+    |> Enum.map(&(&1 |> File.read!() |> Jason.decode!()))
   end
 
   defp tmp_dir(name) do

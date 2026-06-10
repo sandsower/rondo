@@ -52,6 +52,54 @@ defmodule Rondo.RunLedgerTest do
     assert ledger.next_seq == 2
   end
 
+  test "create_run records the run-start base commit and branch for git workspaces" do
+    workspace_root = tmp_dir("ledger-git-base")
+    workspace = Path.join(workspace_root, "MT-401")
+    File.mkdir_p!(workspace)
+    git!(workspace, ["init", "--quiet", "--initial-branch", "main"])
+    git!(workspace, ["config", "user.email", "test@example.org"])
+    git!(workspace, ["config", "user.name", "Rondo Test"])
+    File.write!(Path.join(workspace, "tracked.txt"), "original\n")
+    git!(workspace, ["add", "tracked.txt"])
+    git!(workspace, ["commit", "--quiet", "-m", "initial"])
+    base_commit = git!(workspace, ["rev-parse", "HEAD"])
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(), workspace_root: workspace_root, now: @now, random_suffix: "ba5e1234")
+
+    manifest = decode_json!(ledger.manifest_path)
+    assert manifest["repo"]["workspace"] == Path.expand(workspace)
+    assert manifest["repo"]["base_commit"] == base_commit
+    assert manifest["repo"]["base_branch"] == "main"
+  end
+
+  test "create_run records nil base commit when the workspace is missing or git fails" do
+    workspace_root = tmp_dir("ledger-no-git-base")
+
+    assert {:ok, missing_ledger} =
+             RunLedger.create_run(issue_fixture(), workspace_root: workspace_root, now: @now, random_suffix: "00000001")
+
+    manifest = decode_json!(missing_ledger.manifest_path)
+    assert manifest["repo"]["base_commit"] == nil
+    assert manifest["repo"]["base_branch"] == nil
+
+    workspace = Path.join(workspace_root, "MT-401")
+    File.mkdir_p!(workspace)
+    failing_runner = fn _args, ^workspace -> {"fatal: not a git repository\n", 128} end
+
+    assert {:ok, failed_ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "00000002",
+               git_runner: failing_runner
+             )
+
+    manifest = decode_json!(failed_ledger.manifest_path)
+    assert manifest["repo"]["base_commit"] == nil
+    assert manifest["repo"]["base_branch"] == nil
+  end
+
   test "create_run accepts string-keyed issue maps" do
     workspace_root = tmp_dir("ledger-string-map")
 
@@ -563,6 +611,209 @@ defmodule Rondo.RunLedgerTest do
     refute line =~ "redacted by default"
   end
 
+  test "append_agent_event writes rondo.events/v0 JSONL lines with adapter and run_ref" do
+    workspace_root = tmp_dir("ledger-events-schema")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "0eef0eef"
+             )
+
+    events = [
+      %{
+        event: :invocation_completed,
+        adapter: "claude_code",
+        run_ref: %{adapter: "claude_code", provider_ref: "session-9", provider_ref_kind: :session_id, resumable?: true},
+        session_id: "session-9",
+        usage: %{input_tokens: 1},
+        raw: %{"type" => "result"}
+      },
+      %{event: :claude_starting, raw: %{}},
+      %{"event" => "gates_completed", "adapter" => "claude_code", "raw" => %{"status" => "pass"}}
+    ]
+
+    Enum.each(events, fn event ->
+      assert :ok = RunLedger.append_agent_event(ledger, event, timestamp: @now)
+    end)
+
+    artifact_path = Path.join(ledger.run_dir, "artifacts/agent-events.ndjson")
+    lines = artifact_path |> File.read!() |> String.split("\n", trim: true)
+    decoded_lines = Enum.map(lines, &Jason.decode!/1)
+
+    assert length(decoded_lines) == 3
+    assert Enum.all?(decoded_lines, &(&1["schema"] == RunLedger.events_schema()))
+    assert RunLedger.events_schema() == "rondo.events/v0"
+
+    [first, second, third] = decoded_lines
+    assert first["event"] == "invocation_completed"
+    assert first["adapter"] == "claude_code"
+    assert first["run_ref"] == %{"adapter" => "claude_code", "provider_ref" => "session-9", "provider_ref_kind" => "session_id", "resumable?" => true}
+    assert first["session_id"] == "session-9"
+
+    assert second["event"] == "claude_starting"
+    assert second["adapter"] == nil
+    assert second["run_ref"] == nil
+
+    assert third["event"] == "gates_completed"
+    assert third["adapter"] == "claude_code"
+
+    # every line shares the same stable key set
+    assert Enum.all?(decoded_lines, fn line ->
+             Map.keys(line) |> Enum.sort() == ["adapter", "event", "raw", "run_ref", "schema", "session_id", "timestamp", "usage"]
+           end)
+  end
+
+  test "persisted strings are redacted with the secret deny-list before writing" do
+    workspace_root = tmp_dir("ledger-redaction")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "5ec5ec00"
+             )
+
+    event = %{
+      event: :warning,
+      raw: %{"status" => "used key sk-ant-api03-abcdef1234567890abcdef and Bearer abcdefghijklmnop1234"},
+      usage: %{"note" => "ghp_abcdefghijklmnopqrst123456"}
+    }
+
+    assert :ok = RunLedger.append_agent_event(ledger, event, timestamp: @now)
+
+    line = ledger.run_dir |> Path.join("artifacts/agent-events.ndjson") |> File.read!()
+    refute line =~ "sk-ant-api03"
+    refute line =~ "ghp_abcdefghijklmnopqrst123456"
+    assert line =~ "[REDACTED]"
+
+    assert {:ok, ledger} = RunLedger.write_checkpoint(ledger, :dispatch, %{note: "AKIAIOSFODNN7EXAMPLE in payload"}, timestamp: @now)
+    checkpoint = decode_json!(Path.join(ledger.run_dir, "checkpoints/0001-dispatch.json"))
+    assert checkpoint["payload"]["note"] == "[REDACTED] in payload"
+  end
+
+  test "record_final_report persists and links valid rondo.final_report/v0 reports" do
+    workspace_root = tmp_dir("ledger-final-report-valid")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "0fada7a1"
+             )
+
+    report = %{
+      "schema" => "rondo.final_report/v0",
+      "summary" => "Did the work",
+      "changed_files" => ["lib/a.ex"],
+      "gates_run" => [%{"name" => "elixir-ci", "status" => "pass"}],
+      "failures" => [],
+      "risks" => [],
+      "next_state" => "ready_for_review"
+    }
+
+    final_report_text = "All done.\n```json\n#{Jason.encode!(report)}\n```\n"
+
+    assert {:ok, ledger, :valid} = RunLedger.record_final_report(ledger, final_report_text)
+    assert RunLedger.final_report_relative_path() == "artifacts/final-report.json"
+
+    persisted = decode_json!(Path.join(ledger.run_dir, "artifacts/final-report.json"))
+    assert persisted == report
+
+    manifest = decode_json!(ledger.manifest_path)
+    assert manifest["final_report"] == %{"status" => "valid", "errors" => [], "path" => "artifacts/final-report.json"}
+    refute Map.has_key?(manifest, "failure_classification")
+    assert %{"kind" => "final_report", "path" => "artifacts/final-report.json"} in manifest["artifacts"]
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "final_report_validated"))
+  end
+
+  test "record_final_report classifies missing and invalid reports distinctly" do
+    workspace_root = tmp_dir("ledger-final-report-bad")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "baddad00"
+             )
+
+    assert {:ok, ledger, :missing} = RunLedger.record_final_report(ledger, "plain prose, no JSON report")
+
+    manifest = decode_json!(ledger.manifest_path)
+    assert manifest["final_report"]["status"] == "missing"
+    assert manifest["failure_classification"] == "final_report_missing"
+    refute File.exists?(Path.join(ledger.run_dir, "artifacts/final-report.json"))
+
+    assert {:ok, ledger, :invalid} = RunLedger.record_final_report(ledger, ~s({"schema": "rondo.final_report/v0"}))
+
+    manifest = decode_json!(ledger.manifest_path)
+    assert manifest["final_report"]["status"] == "invalid"
+    assert Enum.any?(manifest["final_report"]["errors"], &(&1 =~ "summary must be"))
+    assert manifest["failure_classification"] == "final_report_invalid"
+
+    checkpoint_kinds = Enum.map(manifest["checkpoints"], & &1["kind"])
+    assert Enum.count(checkpoint_kinds, &(&1 == "final_report_validated")) == 2
+  end
+
+  test "record_final_report surfaces ledger write failures" do
+    workspace_root = tmp_dir("ledger-final-report-error")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "e1e1e1e1"
+             )
+
+    File.rm!(ledger.manifest_path)
+    File.mkdir_p!(ledger.manifest_path)
+
+    assert {:error, reason} = RunLedger.record_final_report(ledger, nil)
+    assert reason in [:eisdir, :eacces]
+  end
+
+  test "complete_run records task_failure classification distinct from final report classifications" do
+    workspace_root = tmp_dir("ledger-classification")
+
+    assert {:ok, failed_ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "fa11fa11"
+             )
+
+    assert {:ok, failed_ledger} = RunLedger.complete_run(failed_ledger, :failed, %{reason: "boom"}, timestamp: @now)
+    failed_manifest = decode_json!(failed_ledger.manifest_path)
+    assert failed_manifest["failure_classification"] == "task_failure"
+
+    assert {:ok, completed_ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "c0ffee00"
+             )
+
+    assert {:ok, completed_ledger, :missing} = RunLedger.record_final_report(completed_ledger, nil)
+    assert {:ok, completed_ledger} = RunLedger.complete_run(completed_ledger, :completed, %{mode: "run_once"}, timestamp: @now)
+
+    completed_manifest = decode_json!(completed_ledger.manifest_path)
+    assert completed_manifest["status"] == "completed"
+    assert completed_manifest["failure_classification"] == "final_report_missing"
+
+    assert {:ok, override_ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "0dd0dd00"
+             )
+
+    override_opts = [timestamp: @now, failure_classification: "task_failure"]
+    assert {:ok, override_ledger} = RunLedger.complete_run(override_ledger, :failed, %{reason: "boom"}, override_opts)
+
+    assert decode_json!(override_ledger.manifest_path)["failure_classification"] == "task_failure"
+  end
+
   defp issue_fixture do
     %Issue{
       id: "issue-401",
@@ -577,6 +828,11 @@ defmodule Rondo.RunLedgerTest do
   end
 
   defp decode_json!(path), do: path |> File.read!() |> Jason.decode!()
+
+  defp git!(cd, args) do
+    {output, 0} = System.cmd("git", args, cd: cd, stderr_to_stdout: true)
+    String.trim(output)
+  end
 
   defp tmp_dir(name) do
     path = Path.join(System.tmp_dir!(), "rondo-#{name}-#{System.unique_integer([:positive])}")
