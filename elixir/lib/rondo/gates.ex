@@ -34,7 +34,7 @@ defmodule Rondo.Gates do
   def run(gates, workspace, opts \\ []) when is_list(gates) and is_binary(workspace) do
     run_dir = Keyword.fetch!(opts, :run_dir)
     execution_id = Keyword.get(opts, :execution_id)
-    relative_gates_dir = relative_gates_dir(execution_id)
+    relative_gates_dir = relative_gates_dir(Keyword.get(opts, :gates_dir), execution_id)
     results_path = Path.join(relative_gates_dir, @results_filename)
     gate_selection = Keyword.get(opts, :gate_selection)
 
@@ -295,10 +295,11 @@ defmodule Rondo.Gates do
     Map.reject(map, fn {_key, value} -> is_nil(value) end)
   end
 
-  defp relative_gates_dir(nil), do: "artifacts/gates"
+  defp relative_gates_dir(nil, execution_id), do: relative_gates_dir("artifacts/gates", execution_id)
+  defp relative_gates_dir(gates_dir, nil) when is_binary(gates_dir), do: gates_dir
 
-  defp relative_gates_dir(execution_id) when is_binary(execution_id) do
-    Path.join("artifacts/gates", safe_name(execution_id))
+  defp relative_gates_dir(gates_dir, execution_id) when is_binary(gates_dir) and is_binary(execution_id) do
+    Path.join(gates_dir, safe_name(execution_id))
   end
 
   defp indexed_safe_name(name, index) when is_integer(index) and index > 0 do
