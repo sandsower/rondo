@@ -141,30 +141,59 @@ defmodule Rondo.LiveE2ESupportTest do
     end
   end
 
-  describe "resolve_project/2" do
+  describe "resolve_project/3" do
+    defp project_node(id, team_ids) do
+      %{
+        "id" => id,
+        "name" => "Rondo E2E",
+        "slugId" => "#{id}-slug",
+        "teams" => %{"nodes" => Enum.map(team_ids, &%{"id" => &1})}
+      }
+    end
+
+    defp test_team, do: %{id: "team-uuid", key: "RONT", name: "Rondo Test", start_state_id: "state-todo"}
+
     test "returns project id and slugId for tracker.project_slug" do
       graphql = fn query, variables ->
         assert query =~ "RondoE2EResolveProject"
         assert variables == %{name: "Rondo E2E"}
 
+        {:ok, %{"data" => %{"projects" => %{"nodes" => [project_node("project-uuid", ["team-uuid"])]}}}}
+      end
+
+      assert {:ok, project} = LiveE2E.resolve_project("Rondo E2E", test_team(), graphql)
+      assert project == %{id: "project-uuid", name: "Rondo E2E", slug_id: "project-uuid-slug"}
+    end
+
+    test "skips same-named projects belonging to other teams" do
+      graphql = fn _query, _variables ->
         {:ok,
          %{
            "data" => %{
              "projects" => %{
-               "nodes" => [%{"id" => "project-uuid", "name" => "Rondo E2E", "slugId" => "rondo-e2e-abc123"}]
+               "nodes" => [project_node("other", ["other-team"]), project_node("ours", ["team-uuid"])]
              }
            }
          }}
       end
 
-      assert {:ok, project} = LiveE2E.resolve_project("Rondo E2E", graphql)
-      assert project == %{id: "project-uuid", name: "Rondo E2E", slug_id: "rondo-e2e-abc123"}
+      assert {:ok, %{id: "ours"}} = LiveE2E.resolve_project("Rondo E2E", test_team(), graphql)
+    end
+
+    test "errors when no matching project belongs to the test team" do
+      graphql = fn _query, _variables ->
+        {:ok, %{"data" => %{"projects" => %{"nodes" => [project_node("other", ["other-team"])]}}}}
+      end
+
+      assert {:error, {:project_not_in_team, "Rondo E2E", "RONT", ["Rondo E2E"]}} =
+               LiveE2E.resolve_project("Rondo E2E", test_team(), graphql)
     end
 
     test "errors when the project is missing" do
       graphql = fn _query, _variables -> {:ok, %{"data" => %{"projects" => %{"nodes" => []}}}} end
 
-      assert {:error, {:project_not_found, "Rondo E2E"}} = LiveE2E.resolve_project("Rondo E2E", graphql)
+      assert {:error, {:project_not_found, "Rondo E2E"}} =
+               LiveE2E.resolve_project("Rondo E2E", test_team(), graphql)
     end
   end
 
@@ -283,7 +312,7 @@ defmodule Rondo.LiveE2ESupportTest do
       graphql = fn _query, _variables -> {:error, :timeout} end
 
       assert {:error, {:linear_request_failed, :resolve_project, :timeout}} =
-               LiveE2E.resolve_project("Rondo E2E", graphql)
+               LiveE2E.resolve_project("Rondo E2E", test_team(), graphql)
 
       graphql = fn _query, _variables -> :boom end
 

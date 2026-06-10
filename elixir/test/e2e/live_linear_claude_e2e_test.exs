@@ -23,15 +23,30 @@ defmodule Rondo.LiveLinearClaudeE2ETest do
   @moduletag timeout: 600_000
 
   if !LiveE2E.enabled?() do
+    # ExUnit reports skipped tests without their skip reason, so print it when
+    # this module is explicitly targeted (e.g. `mix test --only live_e2e`).
+    if :live_e2e in ExUnit.configuration()[:include] do
+      IO.puts(:stderr, LiveE2E.skip_reason())
+    end
+
     @moduletag skip: LiveE2E.skip_reason()
   end
 
   test "linear + claude run-once round trip with disposable issue" do
     context = load_context!()
+
+    # The Rondo.TestSupport setup wrote a placeholder tracker token ("token").
+    # The LiveE2E helpers default to Rondo.Linear.Client.graphql/2, which reads
+    # that workflow, so point it at the real key before the first live call.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: "$LINEAR_API_KEY")
+
     team = resolve!(LiveE2E.resolve_team(context.team_key), "resolve team #{context.team_key}")
 
     project =
-      resolve!(LiveE2E.resolve_project(context.project_name), "resolve project #{context.project_name}")
+      resolve!(
+        LiveE2E.resolve_project(context.project_name, team),
+        "resolve project #{context.project_name} in team #{context.team_key}"
+      )
 
     issue = resolve!(LiveE2E.create_issue(%{team: team, project: project}), "create disposable issue")
     on_exit(fn -> LiveE2E.cleanup_issue(issue) end)
@@ -57,7 +72,14 @@ defmodule Rondo.LiveLinearClaudeE2ETest do
     assert marker_path |> File.read!() |> String.trim() == LiveE2E.marker_content(),
            "unexpected marker content in #{marker_path}; #{debug_context}"
 
-    {:ok, state} = LiveE2E.fetch_issue_state(issue.id)
+    state =
+      case LiveE2E.fetch_issue_state(issue.id) do
+        {:ok, state} ->
+          state
+
+        {:error, reason} ->
+          flunk("fetching final issue state failed: #{inspect(reason, pretty: true)}; #{debug_context}")
+      end
 
     assert state == LiveE2E.in_progress_state_name(),
            "expected tracker state #{LiveE2E.in_progress_state_name()}, got #{state}; #{debug_context}"

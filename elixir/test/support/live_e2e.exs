@@ -40,11 +40,16 @@ defmodule Rondo.LiveE2E do
 
   @project_query """
   query RondoE2EResolveProject($name: String!) {
-    projects(filter: {name: {eq: $name}}, first: 1) {
+    projects(filter: {name: {eq: $name}}, first: 10) {
       nodes {
         id
         name
         slugId
+        teams {
+          nodes {
+            id
+          }
+        }
       }
     }
   }
@@ -172,22 +177,41 @@ defmodule Rondo.LiveE2E do
   defp state_names(states), do: Enum.map(states, & &1["name"])
 
   @doc """
-  Resolves the configured disposable-issue project by name. The returned
-  `slug_id` is fed to `tracker.project_slug`, matching the poll filter
+  Resolves the configured disposable-issue project by name, scoped to the
+  resolved test team (project names are only unique per team, and the issue
+  must land in the team whose states were validated). The returned `slug_id`
+  is fed to `tracker.project_slug`, matching the poll filter
   (`project.slugId`) by construction.
   """
-  @spec resolve_project(String.t(), (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
+  @spec resolve_project(String.t(), map(), (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
           {:ok, map()} | {:error, term()}
-  def resolve_project(project_name, graphql \\ &Client.graphql/2) do
+  def resolve_project(project_name, team, graphql \\ &Client.graphql/2) do
     with {:ok, body} <- run_graphql(graphql, @project_query, %{name: project_name}, :resolve_project) do
       case get_in(body, ["data", "projects", "nodes"]) do
-        [project | _] ->
-          {:ok, %{id: project["id"], name: project["name"], slug_id: project["slugId"]}}
+        [_ | _] = projects ->
+          pick_team_project(projects, project_name, team)
 
         _ ->
           {:error, {:project_not_found, project_name}}
       end
     end
+  end
+
+  defp pick_team_project(projects, project_name, team) do
+    case Enum.find(projects, &project_in_team?(&1, team.id)) do
+      nil ->
+        {:error, {:project_not_in_team, project_name, team.key, Enum.map(projects, & &1["name"])}}
+
+      project ->
+        {:ok, %{id: project["id"], name: project["name"], slug_id: project["slugId"]}}
+    end
+  end
+
+  defp project_in_team?(project, team_id) do
+    project
+    |> get_in(["teams", "nodes"])
+    |> List.wrap()
+    |> Enum.any?(&(&1["id"] == team_id))
   end
 
   @doc """
