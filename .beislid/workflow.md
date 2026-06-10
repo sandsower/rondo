@@ -61,6 +61,7 @@ modes:
     actions:
       dependency.install: allow
       git.push: allow
+      gh.pr.merge: allow
       pr.review.reply: allow
 ```
 
@@ -83,7 +84,7 @@ loop:
 closeout:
   merge:
     mode: auto
-    method: repo-default
+    method: merge
     delete_branch: true
   memento:
     mode: auto
