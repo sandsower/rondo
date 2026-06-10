@@ -1,9 +1,9 @@
-.PHONY: help all setup deps fmt fmt-check lint test coverage ci dialyzer
+.PHONY: help all setup deps fmt fmt-check lint test coverage ci dialyzer e2e
 
 MIX ?= mix
 
 help:
-	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, ci"
+	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, ci, e2e"
 
 setup:
 	$(MIX) setup
@@ -25,6 +25,11 @@ coverage:
 
 test:
 	$(MIX) test
+
+# Opt-in live E2E profile (Linear + Claude). Skipped with a clear reason unless
+# RONDO_RUN_LIVE_E2E=1 and live credentials are exported. See README.
+e2e:
+	$(MIX) test --only live_e2e
 
 dialyzer:
 	$(MIX) deps.get
