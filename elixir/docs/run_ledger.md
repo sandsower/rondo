@@ -45,6 +45,7 @@ If `workspace.root` points at a temporary directory, ledgers are ephemeral with 
 - timestamps
 - checkpoint index
 - artifact links
+- `final_report` validation block and `failure_classification` when recorded (see below)
 - pending human interrupt payload when the status is `paused`
 
 Checkpoint and built-in artifact paths are relative to `run_dir`. Archive links may point at the existing archive location outside the ledger.
@@ -68,6 +69,7 @@ Current checkpoint kinds include:
 - `turn_cancelled`
 - `edit_batch`
 - `gates_completed`
+- `final_report_validated`
 - `interrupt_created`
 - `completed`
 - `failed`
@@ -77,7 +79,39 @@ Ledger write failures are logged as warnings and do not stop the run.
 
 ## Agent event artifact
 
-`artifacts/agent-events.ndjson` stores sanitized agent event summaries. Values are size-capped and secret-looking keys are redacted. Usage token counts are preserved, but full prompts, file contents, auth headers, cookies, API keys, and secret-looking values should not be treated as captured source of truth.
+`artifacts/agent-events.ndjson` stores sanitized agent event summaries as JSONL. Each line is a `rondo.events/v0` object with a stable key set:
+
+```json
+{
+  "schema": "rondo.events/v0",
+  "timestamp": "2026-06-10T12:00:00Z",
+  "event": "invocation_completed",
+  "adapter": "claude_code",
+  "run_ref": {"adapter": "claude_code", "provider_ref": "…", "provider_ref_kind": "session_id", "resumable?": true},
+  "session_id": "…",
+  "usage": {"input_tokens": 1},
+  "raw": {}
+}
+```
+
+Values are size-capped, secret-looking keys are redacted, and all persisted strings additionally pass through the `Rondo.Redaction` deny-list (API-key shapes, bearer/GitHub/Slack/AWS tokens, private-key blocks, secret-named assignments, and values of secret-named environment variables). Usage token counts are preserved, but full prompts, file contents, auth headers, cookies, API keys, and secret-looking values should not be treated as captured source of truth.
+
+## Patch artifact
+
+For completed `run-once` runs whose workspace has local git changes, Rondo captures the final diff for later clean evaluation:
+
+- `artifacts/changes.patch` — `git diff --binary` output against the workspace `HEAD`, including untracked file contents (captured via intent-to-add). It applies with `git apply` on a clean checkout of the recorded base ref. Patch content is intentionally not redacted; a modified patch would no longer apply.
+- `artifacts/patch.json` — `rondo.patch/v0` metadata: `format` (`git-diff`), `base_ref` (workspace `HEAD` commit), `base_branch`, `includes_untracked`, `captured_at`, `changed_paths`, and `patch_path`.
+
+Both files are linked from the manifest with artifact kinds `patch` and `patch_metadata`. Capture is skipped (without failing the run) when the workspace is missing, not a git repository, has no commits, or has no local changes. See `Rondo.PatchArtifact`.
+
+## Final report artifact
+
+Completed `run-once` runs validate the adapter's final report against the `rondo.final_report/v0` schema (`Rondo.FinalReport`). The report is a JSON object — the whole final report string or its last fenced ```json block — with required fields `schema`, `summary`, `changed_files`, `gates_run`, `failures`, `risks`, and `next_state`.
+
+Validation writes a `final_report_validated` checkpoint and a manifest `final_report` block with `status` `valid`, `invalid`, or `missing` plus validation `errors`. Valid reports are persisted (sanitized) to `artifacts/final-report.json` and linked with artifact kind `final_report`.
+
+Invalid or missing reports are a distinct failure classification from task/code failures: the manifest `failure_classification` field is `final_report_invalid` or `final_report_missing` for completed runs with bad reports, and `task_failure` for runs that terminate with status `failed`.
 
 ## Gate artifacts
 

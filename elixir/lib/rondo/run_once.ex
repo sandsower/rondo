@@ -5,7 +5,7 @@ defmodule Rondo.RunOnce do
 
   require Logger
 
-  alias Rondo.{AgentRunner, Config, ExecutionRequest, Linear.Issue, RunLedger, SideEffectPolicy, Tracker}
+  alias Rondo.{AgentRunner, Config, ExecutionRequest, Linear.Issue, PatchArtifact, RunLedger, SideEffectPolicy, Tracker}
 
   @type run_result :: :ok | {:error, term()}
   @type deps :: %{
@@ -212,28 +212,67 @@ defmodule Rondo.RunOnce do
       |> Keyword.put_new(:run_ledger, ledger)
 
     result = deps.agent_runner.(issue, agent_opts)
-    ledger = record_queued_updates(ledger, issue.id)
+    {ledger, updates} = record_queued_updates(ledger, issue.id)
+    ledger = finalize_run_artifacts(ledger, result, updates)
     complete_run_once_ledger_result(ledger, result)
   rescue
     error ->
       reason = {:agent_run_failed, Exception.message(error)}
-      ledger = record_queued_updates(ledger, issue.id)
+      {ledger, _updates} = record_queued_updates(ledger, issue.id)
       complete_run_once_ledger_result(ledger, {:error, reason})
   catch
     :exit, {:action_policy_guidance_required, interrupt} when is_map(interrupt) ->
-      ledger = record_queued_updates(ledger, issue.id)
+      {ledger, _updates} = record_queued_updates(ledger, issue.id)
       _ledger = pause_run_once_ledger(ledger, interrupt)
       {:error, {:action_policy_guidance_required, interrupt}}
 
     :exit, reason ->
       reason = {:agent_run_failed, {:exit, reason}}
-      ledger = record_queued_updates(ledger, issue.id)
+      {ledger, _updates} = record_queued_updates(ledger, issue.id)
       complete_run_once_ledger_result(ledger, {:error, reason})
 
     kind, reason ->
       reason = {:agent_run_failed, {kind, reason}}
-      ledger = record_queued_updates(ledger, issue.id)
+      {ledger, _updates} = record_queued_updates(ledger, issue.id)
       complete_run_once_ledger_result(ledger, {:error, reason})
+  end
+
+  defp finalize_run_artifacts(ledger, :ok, updates) do
+    ledger
+    |> capture_patch_artifact()
+    |> record_final_report_artifact(updates)
+  end
+
+  defp finalize_run_artifacts(ledger, _result, _updates), do: ledger
+
+  defp capture_patch_artifact(ledger) do
+    case PatchArtifact.capture(ledger) do
+      {:ok, ledger, status} ->
+        Logger.info("Run-once patch artifact capture #{ledger_context(ledger)} status=#{status}")
+        ledger
+
+      {:error, reason} ->
+        Logger.warning("Failed to capture run-once patch artifact #{ledger_context(ledger)} reason=#{inspect(reason)}")
+        ledger
+    end
+  end
+
+  defp record_final_report_artifact(ledger, updates) do
+    case RunLedger.record_final_report(ledger, final_report_from_updates(updates)) do
+      {:ok, ledger, status} ->
+        Logger.info("Run-once final report validation #{ledger_context(ledger)} status=#{status}")
+        ledger
+
+      {:error, reason} ->
+        Logger.warning("Failed to record run-once final report #{ledger_context(ledger)} reason=#{inspect(reason)}")
+        ledger
+    end
+  end
+
+  defp final_report_from_updates(updates) do
+    updates
+    |> Enum.reverse()
+    |> Enum.find_value(fn update -> Map.get(update, :final_report) || Map.get(update, "final_report") end)
   end
 
   defp complete_run_once_ledger_result(ledger, result) do
@@ -260,8 +299,8 @@ defmodule Rondo.RunOnce do
   defp original_result({:error, reason}), do: reason
 
   defp record_queued_updates(ledger, issue_id) do
-    collect_queued_updates(issue_id)
-    |> Enum.reduce(ledger, &record_update(&2, &1))
+    updates = collect_queued_updates(issue_id)
+    {Enum.reduce(updates, ledger, &record_update(&2, &1)), updates}
   end
 
   defp collect_queued_updates(issue_id), do: collect_queued_updates(issue_id, [])
