@@ -126,6 +126,7 @@ defmodule Rondo.TestSupport do
           action_policy_run_mode: "unattended-auto",
           process_provider_kind: "native",
           process_provider_required: false,
+          process_provider_artifact_path: nil,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -175,6 +176,7 @@ defmodule Rondo.TestSupport do
     action_policy_run_mode = Keyword.get(config, :action_policy_run_mode)
     process_provider_kind = Keyword.get(config, :process_provider_kind)
     process_provider_required = Keyword.get(config, :process_provider_required)
+    process_provider_artifact_path = Keyword.get(config, :process_provider_artifact_path)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -232,6 +234,7 @@ defmodule Rondo.TestSupport do
         "process_provider:",
         "  kind: #{yaml_value(process_provider_kind)}",
         "  required: #{yaml_value(process_provider_required)}",
+        "  artifact_path: #{yaml_value(process_provider_artifact_path)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         gates_yaml(gates),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),

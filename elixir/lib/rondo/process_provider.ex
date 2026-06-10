@@ -8,7 +8,7 @@ defmodule Rondo.ProcessProvider do
   """
 
   alias Rondo.{Config, Linear.Issue}
-  alias Rondo.ProcessProvider.Native
+  alias Rondo.ProcessProvider.{Beislid, Native}
 
   @type capability_status :: :ok | :degraded | :unsupported | :missing
   @type capabilities :: map()
@@ -47,6 +47,8 @@ defmodule Rondo.ProcessProvider do
   @spec provider_module(String.t() | atom() | module()) :: module()
   def provider_module("native"), do: Native
   def provider_module(:native), do: Native
+  def provider_module("beislid"), do: Beislid
+  def provider_module(:beislid), do: Beislid
   def provider_module(module) when is_atom(module), do: module
 
   @spec select_gate_selection(module(), keyword()) :: {:ok, gate_selection_result()} | {:error, term()}

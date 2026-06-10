@@ -429,12 +429,17 @@ Fields:
 
 - `kind` (string)
   - Default: `native`.
-  - P0 supports `native` only. Invalid provider kinds fail workflow validation instead of silently
-    falling back.
+  - Supported values: `native` and fixture-backed `beislid`. Invalid provider kinds fail workflow
+    validation instead of silently falling back.
 - `required` (boolean)
   - Default: `false`.
-  - When `true`, provider gate-selection failures stop the run clearly. When `false`, Rondo may warn
-    and fall back to native flat gates for optional provider failures.
+  - When `true`, provider preflight or gate-selection failures stop the run clearly. When `false`,
+    Rondo may warn and fall back to native flat gates for optional provider failures only when doing
+    so does not ignore loaded approved required constraints.
+- `artifact_path` (string or null)
+  - Optional path to an approved Beislið process artifact when `kind: beislid`. Manifest
+    `source_contract.process_provider.artifact_path` takes precedence; `source_contract.path` is
+    treated as a provider artifact only when its schema is explicitly Beislið-owned.
 
 The process provider is the boundary for process/work-contract inputs: gate selection, guide
 selection, action-policy evaluation, model-routing hints, proof requirement resolution, and
@@ -443,9 +448,12 @@ selected/skipped explanations, warnings, and provider metadata; Rondo persists t
 artifacts. The native provider preserves Rondo's existing standalone `WORKFLOW.md` behavior: flat gates
 come from top-level `gates`, prompts come from the Markdown body, action-policy evaluation delegates
 to the configured Beislið evaluator, model hints come from adapter config, and richer provider
-features degrade to unsupported/empty results unless a future provider marks them required. Rondo owns
-execution, proof artifacts, and run state; external systems such as Beislið own richer work-contract
-semantics when a future provider is added.
+features degrade to unsupported/empty results unless a future provider marks them required. The
+fixture-backed Beislið provider consumes explicit approved JSON artifacts with schema
+`beislid-process-artifact-v1`; it can augment the native prompt, select gates, expose guide/proof
+metadata through probe/gate-selection metadata, and return fixture action-policy decisions, but it
+does not implement or require the real Beislið exporter/runtime. Rondo owns execution, proof
+artifacts, and run state; external systems such as Beislið own richer work-contract semantics.
 
 #### 5.3.7 `agent` (object)
 
@@ -709,7 +717,9 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `gates[].action_classes`: optional Beislið action classes, default `["read"]`
 - `action_policy.command`: executable path/name, default `beislid`
 - `action_policy.run_mode`: one of `supervised-auto`, `unattended-auto`; default `unattended-auto`
-- `process_provider.kind`: string, default `native`; P0 supports `native` only
+- `process_provider.kind`: string, default `native`; supports `native` and fixture-backed `beislid`
+- `process_provider.required`: boolean, default `false`
+- `process_provider.artifact_path`: string or null, optional Beislið process artifact path
 - `server.port` (extension): integer, optional; enables the optional HTTP server, `0` may be used
   for ephemeral local bind, and CLI `--port` overrides it
 

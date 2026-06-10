@@ -1,0 +1,10 @@
+{
+  "schema": "beislid-process-artifact-v1",
+  "id": "beislid-fixture-required-model",
+  "status": "approved",
+  "gates": [],
+  "model_routing_hints": {
+    "mode": "require",
+    "model": "future-model"
+  }
+}

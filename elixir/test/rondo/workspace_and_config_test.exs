@@ -770,18 +770,24 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert File.exists?(action_policy_command)
     assert Config.action_policy_command() == action_policy_command
     assert Config.action_policy_run_mode() == "unattended-auto"
-    assert Config.process_provider() == %{kind: "native", required: false}
+    assert Config.process_provider() == %{kind: "native", required: false, artifact_path: nil}
     assert Config.process_provider_kind() == "native"
     assert Config.process_provider_required?() == false
 
     write_workflow_file!(Workflow.workflow_file_path(), process_provider_required: true)
-    assert Config.process_provider() == %{kind: "native", required: true}
+    assert Config.process_provider() == %{kind: "native", required: true, artifact_path: nil}
     assert Config.process_provider_required?() == true
 
     write_workflow_file!(Workflow.workflow_file_path(), process_provider_required: "maybe")
     assert {:error, {:invalid_workflow_config, _, [%{path: "process_provider.required"}]}} = Config.validate!()
 
-    write_workflow_file!(Workflow.workflow_file_path(), process_provider_kind: "beislid")
+    write_workflow_file!(Workflow.workflow_file_path(), process_provider_kind: "beislid", process_provider_artifact_path: "/tmp/beislid-process.json")
+    assert Config.process_provider() == %{kind: "beislid", required: false, artifact_path: "/tmp/beislid-process.json"}
+    assert Config.process_provider_kind() == "beislid"
+    assert Config.process_provider_artifact_path() == "/tmp/beislid-process.json"
+    assert :ok = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(), process_provider_kind: "mystery")
     assert {:error, {:invalid_workflow_config, _, [%{path: "process_provider.kind"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), action_policy_command: "/tmp/beislid", action_policy_run_mode: "supervised-auto")

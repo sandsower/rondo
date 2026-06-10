@@ -46,7 +46,7 @@ defmodule Rondo.Config do
   @valid_action_policy_run_modes ["supervised-auto", "unattended-auto"]
   @default_process_provider_kind "native"
   @default_process_provider_required false
-  @valid_process_provider_kinds ["native"]
+  @valid_process_provider_kinds ["native", "beislid"]
   @default_debug false
   @default_observability_enabled true
   @default_observability_refresh_ms 1_000
@@ -159,7 +159,8 @@ defmodule Rondo.Config do
                                default: %{},
                                keys: [
                                  kind: [type: :string, default: @default_process_provider_kind],
-                                 required: [type: :boolean, default: @default_process_provider_required]
+                                 required: [type: :boolean, default: @default_process_provider_required],
+                                 artifact_path: [type: {:or, [:string, nil]}, default: nil]
                                ]
                              ],
                              hooks: [
@@ -227,7 +228,8 @@ defmodule Rondo.Config do
         }
   @type process_provider :: %{
           kind: String.t(),
-          required: boolean()
+          required: boolean(),
+          artifact_path: Path.t() | nil
         }
 
   @spec current_workflow() :: {:ok, workflow_payload()} | {:error, term()}
@@ -449,7 +451,8 @@ defmodule Rondo.Config do
 
     %{
       kind: Map.get(provider, :kind),
-      required: Map.get(provider, :required)
+      required: Map.get(provider, :required),
+      artifact_path: Map.get(provider, :artifact_path)
     }
   end
 
@@ -461,6 +464,11 @@ defmodule Rondo.Config do
   @spec process_provider_required?() :: boolean()
   def process_provider_required? do
     get_in(validated_workflow_options(), [:process_provider, :required])
+  end
+
+  @spec process_provider_artifact_path() :: Path.t() | nil
+  def process_provider_artifact_path do
+    get_in(validated_workflow_options(), [:process_provider, :artifact_path])
   end
 
   @spec pi_turn_timeout_ms() :: pos_integer()
@@ -853,6 +861,7 @@ defmodule Rondo.Config do
     %{}
     |> put_if_present(:kind, scalar_string_value(Map.get(section, "kind")))
     |> put_if_present(:required, boolean_value(Map.get(section, "required")))
+    |> put_if_present(:artifact_path, binary_value(Map.get(section, "artifact_path")))
   end
 
   defp tools_list_value(values) when is_list(values) do
@@ -961,6 +970,7 @@ defmodule Rondo.Config do
       validate_inclusion_field(action_policy, "action_policy.run_mode", @valid_action_policy_run_modes),
       validate_inclusion_field(process_provider, "process_provider.kind", @valid_process_provider_kinds),
       validate_boolean_field(process_provider, "process_provider.required"),
+      validate_string_field(process_provider, "process_provider.artifact_path"),
       validate_string_field(hooks, "hooks.after_create"),
       validate_string_field(hooks, "hooks.before_run"),
       validate_string_field(hooks, "hooks.after_run"),

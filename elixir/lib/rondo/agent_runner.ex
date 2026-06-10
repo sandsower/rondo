@@ -8,7 +8,7 @@ defmodule Rondo.AgentRunner do
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.PiAdapter
   alias Rondo.{Config, Gates, Linear.Issue, ProcessProvider, Tracker, Workspace}
-  alias Rondo.ProcessProvider.Native
+  alias Rondo.ProcessProvider.{Beislid, Native}
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, claude_update_recipient \\ nil, opts \\ []) do
@@ -122,7 +122,8 @@ defmodule Rondo.AgentRunner do
 
   defp run_agent_turns(workspace, issue, claude_update_recipient, opts) do
     with {:ok, adapter} <- adapter_module(opts),
-         {:ok, provider} <- process_provider_module(opts) do
+         {:ok, provider} <- process_provider_module(opts),
+         :ok <- preflight_process_provider(provider, opts) do
       context = %{
         workspace: workspace,
         claude_update_recipient: claude_update_recipient,
@@ -213,14 +214,14 @@ defmodule Rondo.AgentRunner do
   defp run_selected_gates(%{run_dir: nil}, _issue, _turn_number, _gate_selection), do: {:error, :missing_run_ledger_for_gates}
 
   defp run_selected_gates(context, issue, turn_number, gate_selection) do
-    action_policy_provider = Map.get(gate_selection, :action_policy_provider, context.process_provider)
+    {action_policy_provider, gate_selection} = action_policy_provider_for_gates(gate_selection, context)
 
     case Gates.run(gate_selection.gates, context.workspace,
            run_dir: context.run_dir,
            execution_id: gate_execution_id(turn_number),
            gate_selection: Map.drop(gate_selection, [:gates, :action_policy_provider]),
            action_policy: true,
-           action_policy_evaluator: ProcessProvider.action_policy_evaluator(action_policy_provider)
+           action_policy_evaluator: action_policy_evaluator(action_policy_provider, context.opts)
          ) do
       {:ok, summary} ->
         send_gate_update(context.claude_update_recipient, issue, summary)
@@ -259,9 +260,14 @@ defmodule Rondo.AgentRunner do
       stage: :post_turn,
       turn_number: turn_number
     ]
+    |> maybe_put_source_contract(context.opts)
   end
 
   defp handle_gate_selection_failure(Native, reason, _opts), do: {:error, {:process_provider_gate_selection_failed, reason}}
+
+  defp handle_gate_selection_failure(_provider, {:invalid_artifact_field, _field} = reason, _opts) do
+    {:error, {:process_provider_gate_selection_failed, reason}}
+  end
 
   defp handle_gate_selection_failure(provider, reason, opts) do
     if Config.process_provider_required?() do
@@ -273,6 +279,44 @@ defmodule Rondo.AgentRunner do
       with {:ok, selection} <- ProcessProvider.select_gate_selection(Native, opts) do
         {:ok, selection |> annotate_native_fallback(provider_id, reason) |> Map.put(:action_policy_provider, Native)}
       end
+    end
+  end
+
+  defp action_policy_evaluator(Beislid, context_opts) do
+    fn action, classes, opts ->
+      Beislid.evaluate_action_policy(action, classes, Keyword.merge(context_provider_opts(context_opts), opts))
+    end
+  end
+
+  defp action_policy_evaluator(provider, _context_opts), do: ProcessProvider.action_policy_evaluator(provider)
+
+  defp context_provider_opts(context_opts) do
+    case Keyword.get(context_opts, :source_contract) do
+      source_contract when is_map(source_contract) -> [source_contract: source_contract]
+      _other -> []
+    end
+  end
+
+  defp action_policy_provider_for_gates(%{action_policy_provider: Beislid} = gate_selection, %{opts: opts}) do
+    provider = if Beislid.action_policy_available?(opts), do: Beislid, else: Native
+
+    gate_selection =
+      update_in(gate_selection.metadata, fn metadata ->
+        Map.put(metadata, :action_policy_provider, provider_id(provider))
+      end)
+
+    {provider, gate_selection}
+  end
+
+  defp action_policy_provider_for_gates(gate_selection, context) do
+    provider = Map.get(gate_selection, :action_policy_provider, context.process_provider)
+    {provider, gate_selection}
+  end
+
+  defp maybe_put_source_contract(opts, context_opts) do
+    case Keyword.get(context_opts, :source_contract) do
+      source_contract when is_map(source_contract) -> Keyword.put(opts, :source_contract, source_contract)
+      _other -> opts
     end
   end
 
@@ -359,8 +403,29 @@ defmodule Rondo.AgentRunner do
 
   defp resolve_process_provider_module("native"), do: {:ok, Rondo.ProcessProvider.Native}
   defp resolve_process_provider_module(:native), do: {:ok, Rondo.ProcessProvider.Native}
+  defp resolve_process_provider_module("beislid"), do: {:ok, Rondo.ProcessProvider.Beislid}
+  defp resolve_process_provider_module(:beislid), do: {:ok, Rondo.ProcessProvider.Beislid}
   defp resolve_process_provider_module(module) when is_atom(module), do: {:ok, module}
   defp resolve_process_provider_module(other), do: {:error, {:unsupported_process_provider, other}}
+
+  defp preflight_process_provider(Beislid, opts) do
+    probe = Beislid.probe(opts)
+
+    cond do
+      blocking_probe?(probe) ->
+        {:error, {:process_provider_preflight_failed, Beislid.id(), probe}}
+
+      Config.process_provider_required?() and Map.get(probe, :status) != :ok ->
+        {:error, {:process_provider_preflight_failed, Beislid.id(), probe}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp preflight_process_provider(_provider, _opts), do: :ok
+
+  defp blocking_probe?(%{checks: checks}), do: map_size(Map.get(checks, :blocking, %{})) > 0
 
   defp build_turn_prompt(provider, issue, opts, 1, _max_turns), do: ProcessProvider.prompt(provider, issue, opts)
 
