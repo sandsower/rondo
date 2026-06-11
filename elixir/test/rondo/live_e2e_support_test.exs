@@ -36,10 +36,12 @@ defmodule Rondo.LiveE2ESupportTest do
     end
   end
 
-  # Injects a find_executable stub that resolves "beislid" to a fixed path.
+  # Injects a find_executable stub that resolves known executables to fixed paths.
   defp find_executable_found(name) do
     case name do
       "beislid" -> "/usr/local/bin/beislid"
+      "claude" -> "/usr/local/bin/claude"
+      "pi" -> "/usr/local/bin/pi"
       _ -> nil
     end
   end
@@ -80,8 +82,10 @@ defmodule Rondo.LiveE2ESupportTest do
     test "explicit RONDO_E2E_ACTION_POLICY_COMMAND=fake opts in to the allow-all stub" do
       override = %{"RONDO_E2E_ACTION_POLICY_COMMAND" => LiveE2E.action_policy_fake_value()}
 
+      # find_executable_found resolves "claude" so the agent CLI probe passes;
+      # this test is about action-policy, not agent command selection.
       assert {:ok, context} =
-               LiveE2E.load_context(env(full_env(override)), &find_executable_missing/1)
+               LiveE2E.load_context(env(full_env(override)), &find_executable_found/1)
 
       assert context.action_policy_command == :fake
     end
@@ -89,8 +93,10 @@ defmodule Rondo.LiveE2ESupportTest do
     test "explicit non-fake RONDO_E2E_ACTION_POLICY_COMMAND uses that path directly" do
       override = %{"RONDO_E2E_ACTION_POLICY_COMMAND" => "/opt/bin/beislid"}
 
+      # find_executable_found resolves "claude" so the agent CLI probe passes;
+      # this test is about action-policy, not agent command selection.
       assert {:ok, context} =
-               LiveE2E.load_context(env(full_env(override)), &find_executable_missing/1)
+               LiveE2E.load_context(env(full_env(override)), &find_executable_found/1)
 
       assert context.action_policy_command == "/opt/bin/beislid"
     end
@@ -100,8 +106,9 @@ defmodule Rondo.LiveE2ESupportTest do
 
       assert context.team_key == "RONT"
       assert context.project_name == "Rondo E2E"
-      assert context.claude_command == "claude"
-      assert context.claude_max_turns == 10
+      assert context.agent_adapter == "claude_code"
+      assert context.agent_command == "claude"
+      assert context.agent_max_turns == 10
     end
 
     test "honors optional overrides and falls back on invalid max turns" do
@@ -114,8 +121,8 @@ defmodule Rondo.LiveE2ESupportTest do
       assert {:ok, context} =
                LiveE2E.load_context(env(full_env(overrides)), &find_executable_missing/1)
 
-      assert context.claude_command == "/usr/local/bin/claude"
-      assert context.claude_max_turns == 5
+      assert context.agent_command == "/usr/local/bin/claude"
+      assert context.agent_max_turns == 5
       assert context.action_policy_command == "/opt/bin/beislid"
 
       assert {:ok, context} =
@@ -124,7 +131,204 @@ defmodule Rondo.LiveE2ESupportTest do
                  &find_executable_found/1
                )
 
-      assert context.claude_max_turns == 10
+      assert context.agent_max_turns == 10
+    end
+  end
+
+  describe "adapter selection" do
+    test "defaults to claude_code when RONDO_E2E_AGENT_ADAPTER is not set" do
+      assert {:ok, context} = LiveE2E.load_context(env(full_env()), &find_executable_found/1)
+      assert context.agent_adapter == "claude_code"
+    end
+
+    test "selects pi adapter when RONDO_E2E_AGENT_ADAPTER=pi" do
+      overrides = %{"RONDO_E2E_AGENT_ADAPTER" => "pi"}
+
+      assert {:ok, context} =
+               LiveE2E.load_context(
+                 env(full_env(overrides)),
+                 fn
+                   "pi" -> "/usr/local/bin/pi"
+                   "beislid" -> "/usr/local/bin/beislid"
+                   _ -> nil
+                 end
+               )
+
+      assert context.agent_adapter == "pi"
+      assert context.agent_command == "pi"
+    end
+
+    test "returns config error for unknown adapter value" do
+      overrides = %{"RONDO_E2E_AGENT_ADAPTER" => "openai"}
+
+      assert {:error, {:invalid_agent_adapter, "openai", accepted}} =
+               LiveE2E.load_context(env(full_env(overrides)), &find_executable_found/1)
+
+      assert "claude_code" in accepted
+      assert "pi" in accepted
+    end
+
+    test "probe-honest failure when claude CLI is not on PATH (claude_code adapter)" do
+      # Use action-policy fake opt-in so we isolate the agent CLI probe failure.
+      overrides = %{
+        "RONDO_E2E_ACTION_POLICY_COMMAND" => LiveE2E.action_policy_fake_value()
+      }
+
+      assert {:error, {:agent_cli_missing, command, env_var}} =
+               LiveE2E.load_context(env(full_env(overrides)), &find_executable_missing/1)
+
+      assert command == "claude"
+      assert env_var == "RONDO_E2E_AGENT_COMMAND"
+    end
+
+    test "probe-honest failure when pi CLI is not on PATH" do
+      # Use action-policy fake opt-in so we isolate the agent CLI probe failure.
+      overrides = %{
+        "RONDO_E2E_AGENT_ADAPTER" => "pi",
+        "RONDO_E2E_ACTION_POLICY_COMMAND" => LiveE2E.action_policy_fake_value()
+      }
+
+      assert {:error, {:agent_cli_missing, command, env_var}} =
+               LiveE2E.load_context(env(full_env(overrides)), &find_executable_missing/1)
+
+      assert is_binary(command)
+      assert is_binary(env_var)
+      # The message should name the missing command and the env var to set
+      assert String.length(command) > 0
+      assert String.length(env_var) > 0
+    end
+
+    test "pi adapter with explicit RONDO_E2E_AGENT_COMMAND" do
+      overrides = %{
+        "RONDO_E2E_AGENT_ADAPTER" => "pi",
+        "RONDO_E2E_AGENT_COMMAND" => "/opt/bin/pi"
+      }
+
+      # Explicit command path — trusted without probing; only beislid needs to be found
+      assert {:ok, context} =
+               LiveE2E.load_context(
+                 env(full_env(overrides)),
+                 &find_executable_found/1
+               )
+
+      assert context.agent_adapter == "pi"
+      assert context.agent_command == "/opt/bin/pi"
+    end
+  end
+
+  describe "generalized env vars and deprecated aliases" do
+    test "RONDO_E2E_AGENT_COMMAND takes precedence over RONDO_E2E_CLAUDE_COMMAND" do
+      overrides = %{
+        "RONDO_E2E_AGENT_COMMAND" => "/opt/bin/claude",
+        "RONDO_E2E_CLAUDE_COMMAND" => "/usr/local/bin/claude"
+      }
+
+      assert {:ok, context} =
+               LiveE2E.load_context(env(full_env(overrides)), &find_executable_found/1)
+
+      assert context.agent_command == "/opt/bin/claude"
+    end
+
+    test "RONDO_E2E_AGENT_MAX_TURNS takes precedence over RONDO_E2E_CLAUDE_MAX_TURNS" do
+      overrides = %{
+        "RONDO_E2E_AGENT_MAX_TURNS" => "7",
+        "RONDO_E2E_CLAUDE_MAX_TURNS" => "3"
+      }
+
+      assert {:ok, context} =
+               LiveE2E.load_context(env(full_env(overrides)), &find_executable_found/1)
+
+      assert context.agent_max_turns == 7
+    end
+
+    test "RONDO_E2E_CLAUDE_COMMAND still works as deprecated alias and logs a warning" do
+      overrides = %{"RONDO_E2E_CLAUDE_COMMAND" => "/usr/local/bin/claude-beta"}
+
+      log =
+        capture_log(fn ->
+          assert {:ok, context} =
+                   LiveE2E.load_context(env(full_env(overrides)), &find_executable_found/1)
+
+          assert context.agent_command == "/usr/local/bin/claude-beta"
+        end)
+
+      assert log =~ "RONDO_E2E_CLAUDE_COMMAND is deprecated"
+      assert log =~ "RONDO_E2E_AGENT_COMMAND"
+    end
+
+    test "RONDO_E2E_CLAUDE_MAX_TURNS still works as deprecated alias and logs a warning" do
+      overrides = %{"RONDO_E2E_CLAUDE_MAX_TURNS" => "15"}
+
+      log =
+        capture_log(fn ->
+          assert {:ok, context} =
+                   LiveE2E.load_context(env(full_env(overrides)), &find_executable_found/1)
+
+          assert context.agent_max_turns == 15
+        end)
+
+      assert log =~ "RONDO_E2E_CLAUDE_MAX_TURNS is deprecated"
+      assert log =~ "RONDO_E2E_AGENT_MAX_TURNS"
+    end
+
+    test "blank RONDO_E2E_AGENT_COMMAND falls through to probe instead of returning an empty path" do
+      # Setting the var to "" or whitespace-only must not produce {:ok, ""}; it must
+      # fall through to the probe path (and fail when the binary is missing).
+      for blank <- ["", "   "] do
+        overrides = %{
+          "RONDO_E2E_AGENT_COMMAND" => blank,
+          "RONDO_E2E_ACTION_POLICY_COMMAND" => LiveE2E.action_policy_fake_value()
+        }
+
+        assert {:error, {:agent_cli_missing, _command, _env_var}} =
+                 LiveE2E.load_context(env(full_env(overrides)), &find_executable_missing/1),
+               "expected probe failure for blank value #{inspect(blank)}, got ok"
+      end
+    end
+
+    test "blank RONDO_E2E_CLAUDE_COMMAND (deprecated alias) also falls through to probe" do
+      overrides = %{
+        "RONDO_E2E_CLAUDE_COMMAND" => "",
+        "RONDO_E2E_ACTION_POLICY_COMMAND" => LiveE2E.action_policy_fake_value()
+      }
+
+      assert {:error, {:agent_cli_missing, _command, _env_var}} =
+               LiveE2E.load_context(env(full_env(overrides)), &find_executable_missing/1)
+    end
+  end
+
+  describe "workflow_overrides_for_adapter/1" do
+    test "emits claude: section for claude_code adapter" do
+      context = %{
+        agent_adapter: "claude_code",
+        agent_command: "claude",
+        agent_max_turns: 10
+      }
+
+      content = LiveE2E.workflow_overrides_for_adapter(context)
+
+      assert Keyword.get(content, :agent_adapter) == "claude_code"
+      assert Keyword.get(content, :agent_max_turns) == 10
+      assert Keyword.get(content, :claude_command) == "claude"
+      assert Keyword.get(content, :claude_max_turns) == 10
+      refute Keyword.has_key?(content, :pi_command)
+    end
+
+    test "emits pi: section for pi adapter" do
+      context = %{
+        agent_adapter: "pi",
+        agent_command: "/opt/bin/pi",
+        agent_max_turns: 5
+      }
+
+      content = LiveE2E.workflow_overrides_for_adapter(context)
+
+      assert Keyword.get(content, :agent_adapter) == "pi"
+      assert Keyword.get(content, :agent_max_turns) == 5
+      assert Keyword.get(content, :pi_command) == "/opt/bin/pi"
+      assert Keyword.get(content, :pi_turn_timeout_ms) == 3_600_000
+      assert Keyword.get(content, :pi_stall_timeout_ms) == 300_000
+      refute Keyword.has_key?(content, :claude_command)
     end
   end
 

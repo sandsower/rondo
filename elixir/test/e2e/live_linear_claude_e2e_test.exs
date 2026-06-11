@@ -1,6 +1,6 @@
 defmodule Rondo.LiveLinearClaudeE2ETest do
   @moduledoc """
-  Opt-in live end-to-end profile: Linear issue fetch, workspace prep, Claude
+  Opt-in live end-to-end profile: Linear issue fetch, workspace prep, agent
   subprocess, tracker state transition, and cleanup against a disposable
   `[rondo-e2e]` issue in a dedicated test team/project.
 
@@ -67,7 +67,7 @@ defmodule Rondo.LiveLinearClaudeE2ETest do
     marker_path = Path.join([workspace_root, issue.identifier, LiveE2E.marker_file_name()])
 
     assert File.exists?(marker_path),
-           "expected Claude to create workspace marker #{marker_path}; #{debug_context}"
+           "expected agent to create workspace marker #{marker_path}; #{debug_context}"
 
     assert marker_path |> File.read!() |> String.trim() == LiveE2E.marker_content(),
            "unexpected marker content in #{marker_path}; #{debug_context}"
@@ -102,6 +102,15 @@ defmodule Rondo.LiveLinearClaudeE2ETest do
             "Install beislid, or set #{var}=#{LiveE2E.action_policy_fake_value()} to use the " <>
             "allow-all test stub (unsafe — every action will be approved without evaluation)."
         )
+
+      {:error, {:invalid_agent_adapter, value, accepted}} ->
+        flunk("RONDO_E2E_AGENT_ADAPTER=#{value} is not valid; accepted values: #{Enum.join(accepted, ", ")}")
+
+      {:error, {:agent_cli_missing, command, env_var}} ->
+        flunk(
+          "live E2E: agent CLI #{inspect(command)} not found on PATH. " <>
+            "Install it or set #{env_var} to point to the binary."
+        )
     end
   end
 
@@ -115,22 +124,27 @@ defmodule Rondo.LiveLinearClaudeE2ETest do
   # Rewrites the per-test temp WORKFLOW.md (created by Rondo.TestSupport) with
   # live values. The tracker project_slug scopes every Rondo query to the test
   # project, so the normal Rondo project is never read or mutated.
+  #
+  # The adapter section (claude: or pi:) is determined by context.agent_adapter
+  # via LiveE2E.workflow_overrides_for_adapter/1, keeping adapter-specific keys
+  # out of the shared overrides list.
   defp configure_live_workflow!(context, project) do
     workspace_root =
       Path.join(System.tmp_dir!(), "rondo-live-e2e-workspaces-#{System.unique_integer([:positive])}")
 
     File.mkdir_p!(workspace_root)
 
-    overrides = [
-      tracker_api_token: "$LINEAR_API_KEY",
-      tracker_project_slug: project.slug_id,
-      workspace_root: workspace_root,
-      hook_after_create: "git init --quiet .",
-      claude_command: context.claude_command,
-      claude_max_turns: context.claude_max_turns,
-      gates: nil,
-      prompt: live_prompt()
-    ]
+    adapter_overrides = LiveE2E.workflow_overrides_for_adapter(context)
+
+    overrides =
+      Keyword.merge(adapter_overrides,
+        tracker_api_token: "$LINEAR_API_KEY",
+        tracker_project_slug: project.slug_id,
+        workspace_root: workspace_root,
+        hook_after_create: "git init --quiet .",
+        gates: nil,
+        prompt: live_prompt()
+      )
 
     overrides =
       case context.action_policy_command do

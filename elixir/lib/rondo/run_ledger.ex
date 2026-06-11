@@ -379,6 +379,7 @@ defmodule Rondo.RunLedger do
       _other -> manifest
     end
   end
+
   defp maybe_put_final_report_classification(manifest, :missing), do: Map.put(manifest, "failure_classification", "final_report_missing")
   defp maybe_put_final_report_classification(manifest, :invalid), do: Map.put(manifest, "failure_classification", "final_report_invalid")
 

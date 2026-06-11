@@ -5,7 +5,17 @@ defmodule Rondo.RunOnce do
 
   require Logger
 
-  alias Rondo.{AgentRunner, CleanEval, Config, ExecutionRequest, Linear.Issue, PatchArtifact, RunLedger, SideEffectPolicy, Tracker}
+  alias Rondo.{
+    AgentRunner,
+    CleanEval,
+    Config,
+    ExecutionRequest,
+    Linear.Issue,
+    PatchArtifact,
+    RunLedger,
+    SideEffectPolicy,
+    Tracker
+  }
 
   @type run_result :: :ok | {:error, term()}
   @type deps :: %{

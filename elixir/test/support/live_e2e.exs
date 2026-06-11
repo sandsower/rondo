@@ -21,6 +21,22 @@ defmodule Rondo.LiveE2E do
   @start_state_name "Todo"
   @in_progress_state_name "In Progress"
 
+  # Adapter selection
+  @adapter_var "RONDO_E2E_AGENT_ADAPTER"
+  @accepted_adapters ["claude_code", "pi"]
+  @default_adapter "claude_code"
+
+  # Generalized agent env vars (canonical)
+  @agent_command_var "RONDO_E2E_AGENT_COMMAND"
+  @agent_max_turns_var "RONDO_E2E_AGENT_MAX_TURNS"
+
+  # Deprecated aliases (kept for backward compat; generalized vars win when both set)
+  @deprecated_command_var "RONDO_E2E_CLAUDE_COMMAND"
+  @deprecated_max_turns_var "RONDO_E2E_CLAUDE_MAX_TURNS"
+
+  # Default commands per adapter
+  @default_commands %{"claude_code" => "claude", "pi" => "pi"}
+
   @team_query """
   query RondoE2EResolveTeam($key: String!) {
     teams(filter: {key: {eq: $key}}, first: 1) {
@@ -157,19 +173,19 @@ defmodule Rondo.LiveE2E do
         {:error, :placeholder_linear_api_key}
 
       true ->
-        case resolve_action_policy_command(env.(@action_policy_override_var), find_executable) do
-          {:ok, action_policy_command} ->
-            {:ok,
-             %{
-               team_key: env.("RONDO_E2E_LINEAR_TEAM"),
-               project_name: env.("RONDO_E2E_LINEAR_PROJECT"),
-               claude_command: env.("RONDO_E2E_CLAUDE_COMMAND") || "claude",
-               claude_max_turns: parse_max_turns(env.("RONDO_E2E_CLAUDE_MAX_TURNS")),
-               action_policy_command: action_policy_command
-             }}
-
-          {:error, _} = error ->
-            error
+        with {:ok, adapter} <- resolve_adapter(env.(@adapter_var)),
+             {:ok, action_policy_command} <-
+               resolve_action_policy_command(env.(@action_policy_override_var), find_executable),
+             {:ok, agent_command} <- resolve_agent_command(adapter, env, find_executable) do
+          {:ok,
+           %{
+             team_key: env.("RONDO_E2E_LINEAR_TEAM"),
+             project_name: env.("RONDO_E2E_LINEAR_PROJECT"),
+             agent_adapter: adapter,
+             agent_command: agent_command,
+             agent_max_turns: resolve_agent_max_turns(env),
+             action_policy_command: action_policy_command
+           }}
         end
     end
   end
@@ -185,6 +201,79 @@ defmodule Rondo.LiveE2E do
   """
   @spec action_policy_fake_value() :: String.t()
   def action_policy_fake_value, do: @action_policy_fake_value
+
+  @doc """
+  Returns the keyword list of WORKFLOW.md overrides for the given adapter context.
+
+  Used by the live E2E test to emit the correct adapter section (`claude:` or `pi:`)
+  in the temporary WORKFLOW.md, while keeping adapter-agnostic fields separate.
+  """
+  @spec workflow_overrides_for_adapter(map()) :: keyword()
+  def workflow_overrides_for_adapter(%{agent_adapter: "claude_code"} = context) do
+    [
+      agent_adapter: "claude_code",
+      agent_max_turns: context.agent_max_turns,
+      claude_command: context.agent_command,
+      claude_max_turns: context.agent_max_turns
+    ]
+  end
+
+  def workflow_overrides_for_adapter(%{agent_adapter: "pi"} = context) do
+    [
+      agent_adapter: "pi",
+      agent_max_turns: context.agent_max_turns,
+      pi_command: context.agent_command,
+      pi_turn_timeout_ms: 3_600_000,
+      pi_stall_timeout_ms: 300_000
+    ]
+  end
+
+  defp resolve_adapter(nil), do: {:ok, @default_adapter}
+  defp resolve_adapter(""), do: {:ok, @default_adapter}
+
+  defp resolve_adapter(value) when is_binary(value) do
+    if value in @accepted_adapters do
+      {:ok, value}
+    else
+      {:error, {:invalid_agent_adapter, value, @accepted_adapters}}
+    end
+  end
+
+  defp resolve_agent_command(adapter, env, find_executable) do
+    canonical = normalize_blank(env.(@agent_command_var))
+    deprecated = normalize_blank(env.(@deprecated_command_var))
+    explicit = canonical || deprecated
+
+    if explicit do
+      if is_nil(canonical) and not is_nil(deprecated) do
+        Logger.warning("#{@deprecated_command_var} is deprecated; use #{@agent_command_var} instead")
+      end
+
+      # Explicit command path — trust it; user knows it exists.
+      {:ok, explicit}
+    else
+      # Default command — probe for the binary to give a clear failure message.
+      default_command = Map.fetch!(@default_commands, adapter)
+
+      case find_executable.(default_command) do
+        nil -> {:error, {:agent_cli_missing, default_command, @agent_command_var}}
+        _path -> {:ok, default_command}
+      end
+    end
+  end
+
+  defp resolve_agent_max_turns(env) do
+    canonical = env.(@agent_max_turns_var)
+    deprecated = env.(@deprecated_max_turns_var)
+
+    if is_nil(canonical) and not is_nil(deprecated) do
+      Logger.warning("#{@deprecated_max_turns_var} is deprecated; use #{@agent_max_turns_var} instead")
+    end
+
+    # Generalized var wins over deprecated alias
+    raw = canonical || deprecated
+    parse_max_turns(raw)
+  end
 
   defp resolve_action_policy_command(@action_policy_fake_value, _find_executable) do
     {:ok, :fake}
@@ -409,6 +498,9 @@ defmodule Rondo.LiveE2E do
       _ -> 10
     end
   end
+
+  defp normalize_blank(nil), do: nil
+  defp normalize_blank(value) when is_binary(value), do: if(String.trim(value) == "", do: nil, else: value)
 
   defp blank?(nil), do: true
   defp blank?(value), do: String.trim(value) == ""
