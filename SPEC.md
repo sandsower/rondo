@@ -548,6 +548,13 @@ Fields:
 - `run_mode` (string)
   - Default: `unattended-auto`.
   - Values: `supervised-auto`, `unattended-auto`.
+- `policy_file` (string path or null)
+  - Default: `null` (builtin Beislið policy).
+  - When set, passed to the evaluator as `--policy-file`. Fail-closed: the file must exist and be a
+    readable regular file at config validation and again at every evaluation; a broken path is an
+    error, never a silent fallback to the builtin policy. The effective path and its content sha256
+    are recorded in the run manifest. Execution-request manifests may override it per run via
+    `runner_extensions.action_policy.policy_file` (resolved relative to the manifest file).
 
 Beislið owns the canonical run-mode/action-risk vocabulary and deterministic policy table. Rondo
 MUST NOT duplicate that table. Rondo evaluates policy at Rondo-owned side-effect boundaries, maps
@@ -717,6 +724,8 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `gates[].action_classes`: optional Beislið action classes, default `["read"]`
 - `action_policy.command`: executable path/name, default `beislid`
 - `action_policy.run_mode`: one of `supervised-auto`, `unattended-auto`; default `unattended-auto`
+- `action_policy.policy_file`: string path or null, default `null`; fail-closed `--policy-file`
+  override for the Beislið evaluator, recorded in run manifests with content sha256
 - `process_provider.kind`: string, default `native`; supports `native` and fixture-backed `beislid`
 - `process_provider.required`: boolean, default `false`
 - `process_provider.artifact_path`: string or null, optional Beislið process artifact path

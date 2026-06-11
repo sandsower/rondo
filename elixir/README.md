@@ -98,13 +98,18 @@ P0 manifest loading accepts local JSON with `schema: "rondo-execution-request-v1
   "allowed_actions": {"run_mode": "supervised-auto"},
   "process_provider": {"artifact_path": "./beislid-process.json"},
   "memory_provider": {},
-  "output_expectations": {}
+  "output_expectations": {},
+  "runner_extensions": {"action_policy": {"policy_file": "./policy.json"}}
 }
 ```
 
 Manifest runs synthesize an in-memory issue from the request and record `source_contract` metadata in
 the run ledger. Provider settings and allowed-action fields are recorded for provenance in this P0
-slice; enforcement still comes from the configured Rondo/Beislið runtime boundaries.
+slice; enforcement still comes from the configured Rondo/Beislið runtime boundaries — with one
+exception: `runner_extensions.action_policy.policy_file` is enforced. It resolves relative to the
+manifest file, overrides the repo `action_policy.policy_file` config, is passed to the Beislið
+evaluator as `--policy-file` for run-once and workspace side-effect evaluations, fails the run closed
+when missing/unreadable, and is recorded in the run manifest with its content sha256.
 
 ## Configuration
 
@@ -225,6 +230,12 @@ Notes:
   Default: `beislid`.
 - `action_policy.run_mode` selects Beislið's policy mode. Supported values: `supervised-auto` and
   `unattended-auto`. Default: `unattended-auto`.
+- `action_policy.policy_file` (optional) is a path to a Beislið policy-override JSON passed to the
+  evaluator as `--policy-file`. Fail-closed: when set, the file must exist and be readable at config
+  validation and again at every evaluation — a broken path is an error, never a silent fall back to
+  the builtin policy. The effective policy file and its content sha256 are recorded in each run
+  manifest. Execution-request manifests can override it per run via
+  `runner_extensions.action_policy.policy_file`.
 - Beislið owns the action-policy vocabulary and decision table; Rondo enforces it at Rondo-owned
   orchestration boundaries and persists the returned envelopes in run artifacts. Claude/pi
   permission flags are useful host controls, but they are not a substitute for external policy

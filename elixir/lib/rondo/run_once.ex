@@ -71,7 +71,7 @@ defmodule Rondo.RunOnce do
   defp maybe_put_policy_file_agent_opt(agent_opts, nil), do: agent_opts
 
   defp maybe_put_policy_file_agent_opt(agent_opts, policy_file),
-    do: Keyword.put_new(agent_opts, :action_policy_policy_file, policy_file)
+    do: Keyword.put(agent_opts, :action_policy_policy_file, policy_file)
 
   defp manifest_ledger_opts(source_contract, nil), do: [source_contract: source_contract]
 
