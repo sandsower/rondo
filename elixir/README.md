@@ -348,7 +348,7 @@ make all
 ### Live end-to-end test (opt-in)
 
 `make e2e` proves the full production path against real services: Linear issue fetch,
-workspace prep, a real Claude subprocess, the tracker `Todo -> In Progress` transition,
+workspace prep, a real agent subprocess, the tracker `Todo -> In Progress` transition,
 and cleanup. It is **never** run by default — `mix test` and CI exclude the `:live_e2e`
 tag, and even `make e2e` skips with a clear reason unless explicitly enabled:
 
@@ -360,10 +360,23 @@ export RONDO_E2E_LINEAR_PROJECT="Rondo E2E" # project (by name) for disposable i
 make e2e
 ```
 
+To run through the **pi adapter** instead of the default Claude adapter:
+
+```bash
+export RONDO_E2E_AGENT_ADAPTER=pi
+export RONDO_E2E_AGENT_COMMAND=/path/to/pi   # optional; defaults to "pi" on PATH
+make e2e
+```
+
 Optional knobs:
 
-- `RONDO_E2E_CLAUDE_COMMAND` — Claude CLI binary (default `claude`)
-- `RONDO_E2E_CLAUDE_MAX_TURNS` — max Claude turns for the short task (default `10`)
+- `RONDO_E2E_AGENT_ADAPTER` — adapter to drive (`claude_code` or `pi`; default
+  `claude_code`). Any other value is a config error with a clear message.
+- `RONDO_E2E_AGENT_COMMAND` — agent CLI binary override. When not set the default
+  binary for the selected adapter is used (`claude` for `claude_code`, `pi` for `pi`).
+  If the default binary is not found on `$PATH` the test **fails** with a clear message
+  naming the missing command and the env var to set.
+- `RONDO_E2E_AGENT_MAX_TURNS` — max agent turns for the short task (default `10`).
 - `RONDO_E2E_ACTION_POLICY_COMMAND` — action-policy evaluator override. The live
   profile is **fail-closed** by default: it probes for `beislid` on `$PATH` and uses
   it automatically. If `beislid` is not installed the test **fails** with a clear
@@ -372,6 +385,16 @@ Optional knobs:
   action without evaluation. Any other value is used as the evaluator command path
   directly.
 
+Deprecated aliases (still accepted; generalized names above take precedence when both
+are set):
+
+- `RONDO_E2E_CLAUDE_COMMAND` — superseded by `RONDO_E2E_AGENT_COMMAND`
+- `RONDO_E2E_CLAUDE_MAX_TURNS` — superseded by `RONDO_E2E_AGENT_MAX_TURNS`
+
+> **Note on pi model selection**: when `RONDO_E2E_AGENT_ADAPTER=pi`, the model used by
+> pi is whatever your pi installation is configured for. There is currently no env var
+> to select the model from the E2E side — that plumbing lands in RON-30.
+
 What it does and mutates:
 
 - Creates one disposable issue titled `[rondo-e2e] disposable run <timestamp>` in the
@@ -379,8 +402,9 @@ What it does and mutates:
   `In Progress` workflow states.
 - Runs Rondo's run-once path in-process with a temporary `WORKFLOW.md` whose
   `tracker.project_slug` scopes every query to the test project — the normal Rondo
-  project is never read or written.
-- The Claude task only writes `rondo_e2e_marker.txt` into a temporary workspace; the
+  project is never read or written. The `agent.adapter` and adapter section (`claude:`
+  or `pi:`) in the temporary `WORKFLOW.md` are set to match `RONDO_E2E_AGENT_ADAPTER`.
+- The agent task only writes `rondo_e2e_marker.txt` into a temporary workspace; the
   test asserts the marker content and that the issue reached `In Progress`. Note the
   Claude subprocess inherits the workflow defaults `permission_mode: bypassPermissions`
   and `dangerously_skip_permissions: true` (acceptable for this sandboxed, single-file
@@ -391,7 +415,7 @@ What it does and mutates:
   manually.
 
 Failures include the issue identifier/URL, workspace root, and the full run result to
-debug tracker, workspace, or Claude launch errors.
+debug tracker, workspace, or agent launch errors.
 
 ## FAQ
 
