@@ -19,6 +19,7 @@ defmodule Rondo.AgentRunner do
     case Workspace.create_for_issue(issue, workspace_opts) do
       {:ok, workspace} ->
         with :ok <- Workspace.run_before_run_hook(workspace, issue, workspace_opts),
+             :ok <- ensure_workspace_ready(workspace),
              :ok <- send_phase_update(claude_update_recipient, issue, :claude_starting) do
           try do
             case run_agent_turns(workspace, issue, claude_update_recipient, opts) do
@@ -60,9 +61,32 @@ defmodule Rondo.AgentRunner do
     end
   end
 
+  # Spawn-boundary guard: the agent subprocess launches with the issue workspace
+  # as its cwd ({:cd, workspace} in the adapter Port), so the workspace must be a
+  # present directory at the moment of spawn. Creation runs earlier, but the
+  # before_run hook and concurrent lifecycle actions (e.g. a racing stale-path
+  # removal) can leave it absent at the spawn boundary. Verify here and abort with
+  # a clear error rather than letting the Port emit a low-level "Could not cd" that
+  # only recovers by luck/retry (RON-35).
+  defp ensure_workspace_ready(workspace) do
+    if File.dir?(workspace) do
+      :ok
+    else
+      {:error, {:workspace_not_ready, workspace}}
+    end
+  end
+
   defp handle_agent_run_error(issue, {:action_policy_guidance_required, interrupt}) do
     Logger.warning("Agent run needs guidance for #{issue_context(issue)}: #{inspect(interrupt["blocked_side_effect"])}")
     exit({:action_policy_guidance_required, interrupt})
+  end
+
+  defp handle_agent_run_error(issue, {:workspace_not_ready, workspace}) do
+    Logger.error("Agent run aborted for #{issue_context(issue)}: workspace not present at spawn boundary: #{workspace}")
+
+    raise RuntimeError,
+          "Agent run aborted for #{issue_context(issue)}: workspace #{workspace} was not a directory at spawn time " <>
+            "(creation incomplete or workspace removed before launch)"
   end
 
   defp handle_agent_run_error(issue, reason) do
