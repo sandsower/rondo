@@ -1,0 +1,33 @@
+{
+  "modes": {
+    "unattended-auto": {
+      "actions": {
+        "tracker.issue.transition": "allow",
+        "workspace.lifecycle.create": "allow",
+        "workspace.lifecycle.remove": "allow",
+        "workspace.lifecycle.remove_stale_path": "allow",
+        "workspace.cleanup.tmp": "allow",
+        "workspace.hook.after_create": "allow",
+        "workspace.hook.before_run": "allow",
+        "workspace.hook.after_run": "allow",
+        "workspace.hook.before_remove": "allow"
+      },
+      "sandbox": {
+        "minimum": "none"
+      }
+    },
+    "supervised-auto": {
+      "actions": {
+        "tracker.issue.transition": "allow",
+        "workspace.lifecycle.create": "allow",
+        "workspace.lifecycle.remove": "allow",
+        "workspace.lifecycle.remove_stale_path": "allow",
+        "workspace.cleanup.tmp": "allow",
+        "workspace.hook.after_create": "allow",
+        "workspace.hook.before_run": "allow",
+        "workspace.hook.after_run": "allow",
+        "workspace.hook.before_remove": "allow"
+      }
+    }
+  }
+}
