@@ -115,8 +115,8 @@ defmodule Rondo.RunOnce do
 
   defp resolve_manifest_policy_file(value, _source_contract), do: {:error, {:invalid_manifest_policy_file, value}}
 
-  defp maybe_override_policy_evaluator(deps, nil), do: deps
-
+  # Sole caller (apply_run_policy_file/3) only reaches this with a binary path;
+  # the nil-policy_file case returns earlier without overriding the evaluator.
   defp maybe_override_policy_evaluator(deps, policy_file) do
     evaluator = deps.action_policy_evaluator
 
