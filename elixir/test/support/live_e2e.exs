@@ -212,6 +212,7 @@ defmodule Rondo.LiveE2E do
   def workflow_overrides_for_adapter(%{agent_adapter: "claude_code"} = context) do
     [
       agent_adapter: "claude_code",
+      agent_max_turns: context.agent_max_turns,
       claude_command: context.agent_command,
       claude_max_turns: context.agent_max_turns
     ]
@@ -220,6 +221,7 @@ defmodule Rondo.LiveE2E do
   def workflow_overrides_for_adapter(%{agent_adapter: "pi"} = context) do
     [
       agent_adapter: "pi",
+      agent_max_turns: context.agent_max_turns,
       pi_command: context.agent_command,
       pi_turn_timeout_ms: 3_600_000,
       pi_stall_timeout_ms: 300_000
@@ -238,8 +240,8 @@ defmodule Rondo.LiveE2E do
   end
 
   defp resolve_agent_command(adapter, env, find_executable) do
-    canonical = env.(@agent_command_var)
-    deprecated = env.(@deprecated_command_var)
+    canonical = normalize_blank(env.(@agent_command_var))
+    deprecated = normalize_blank(env.(@deprecated_command_var))
     explicit = canonical || deprecated
 
     if explicit do
@@ -496,6 +498,9 @@ defmodule Rondo.LiveE2E do
       _ -> 10
     end
   end
+
+  defp normalize_blank(nil), do: nil
+  defp normalize_blank(value) when is_binary(value), do: if(String.trim(value) == "", do: nil, else: value)
 
   defp blank?(nil), do: true
   defp blank?(value), do: String.trim(value) == ""

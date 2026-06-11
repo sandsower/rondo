@@ -270,6 +270,31 @@ defmodule Rondo.LiveE2ESupportTest do
       assert log =~ "RONDO_E2E_CLAUDE_MAX_TURNS is deprecated"
       assert log =~ "RONDO_E2E_AGENT_MAX_TURNS"
     end
+
+    test "blank RONDO_E2E_AGENT_COMMAND falls through to probe instead of returning an empty path" do
+      # Setting the var to "" or whitespace-only must not produce {:ok, ""}; it must
+      # fall through to the probe path (and fail when the binary is missing).
+      for blank <- ["", "   "] do
+        overrides = %{
+          "RONDO_E2E_AGENT_COMMAND" => blank,
+          "RONDO_E2E_ACTION_POLICY_COMMAND" => LiveE2E.action_policy_fake_value()
+        }
+
+        assert {:error, {:agent_cli_missing, _command, _env_var}} =
+                 LiveE2E.load_context(env(full_env(overrides)), &find_executable_missing/1),
+               "expected probe failure for blank value #{inspect(blank)}, got ok"
+      end
+    end
+
+    test "blank RONDO_E2E_CLAUDE_COMMAND (deprecated alias) also falls through to probe" do
+      overrides = %{
+        "RONDO_E2E_CLAUDE_COMMAND" => "",
+        "RONDO_E2E_ACTION_POLICY_COMMAND" => LiveE2E.action_policy_fake_value()
+      }
+
+      assert {:error, {:agent_cli_missing, _command, _env_var}} =
+               LiveE2E.load_context(env(full_env(overrides)), &find_executable_missing/1)
+    end
   end
 
   describe "workflow_overrides_for_adapter/1" do
@@ -283,6 +308,7 @@ defmodule Rondo.LiveE2ESupportTest do
       content = LiveE2E.workflow_overrides_for_adapter(context)
 
       assert Keyword.get(content, :agent_adapter) == "claude_code"
+      assert Keyword.get(content, :agent_max_turns) == 10
       assert Keyword.get(content, :claude_command) == "claude"
       assert Keyword.get(content, :claude_max_turns) == 10
       refute Keyword.has_key?(content, :pi_command)
@@ -298,6 +324,7 @@ defmodule Rondo.LiveE2ESupportTest do
       content = LiveE2E.workflow_overrides_for_adapter(context)
 
       assert Keyword.get(content, :agent_adapter) == "pi"
+      assert Keyword.get(content, :agent_max_turns) == 5
       assert Keyword.get(content, :pi_command) == "/opt/bin/pi"
       assert Keyword.get(content, :pi_turn_timeout_ms) == 3_600_000
       assert Keyword.get(content, :pi_stall_timeout_ms) == 300_000
