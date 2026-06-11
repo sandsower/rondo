@@ -1199,6 +1199,60 @@ defmodule Rondo.CoreTest do
     end
   end
 
+  test "agent runner aborts without spawning when the workspace is missing at the spawn boundary (RON-35)" do
+    test_root =
+      Path.join(System.tmp_dir!(), "rondo-elixir-agent-runner-ws-race-#{System.unique_integer([:positive])}")
+
+    try do
+      template_repo = Path.join(test_root, "source")
+      workspace_root = Path.join(test_root, "workspaces")
+      claude_binary = Path.join(test_root, "fake-claude")
+      trace_file = Path.join(test_root, "claude.trace")
+
+      File.mkdir_p!(template_repo)
+      File.write!(Path.join(template_repo, "README.md"), "# test")
+      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+      System.cmd("git", ["-C", template_repo, "add", "README.md"])
+      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+      # The fake agent appends to a trace file on every spawn. If it never runs,
+      # the trace file is never created — that is how we assert "no early spawn".
+      File.write!(claude_binary, """
+      #!/bin/sh
+      printf 'ARGV:%s\\n' "$*" >> "#{trace_file}"
+      echo '{"type":"result","session_id":"s","usage":{}}'
+      exit 0
+      """)
+
+      File.chmod!(claude_binary, 0o755)
+
+      # before_run hook removes the freshly created workspace, simulating a
+      # deferred-create / stale-path-removal race so the workspace is absent at
+      # the spawn boundary. The guard must abort instead of spawning into it.
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
+        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_before_run: "rm -rf \"$(pwd)\"",
+        claude_command: claude_binary,
+        max_turns: 1
+      )
+
+      issue = continuation_issue("issue-ws-race", "MT-350")
+
+      assert_raise RuntimeError, ~r/was not a directory at spawn time/, fn ->
+        AgentRunner.run(issue, nil, issue_state_fetcher: &AgentRunner.no_tracker_issue_state_fetcher/1)
+      end
+
+      # No cd-into-missing-dir: the agent subprocess was never spawned.
+      refute File.exists?(trace_file)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "orchestrator ignores stale tick tokens" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     {:ok, orch} = Orchestrator.start_link(name: Module.concat(__MODULE__, :StaleTick))
