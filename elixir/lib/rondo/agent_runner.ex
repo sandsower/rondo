@@ -39,9 +39,15 @@ defmodule Rondo.AgentRunner do
   end
 
   defp workspace_policy_opts(opts) do
-    case Keyword.get(opts, :run_ledger) do
-      nil -> []
-      ledger -> [ledger: ledger]
+    ledger_opts =
+      case Keyword.get(opts, :run_ledger) do
+        nil -> []
+        ledger -> [ledger: ledger]
+      end
+
+    case Keyword.get(opts, :action_policy_policy_file) do
+      nil -> ledger_opts
+      policy_file -> Keyword.put(ledger_opts, :policy_file, policy_file)
     end
   end
 

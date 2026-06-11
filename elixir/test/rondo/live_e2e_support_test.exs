@@ -69,6 +69,8 @@ defmodule Rondo.LiveE2ESupportTest do
                LiveE2E.load_context(env(full_env()), &find_executable_found/1)
 
       assert context.action_policy_command == "/usr/local/bin/beislid"
+      assert context.action_policy_policy_file =~ "fixtures/e2e_action_policy.json"
+      assert File.regular?(context.action_policy_policy_file)
     end
 
     test "fails with a clear message when beislid is absent and no override is set" do
@@ -88,6 +90,7 @@ defmodule Rondo.LiveE2ESupportTest do
                LiveE2E.load_context(env(full_env(override)), &find_executable_found/1)
 
       assert context.action_policy_command == :fake
+      assert context.action_policy_policy_file == nil
     end
 
     test "explicit non-fake RONDO_E2E_ACTION_POLICY_COMMAND uses that path directly" do
@@ -99,6 +102,7 @@ defmodule Rondo.LiveE2ESupportTest do
                LiveE2E.load_context(env(full_env(override)), &find_executable_found/1)
 
       assert context.action_policy_command == "/opt/bin/beislid"
+      assert context.action_policy_policy_file =~ "fixtures/e2e_action_policy.json"
     end
 
     test "returns context with correct defaults for other fields" do

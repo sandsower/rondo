@@ -27,10 +27,13 @@ defmodule Rondo.ActionPolicy do
     mode = Keyword.get(opts, :mode, Config.action_policy_run_mode())
     timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
     sandbox_status = Keyword.get_lazy(opts, :sandbox_status, fn -> sandbox_status(Keyword.get(opts, :workspace)) end)
+    policy_file = Keyword.get(opts, :policy_file, Config.action_policy_policy_file())
 
     with :ok <- validate_classes(classes),
          :ok <- validate_baseline(Map.fetch!(sandbox_status, :baseline)),
-         {:ok, output} <- run_evaluator(command, evaluator_args(mode, action, classes, sandbox_status), timeout_ms) do
+         :ok <- validate_policy_file(policy_file),
+         {:ok, output} <-
+           run_evaluator(command, evaluator_args(mode, action, classes, sandbox_status, policy_file), timeout_ms) do
       decode_envelope(output)
     end
   end
@@ -60,16 +63,31 @@ defmodule Rondo.ActionPolicy do
     }
   end
 
-  defp evaluator_args(mode, action, classes, sandbox_status) do
+  defp evaluator_args(mode, action, classes, sandbox_status, policy_file) do
     ["action-policy", "evaluate", "--mode", mode, "--action", action]
     |> Kernel.++(Enum.flat_map(classes, &["--class", &1]))
     |> Kernel.++(["--sandbox-baseline", sandbox_status.baseline])
     |> maybe_add_flag(sandbox_status.default_branch, "--default-branch")
     |> maybe_add_flag(sandbox_status.uncommitted_changes, "--uncommitted-changes")
+    |> maybe_add_option(policy_file, "--policy-file")
   end
 
   defp maybe_add_flag(args, true, flag), do: args ++ [flag]
   defp maybe_add_flag(args, _false, _flag), do: args
+
+  defp maybe_add_option(args, nil, _flag), do: args
+  defp maybe_add_option(args, value, flag), do: args ++ [flag, value]
+
+  defp validate_policy_file(nil), do: :ok
+
+  defp validate_policy_file(path) when is_binary(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular, access: access}} when access in [:read, :read_write] -> :ok
+      _ -> {:error, {:policy_file_unreadable, path}}
+    end
+  end
+
+  defp validate_policy_file(value), do: {:error, {:invalid_policy_file, value}}
 
   defp run_evaluator(command, args, timeout_ms) do
     with :ok <- executable_available?(command) do

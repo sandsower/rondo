@@ -124,6 +124,7 @@ defmodule Rondo.TestSupport do
           pi_stall_timeout_ms: 300_000,
           action_policy_command: default_action_policy_command(),
           action_policy_run_mode: "unattended-auto",
+          action_policy_policy_file: nil,
           process_provider_kind: "native",
           process_provider_required: false,
           process_provider_artifact_path: nil,
@@ -177,6 +178,7 @@ defmodule Rondo.TestSupport do
     pi_stall_timeout_ms = Keyword.get(config, :pi_stall_timeout_ms)
     action_policy_command = Keyword.get(config, :action_policy_command)
     action_policy_run_mode = Keyword.get(config, :action_policy_run_mode)
+    action_policy_policy_file = Keyword.get(config, :action_policy_policy_file)
     process_provider_kind = Keyword.get(config, :process_provider_kind)
     process_provider_required = Keyword.get(config, :process_provider_required)
     process_provider_artifact_path = Keyword.get(config, :process_provider_artifact_path)
@@ -237,6 +239,7 @@ defmodule Rondo.TestSupport do
         "action_policy:",
         "  command: #{yaml_value(action_policy_command)}",
         "  run_mode: #{yaml_value(action_policy_run_mode)}",
+        "  policy_file: #{yaml_value(action_policy_policy_file)}",
         "process_provider:",
         "  kind: #{yaml_value(process_provider_kind)}",
         "  required: #{yaml_value(process_provider_required)}",

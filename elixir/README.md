@@ -98,13 +98,21 @@ P0 manifest loading accepts local JSON with `schema: "rondo-execution-request-v1
   "allowed_actions": {"run_mode": "supervised-auto"},
   "process_provider": {"artifact_path": "./beislid-process.json"},
   "memory_provider": {},
-  "output_expectations": {}
+  "output_expectations": {},
+  "runner_extensions": {"action_policy": {"policy_file": "./policy.json"}}
 }
 ```
 
 Manifest runs synthesize an in-memory issue from the request and record `source_contract` metadata in
 the run ledger. Provider settings and allowed-action fields are recorded for provenance in this P0
-slice; enforcement still comes from the configured Rondo/Beislið runtime boundaries.
+slice; enforcement still comes from the configured Rondo/Beislið runtime boundaries — with one
+exception: `runner_extensions.action_policy.policy_file` is enforced. It resolves relative to the
+manifest file, overrides the repo `action_policy.policy_file` config, fails the run closed when
+missing/unreadable, and is frozen into the run dir at ledger creation
+(`artifacts/action-policy.json`). All run-once and workspace side-effect evaluations pass the frozen
+copy to the Beislið evaluator as `--policy-file`, so mid-run mutations of the source file cannot
+change decisions; the run manifest records the frozen path, the source path, and the frozen
+content's sha256.
 
 ## Configuration
 
@@ -225,6 +233,13 @@ Notes:
   Default: `beislid`.
 - `action_policy.run_mode` selects Beislið's policy mode. Supported values: `supervised-auto` and
   `unattended-auto`. Default: `unattended-auto`.
+- `action_policy.policy_file` (optional) is a path to a Beislið policy-override JSON passed to the
+  evaluator as `--policy-file`. Fail-closed: when set, the file must exist and be readable at config
+  validation and again at every evaluation — a broken path is an error, never a silent fallback to
+  the builtin policy. At run-ledger creation the effective policy file is frozen into the run dir
+  (`artifacts/action-policy.json`); run-owned evaluations use the frozen copy, and the run manifest
+  records the frozen path, source path, and frozen content sha256. Execution-request manifests can
+  override it per run via `runner_extensions.action_policy.policy_file`.
 - Beislið owns the action-policy vocabulary and decision table; Rondo enforces it at Rondo-owned
   orchestration boundaries and persists the returned envelopes in run artifacts. Claude/pi
   permission flags are useful host controls, but they are not a substitute for external policy
@@ -383,7 +398,10 @@ Optional knobs:
   message directing you here. To run without Beislið installed, set this variable to
   `fake` — an explicit, auditable opt-in to the allow-all stub that approves every
   action without evaluation. Any other value is used as the evaluator command path
-  directly.
+  directly. When the real evaluator runs, the live profile sets
+  `action_policy.policy_file` to the scoped policy at
+  `test/support/fixtures/e2e_action_policy.json`, which authorizes exactly the
+  run-once actions the test needs (tracker transition, workspace lifecycle/hooks).
 
 Deprecated aliases (still accepted; generalized names above take precedence when both
 are set):

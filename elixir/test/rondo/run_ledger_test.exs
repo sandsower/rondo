@@ -378,13 +378,75 @@ defmodule Rondo.RunLedgerTest do
     assert {:ok, ledger} = RunLedger.record_action_policy_decision(ledger, envelope, side_effect_status: "blocked")
 
     manifest = decode_json!(ledger.manifest_path)
-    assert manifest["action_policy"] == %{"provider" => "beislid", "run_mode" => "unattended-auto"}
+
+    assert manifest["action_policy"] == %{
+             "provider" => "beislid",
+             "run_mode" => "unattended-auto",
+             "policy_file" => nil,
+             "policy_file_source" => nil,
+             "policy_file_sha256" => nil
+           }
+
     assert [_, %{"kind" => "action_policy_decision", "path" => checkpoint_path}] = manifest["checkpoints"]
 
     checkpoint = decode_json!(Path.join(ledger.run_dir, checkpoint_path))
     assert checkpoint["payload"]["decision"] == "deny"
     assert checkpoint["payload"]["side_effect_status"] == "blocked"
     assert checkpoint["source"] == %{"policy" => "beislid_action_policy"}
+  end
+
+  test "freezes the policy file into the run dir and records frozen path, source, and content hash" do
+    workspace_root = tmp_dir("ledger-policy-file")
+    policy_file = Path.join(tmp_dir("ledger-policy-file-src"), "policy.json")
+    File.mkdir_p!(Path.dirname(policy_file))
+    policy_contents = ~s({"modes": {"unattended-auto": {}}})
+    File.write!(policy_file, policy_contents)
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "p0l1cyf1",
+               action_policy_run_mode: "unattended-auto",
+               action_policy_policy_file: policy_file
+             )
+
+    expected_sha256 = :crypto.hash(:sha256, policy_contents) |> Base.encode16(case: :lower)
+    frozen_path = Path.join(ledger.run_dir, "artifacts/action-policy.json")
+
+    assert ledger.policy_file == frozen_path
+    assert File.read!(frozen_path) == policy_contents
+
+    manifest = decode_json!(ledger.manifest_path)
+
+    assert manifest["action_policy"] == %{
+             "provider" => "beislid",
+             "run_mode" => "unattended-auto",
+             "policy_file" => frozen_path,
+             "policy_file_source" => Path.expand(policy_file),
+             "policy_file_sha256" => expected_sha256
+           }
+
+    # Mutating the source after ledger creation must not affect the frozen
+    # artifact the run is governed by.
+    File.write!(policy_file, ~s({"modes": {"unattended-auto": {"actions": {"git.push": "allow"}}}}))
+    assert File.read!(frozen_path) == policy_contents
+    assert :crypto.hash(:sha256, File.read!(frozen_path)) |> Base.encode16(case: :lower) == expected_sha256
+  end
+
+  test "fails ledger creation closed when the policy file cannot be frozen" do
+    workspace_root = tmp_dir("ledger-policy-file-vanished")
+    vanished_policy_file = Path.join(tmp_dir("ledger-policy-file-gone"), "policy.json")
+
+    assert {:error, {:policy_file_freeze_failed, source, :enoent}} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "g0nef1le",
+               action_policy_policy_file: vanished_policy_file
+             )
+
+    assert source == Path.expand(vanished_policy_file)
   end
 
   test "update_agent_metadata records adapter run ref capabilities and final report in manifest" do
@@ -754,6 +816,43 @@ defmodule Rondo.RunLedgerTest do
 
     checkpoint_kinds = Enum.map(manifest["checkpoints"], & &1["kind"])
     assert Enum.count(checkpoint_kinds, &(&1 == "final_report_validated")) == 2
+  end
+
+  test "record_final_report clears stale missing/invalid classifications on a later valid report" do
+    workspace_root = tmp_dir("ledger-final-report-recovered")
+
+    report = %{
+      "schema" => "rondo.final_report/v0",
+      "summary" => "Did the work",
+      "changed_files" => ["lib/a.ex"],
+      "gates_run" => [%{"name" => "elixir-ci", "status" => "pass"}],
+      "failures" => [],
+      "risks" => [],
+      "next_state" => "ready_for_review"
+    }
+
+    valid_report_text = "All done.\n```json\n#{Jason.encode!(report)}\n```\n"
+
+    for {bad_report_text, classification, suffix} <- [
+          {"plain prose, no JSON report", "final_report_missing", "c1ea4a01"},
+          {~s({"schema": "rondo.final_report/v0"}), "final_report_invalid", "c1ea4a02"}
+        ] do
+      assert {:ok, ledger} =
+               RunLedger.create_run(issue_fixture(),
+                 workspace_root: workspace_root,
+                 now: @now,
+                 random_suffix: suffix
+               )
+
+      assert {:ok, ledger, _status} = RunLedger.record_final_report(ledger, bad_report_text)
+      assert decode_json!(ledger.manifest_path)["failure_classification"] == classification
+
+      assert {:ok, ledger, :valid} = RunLedger.record_final_report(ledger, valid_report_text)
+
+      manifest = decode_json!(ledger.manifest_path)
+      assert manifest["final_report"]["status"] == "valid"
+      refute Map.has_key?(manifest, "failure_classification")
+    end
   end
 
   test "record_final_report surfaces ledger write failures" do
