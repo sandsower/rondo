@@ -1140,6 +1140,65 @@ defmodule Rondo.CoreTest do
     end
   end
 
+  test "agent runner stops after one turn when the agent reports a terminal next_state" do
+    test_root =
+      Path.join(System.tmp_dir!(), "rondo-elixir-agent-runner-report-done-#{System.unique_integer([:positive])}")
+
+    try do
+      report = final_report_json("ready_for_review")
+      trace_file = continuation_env(test_root, "session-report-done", report, max_turns: 3)
+
+      issue = continuation_issue("issue-report-done", "MT-300")
+
+      # No-op (sentinel) fetcher => no tracker capability. A terminal report must
+      # still stop the run regardless of tracker state.
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: &AgentRunner.no_tracker_issue_state_fetcher/1)
+
+      assert length(trace_argv(trace_file)) == 1
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner stops after one turn without a report when the run has no tracker capability" do
+    test_root =
+      Path.join(System.tmp_dir!(), "rondo-elixir-agent-runner-no-report-#{System.unique_integer([:positive])}")
+
+    try do
+      trace_file = continuation_env(test_root, "session-no-report", nil, max_turns: 3)
+
+      issue = continuation_issue("issue-no-report", "MT-301")
+
+      # The observed bug: a tracker-less envelope agent that finishes turn 1 with
+      # no incomplete-report signal must not loop on the unsatisfiable nudge.
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: &AgentRunner.no_tracker_issue_state_fetcher/1)
+
+      assert length(trace_argv(trace_file)) == 1
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner continues on an incomplete report even without tracker capability" do
+    test_root =
+      Path.join(System.tmp_dir!(), "rondo-elixir-agent-runner-report-active-#{System.unique_integer([:positive])}")
+
+    try do
+      report = final_report_json("In Progress")
+      trace_file = continuation_env(test_root, "session-report-active", report, max_turns: 2)
+
+      issue = continuation_issue("issue-report-active", "MT-302")
+
+      # Report-driven continuation: an explicitly-incomplete next_state keeps
+      # going up to max_turns even though the fetcher reports no tracker capability.
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: &AgentRunner.no_tracker_issue_state_fetcher/1)
+
+      assert length(trace_argv(trace_file)) == 2
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "orchestrator ignores stale tick tokens" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     {:ok, orch} = Orchestrator.start_link(name: Module.concat(__MODULE__, :StaleTick))
@@ -1217,6 +1276,93 @@ defmodule Rondo.CoreTest do
     # still show the issue as running.
     snapshot = Orchestrator.snapshot(Module.concat(__MODULE__, :MissingReconcile), 1_000)
     assert length(snapshot.running) == 1
+  end
+
+  defp continuation_issue(id, identifier) do
+    %Issue{
+      id: id,
+      identifier: identifier,
+      title: "Continuation test",
+      description: "Delivery-driven continuation",
+      state: "In Progress",
+      url: "https://example.org/issues/#{identifier}",
+      labels: []
+    }
+  end
+
+  defp final_report_json(next_state) do
+    Jason.encode!(%{
+      "schema" => "rondo.final_report/v0",
+      "summary" => "did the work",
+      "changed_files" => [],
+      "gates_run" => [],
+      "failures" => [],
+      "risks" => [],
+      "next_state" => next_state
+    })
+  end
+
+  defp trace_argv(trace_file) do
+    trace_file
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.filter(&String.starts_with?(&1, "ARGV:"))
+  end
+
+  # Builds a template repo + fake-claude that emits a `result` stream event,
+  # optionally carrying a `result` field (the agent's final report string), and
+  # writes a workflow file pointing at them. Returns the trace file path so a
+  # test can count agent invocations.
+  defp continuation_env(test_root, session_id, final_report, overrides) do
+    template_repo = Path.join(test_root, "source")
+    workspace_root = Path.join(test_root, "workspaces")
+    claude_binary = Path.join(test_root, "fake-claude")
+    trace_file = Path.join(test_root, "claude.trace")
+
+    File.mkdir_p!(template_repo)
+    File.write!(Path.join(template_repo, "README.md"), "# test")
+    System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+    System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+    System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+    System.cmd("git", ["-C", template_repo, "add", "README.md"])
+    System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+
+    system_line = Jason.encode!(%{"type" => "system", "session_id" => session_id})
+
+    result_event = %{
+      "type" => "result",
+      "session_id" => session_id,
+      "usage" => %{"input_tokens" => 10, "output_tokens" => 5, "total_tokens" => 15}
+    }
+
+    result_event = if final_report, do: Map.put(result_event, "result", final_report), else: result_event
+    result_line = Jason.encode!(result_event)
+
+    File.write!(claude_binary, """
+    #!/bin/sh
+    trace_file="#{trace_file}"
+    printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+    echo '#{system_line}'
+    echo '#{result_line}'
+    exit 0
+    """)
+
+    File.chmod!(claude_binary, 0o755)
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      Keyword.merge(
+        [
+          workspace_root: workspace_root,
+          action_policy_command: fake_action_policy("allow"),
+          hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+          claude_command: claude_binary
+        ],
+        overrides
+      )
+    )
+
+    trace_file
   end
 
   defp fake_action_policy(decision) do
