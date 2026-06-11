@@ -43,7 +43,7 @@ rerequest_command: 'gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewe
 
 ## Quality gates
 
-Cheap gates first for iteration; `elixir-ci` is the pre-PR aggregate matching CI.
+Cheap gates first for iteration; `elixir-ci` is the pre-PR aggregate matching CI. `dialyzer` runs standalone so static analysis isn't masked when `make all` aborts at the coverage gate on the RON-31 flake.
 
 ```beislid:gates
 - name: format
@@ -65,6 +65,13 @@ Cheap gates first for iteration; `elixir-ci` is the pre-PR aggregate matching CI
   cost: expensive
   failure:
     hint: 'known flaky: OrchestratorStatusTest (RON-31, two order-sensitive tests) — verify with a fixed seed against main before treating as a real red.'
+- name: dialyzer
+  stage: pre-pr
+  command: 'cd elixir && mix dialyzer --format short'
+  cost: expensive
+  parallel_safe: true
+  failure:
+    hint: 'runs independently of elixir-ci/make-all (which aborts at coverage on the RON-31 flake before reaching dialyzer).'
 ```
 
 ## Model routing
