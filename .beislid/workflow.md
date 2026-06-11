@@ -57,10 +57,14 @@ Cheap gates first for iteration; `elixir-ci` is the pre-PR aggregate matching CI
 - name: test
   command: 'cd elixir && mix test'
   cost: expensive
+  failure:
+    hint: 'known flaky: OrchestratorStatusTest (RON-31, two order-sensitive tests) — verify with a fixed seed against main before treating as a real red.'
 - name: elixir-ci
   stage: pre-pr
   command: 'cd elixir && make all'
   cost: expensive
+  failure:
+    hint: 'known flaky: OrchestratorStatusTest (RON-31, two order-sensitive tests) — verify with a fixed seed against main before treating as a real red.'
 ```
 
 ## Model routing
@@ -81,19 +85,10 @@ overrides:
 
 ## Action policy
 
-Allow supervised agents to install dependencies, push, and post PR review replies without prompting.
+Canonical policy lives in `.beislid/action-policy.json` (the evaluator only reads `--policy-file`; inline `modes:` here never reached it). Allows dependency install, git push, PR merge, PR review reply, and ticket comment without prompting in both supervised-auto and unattended-auto. The evaluator's sandbox floor still applies: unattended-auto pushes/merges on the default branch or with uncommitted changes downgrade to ask.
 
 ```beislid:action_policy
-modes:
-  supervised-auto:
-    rules:
-      dependency-install: allow
-      git-remote: allow
-    actions:
-      dependency.install: allow
-      git.push: allow
-      gh.pr.merge: allow
-      pr.review.reply: allow
+policy_file: .beislid/action-policy.json
 ```
 
 ## Probe cache
