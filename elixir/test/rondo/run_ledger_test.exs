@@ -383,6 +383,7 @@ defmodule Rondo.RunLedgerTest do
              "provider" => "beislid",
              "run_mode" => "unattended-auto",
              "policy_file" => nil,
+             "policy_file_source" => nil,
              "policy_file_sha256" => nil
            }
 
@@ -394,7 +395,7 @@ defmodule Rondo.RunLedgerTest do
     assert checkpoint["source"] == %{"policy" => "beislid_action_policy"}
   end
 
-  test "records policy file path and content hash in the manifest" do
+  test "freezes the policy file into the run dir and records frozen path, source, and content hash" do
     workspace_root = tmp_dir("ledger-policy-file")
     policy_file = Path.join(tmp_dir("ledger-policy-file-src"), "policy.json")
     File.mkdir_p!(Path.dirname(policy_file))
@@ -411,22 +412,33 @@ defmodule Rondo.RunLedgerTest do
              )
 
     expected_sha256 = :crypto.hash(:sha256, policy_contents) |> Base.encode16(case: :lower)
+    frozen_path = Path.join(ledger.run_dir, "artifacts/action-policy.json")
+
+    assert ledger.policy_file == frozen_path
+    assert File.read!(frozen_path) == policy_contents
 
     manifest = decode_json!(ledger.manifest_path)
 
     assert manifest["action_policy"] == %{
              "provider" => "beislid",
              "run_mode" => "unattended-auto",
-             "policy_file" => Path.expand(policy_file),
+             "policy_file" => frozen_path,
+             "policy_file_source" => Path.expand(policy_file),
              "policy_file_sha256" => expected_sha256
            }
+
+    # Mutating the source after ledger creation must not affect the frozen
+    # artifact the run is governed by.
+    File.write!(policy_file, ~s({"modes": {"unattended-auto": {"actions": {"git.push": "allow"}}}}))
+    assert File.read!(frozen_path) == policy_contents
+    assert :crypto.hash(:sha256, File.read!(frozen_path)) |> Base.encode16(case: :lower) == expected_sha256
   end
 
-  test "records a nil content hash when the policy file vanishes before ledger creation" do
+  test "fails ledger creation closed when the policy file cannot be frozen" do
     workspace_root = tmp_dir("ledger-policy-file-vanished")
     vanished_policy_file = Path.join(tmp_dir("ledger-policy-file-gone"), "policy.json")
 
-    assert {:ok, ledger} =
+    assert {:error, {:policy_file_freeze_failed, source, :enoent}} =
              RunLedger.create_run(issue_fixture(),
                workspace_root: workspace_root,
                now: @now,
@@ -434,9 +446,7 @@ defmodule Rondo.RunLedgerTest do
                action_policy_policy_file: vanished_policy_file
              )
 
-    manifest = decode_json!(ledger.manifest_path)
-    assert manifest["action_policy"]["policy_file"] == Path.expand(vanished_policy_file)
-    assert manifest["action_policy"]["policy_file_sha256"] == nil
+    assert source == Path.expand(vanished_policy_file)
   end
 
   test "update_agent_metadata records adapter run ref capabilities and final report in manifest" do

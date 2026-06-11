@@ -407,13 +407,16 @@ defmodule Rondo.RunOnceTest do
 
     assert :ok = RunOnce.run_manifest(manifest_path, deps: deps([], parent))
     assert_received {:agent_run, %Issue{id: "slice-123"}, agent_opts}
-    assert Keyword.fetch!(agent_opts, :action_policy_policy_file) == Path.join(manifest_dir, "policy.json")
 
     expected_sha256 = :crypto.hash(:sha256, manifest_policy_contents) |> Base.encode16(case: :lower)
     manifest = latest_run_manifest!(workspace_root, "slice-123")
+    frozen_path = Path.join(manifest["run_dir"], "artifacts/action-policy.json")
 
-    assert manifest["action_policy"]["policy_file"] == Path.join(manifest_dir, "policy.json")
+    assert Keyword.fetch!(agent_opts, :action_policy_policy_file) == frozen_path
+    assert manifest["action_policy"]["policy_file"] == frozen_path
+    assert manifest["action_policy"]["policy_file_source"] == Path.join(manifest_dir, "policy.json")
     assert manifest["action_policy"]["policy_file_sha256"] == expected_sha256
+    assert File.read!(frozen_path) == manifest_policy_contents
   end
 
   test "manifest runs without a policy override record the configured policy file" do
@@ -437,9 +440,47 @@ defmodule Rondo.RunOnceTest do
 
     expected_sha256 = :crypto.hash(:sha256, config_policy_contents) |> Base.encode16(case: :lower)
     manifest = latest_run_manifest!(workspace_root, "slice-123")
+    frozen_path = Path.join(manifest["run_dir"], "artifacts/action-policy.json")
 
-    assert manifest["action_policy"]["policy_file"] == Path.expand(config_policy_file)
+    assert manifest["action_policy"]["policy_file"] == frozen_path
+    assert manifest["action_policy"]["policy_file_source"] == Path.expand(config_policy_file)
     assert manifest["action_policy"]["policy_file_sha256"] == expected_sha256
+  end
+
+  test "run/2 passes the frozen policy file to the tracker-transition evaluator" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-frozen-transition")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    config_policy_file = Path.join(tmp_dir("run-once-frozen-policy"), "config-policy.json")
+    File.mkdir_p!(Path.dirname(config_policy_file))
+    File.write!(config_policy_file, ~s({"modes": {"unattended-auto": {}}}))
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      action_policy_policy_file: config_policy_file
+    )
+
+    base_deps = deps(issue("issue-1", state: "Todo"), parent)
+    evaluator = base_deps.action_policy_evaluator
+
+    deps = %{
+      base_deps
+      | action_policy_evaluator: fn action, classes, opts ->
+          send(parent, {:evaluator_policy_file, Keyword.get(opts, :policy_file)})
+          evaluator.(action, classes, opts)
+        end
+    }
+
+    assert :ok = RunOnce.run("issue-1", deps: deps)
+
+    assert_received {:evaluator_policy_file, frozen_path}
+    assert is_binary(frozen_path)
+    assert String.ends_with?(frozen_path, "artifacts/action-policy.json")
+    refute frozen_path == Path.expand(config_policy_file)
+
+    assert_received {:agent_run, _issue, agent_opts}
+    assert Keyword.fetch!(agent_opts, :action_policy_policy_file) == frozen_path
   end
 
   test "manifest policy file that does not exist fails closed before agent execution" do

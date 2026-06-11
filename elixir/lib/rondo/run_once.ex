@@ -38,6 +38,7 @@ defmodule Rondo.RunOnce do
          {:ok, issue} <- fetch_one_issue(issue_id, deps),
          :ok <- ensure_dispatchable(issue),
          {:ok, ledger} <- create_run_once_ledger(issue),
+         {deps, agent_opts} = apply_run_policy_file(deps, agent_opts, ledger),
          {:ok, issue, ledger} <- maybe_transition_to_in_progress(issue, deps, ledger) do
       do_run_agent_with_ledger(issue, deps, agent_opts, ledger)
     end
@@ -54,10 +55,8 @@ defmodule Rondo.RunOnce do
       with :ok <- Config.validate!(),
            {:ok, %{issue: issue, source_contract: source_contract}} <- ExecutionRequest.load(path),
            {:ok, policy_file} <- manifest_policy_file(source_contract) do
-        deps = maybe_override_policy_evaluator(deps, policy_file)
         ledger_opts = manifest_ledger_opts(source_contract, policy_file)
-        agent_opts = maybe_put_policy_file_agent_opt(manifest_agent_opts(agent_opts), policy_file)
-        run_agent(issue, deps, agent_opts, ledger_opts)
+        run_agent(issue, deps, manifest_agent_opts(agent_opts), ledger_opts)
       end
     else
       {:error, {:invalid_execution_request_path, path}}
@@ -68,10 +67,15 @@ defmodule Rondo.RunOnce do
     Keyword.put_new(agent_opts, :issue_state_fetcher, fn _issue_ids -> {:ok, []} end)
   end
 
-  defp maybe_put_policy_file_agent_opt(agent_opts, nil), do: agent_opts
+  # Threads the per-run frozen policy file (copied into the run dir at ledger
+  # creation) into every evaluator path the run owns: the deps evaluator used
+  # for tracker transitions and the agent opts consumed by AgentRunner for
+  # workspace side-effect evaluations.
+  defp apply_run_policy_file(deps, agent_opts, %RunLedger{policy_file: nil}), do: {deps, agent_opts}
 
-  defp maybe_put_policy_file_agent_opt(agent_opts, policy_file),
-    do: Keyword.put(agent_opts, :action_policy_policy_file, policy_file)
+  defp apply_run_policy_file(deps, agent_opts, %RunLedger{policy_file: policy_file}) do
+    {maybe_override_policy_evaluator(deps, policy_file), Keyword.put(agent_opts, :action_policy_policy_file, policy_file)}
+  end
 
   defp manifest_ledger_opts(source_contract, nil), do: [source_contract: source_contract]
 
@@ -268,6 +272,7 @@ defmodule Rondo.RunOnce do
   defp run_agent(issue, deps, agent_opts, ledger_opts) do
     with {:ok, ledger} <- create_run_once_ledger(issue, ledger_opts) do
       agent_opts = maybe_put_source_contract_agent_opt(agent_opts, Keyword.get(ledger_opts, :source_contract))
+      {deps, agent_opts} = apply_run_policy_file(deps, agent_opts, ledger)
       do_run_agent_with_ledger(issue, deps, agent_opts, ledger)
     end
   end

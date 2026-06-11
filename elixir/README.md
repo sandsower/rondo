@@ -107,9 +107,12 @@ Manifest runs synthesize an in-memory issue from the request and record `source_
 the run ledger. Provider settings and allowed-action fields are recorded for provenance in this P0
 slice; enforcement still comes from the configured Rondo/Beislið runtime boundaries — with one
 exception: `runner_extensions.action_policy.policy_file` is enforced. It resolves relative to the
-manifest file, overrides the repo `action_policy.policy_file` config, is passed to the Beislið
-evaluator as `--policy-file` for run-once and workspace side-effect evaluations, fails the run closed
-when missing/unreadable, and is recorded in the run manifest with its content sha256.
+manifest file, overrides the repo `action_policy.policy_file` config, fails the run closed when
+missing/unreadable, and is frozen into the run dir at ledger creation
+(`artifacts/action-policy.json`). All run-once and workspace side-effect evaluations pass the frozen
+copy to the Beislið evaluator as `--policy-file`, so mid-run mutations of the source file cannot
+change decisions; the run manifest records the frozen path, the source path, and the frozen
+content's sha256.
 
 ## Configuration
 
@@ -233,9 +236,10 @@ Notes:
 - `action_policy.policy_file` (optional) is a path to a Beislið policy-override JSON passed to the
   evaluator as `--policy-file`. Fail-closed: when set, the file must exist and be readable at config
   validation and again at every evaluation — a broken path is an error, never a silent fallback to
-  the builtin policy. The effective policy file and its content sha256 are recorded in each run
-  manifest. Execution-request manifests can override it per run via
-  `runner_extensions.action_policy.policy_file`.
+  the builtin policy. At run-ledger creation the effective policy file is frozen into the run dir
+  (`artifacts/action-policy.json`); run-owned evaluations use the frozen copy, and the run manifest
+  records the frozen path, source path, and frozen content sha256. Execution-request manifests can
+  override it per run via `runner_extensions.action_policy.policy_file`.
 - Beislið owns the action-policy vocabulary and decision table; Rondo enforces it at Rondo-owned
   orchestration boundaries and persists the returned envelopes in run artifacts. Claude/pi
   permission flags are useful host controls, but they are not a substitute for external policy

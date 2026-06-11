@@ -18,14 +18,15 @@ defmodule Rondo.RunLedger do
   @secret_key_pattern ~r/(api[_-]?key|authorization|cookie|password|secret|token)/i
   @content_key_pattern ~r/(command|content|delta|diff|file[_-]?content|input|message|new_string|old_string|output|prompt|result|stderr|stdout|summary[_-]?text|text[_-]?delta)/i
 
-  defstruct [:run_id, :run_dir, :manifest_path, :next_seq, :manifest]
+  defstruct [:run_id, :run_dir, :manifest_path, :next_seq, :manifest, :policy_file]
 
   @type t :: %__MODULE__{
           run_id: String.t(),
           run_dir: Path.t(),
           manifest_path: Path.t(),
           next_seq: pos_integer(),
-          manifest: map()
+          manifest: map(),
+          policy_file: Path.t() | nil
         }
 
   @spec create_run(Issue.t() | map(), keyword()) :: {:ok, t()} | {:error, term()}
@@ -38,20 +39,47 @@ defmodule Rondo.RunLedger do
     manifest_path = Path.join(run_dir, "manifest.json")
     workspace = Keyword.get(opts, :workspace, Path.join(workspace_root, safe_identifier))
 
-    manifest = build_manifest(issue, opts, now, run_id, run_dir, workspace_root, workspace)
-
-    ledger = %__MODULE__{
-      run_id: run_id,
-      run_dir: run_dir,
-      manifest_path: manifest_path,
-      next_seq: 1,
-      manifest: manifest
-    }
-
     with :ok <- File.mkdir_p(Path.join(run_dir, "checkpoints")),
          :ok <- File.mkdir_p(Path.join(run_dir, "artifacts")),
+         {:ok, policy_snapshot} <- freeze_policy_file(run_dir, opts),
+         manifest = build_manifest(issue, opts, now, run_id, run_dir, workspace_root, workspace, policy_snapshot),
          :ok <- write_json_file(manifest_path, manifest) do
-      {:ok, ledger}
+      {:ok,
+       %__MODULE__{
+         run_id: run_id,
+         run_dir: run_dir,
+         manifest_path: manifest_path,
+         next_seq: 1,
+         manifest: manifest,
+         policy_file: Map.fetch!(policy_snapshot, "policy_file")
+       }}
+    end
+  end
+
+  # Freezes the effective action-policy file into the run dir so the run is
+  # governed by exactly the contents the manifest records, even if the source
+  # file changes mid-run. Fail-closed: a set-but-unreadable policy file aborts
+  # ledger creation instead of silently falling back to the builtin policy.
+  defp freeze_policy_file(run_dir, opts) do
+    case Keyword.get(opts, :action_policy_policy_file, Config.action_policy_policy_file()) do
+      nil ->
+        {:ok, %{"policy_file" => nil, "policy_file_source" => nil, "policy_file_sha256" => nil}}
+
+      source ->
+        source = Path.expand(source)
+        frozen = Path.join(run_dir, "artifacts/action-policy.json")
+
+        with {:ok, contents} <- File.read(source),
+             :ok <- File.write(frozen, contents) do
+          {:ok,
+           %{
+             "policy_file" => frozen,
+             "policy_file_source" => source,
+             "policy_file_sha256" => :crypto.hash(:sha256, contents) |> Base.encode16(case: :lower)
+           }}
+        else
+          {:error, reason} -> {:error, {:policy_file_freeze_failed, source, reason}}
+        end
     end
   end
 
@@ -396,7 +424,7 @@ defmodule Rondo.RunLedger do
     }
   end
 
-  defp build_manifest(issue, opts, now, run_id, run_dir, workspace_root, workspace) do
+  defp build_manifest(issue, opts, now, run_id, run_dir, workspace_root, workspace, policy_snapshot) do
     iso_timestamp = datetime_to_iso(now)
 
     %{
@@ -417,7 +445,14 @@ defmodule Rondo.RunLedger do
       },
       "process_provider" => process_provider_snapshot(opts),
       "mode" => mode_snapshot(opts),
-      "action_policy" => action_policy_snapshot(opts),
+      "action_policy" =>
+        Map.merge(
+          %{
+            "provider" => "beislid",
+            "run_mode" => Keyword.get(opts, :action_policy_run_mode, Config.action_policy_run_mode())
+          },
+          policy_snapshot
+        ),
       "timestamps" => %{
         "created_at" => iso_timestamp,
         "updated_at" => iso_timestamp,
@@ -428,26 +463,6 @@ defmodule Rondo.RunLedger do
       "artifacts" => [%{"kind" => "agent_events", "path" => "artifacts/agent-events.ndjson"}]
     }
     |> maybe_put_source_contract(Keyword.get(opts, :source_contract))
-  end
-
-  defp action_policy_snapshot(opts) do
-    policy_file = Keyword.get(opts, :action_policy_policy_file, Config.action_policy_policy_file())
-
-    %{
-      "provider" => "beislid",
-      "run_mode" => Keyword.get(opts, :action_policy_run_mode, Config.action_policy_run_mode()),
-      "policy_file" => policy_file && Path.expand(policy_file),
-      "policy_file_sha256" => policy_file_sha256(policy_file)
-    }
-  end
-
-  defp policy_file_sha256(nil), do: nil
-
-  defp policy_file_sha256(path) do
-    case File.read(path) do
-      {:ok, contents} -> :crypto.hash(:sha256, contents) |> Base.encode16(case: :lower)
-      {:error, _reason} -> nil
-    end
   end
 
   defp maybe_put_source_contract(manifest, nil), do: manifest
