@@ -10,7 +10,7 @@ Tracker duality: these Linear issues mirror GitHub issues on `sandsower/rondo`. 
 
 ```beislid:ticket_source
 type: mcp
-tool: mcp__linear_personal__get_issue
+tool: mcp__personal-linear-server__get_issue
 id_pattern: '^RON-\d+$'
 link_template: 'https://linear.app/teotl/issue/{id}'
 ```
@@ -21,8 +21,8 @@ link_template: 'https://linear.app/teotl/issue/{id}'
 
 ```beislid:ticket_update
 type: mcp
-comment_tool: mcp__linear_personal__save_comment
-issue_tool: mcp__linear_personal__save_issue
+comment_tool: mcp__personal-linear-server__save_comment
+issue_tool: mcp__personal-linear-server__save_issue
 ```
 
 ## PR reviews
