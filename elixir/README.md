@@ -232,7 +232,7 @@ Notes:
   `unattended-auto`. Default: `unattended-auto`.
 - `action_policy.policy_file` (optional) is a path to a Beislið policy-override JSON passed to the
   evaluator as `--policy-file`. Fail-closed: when set, the file must exist and be readable at config
-  validation and again at every evaluation — a broken path is an error, never a silent fall back to
+  validation and again at every evaluation — a broken path is an error, never a silent fallback to
   the builtin policy. The effective policy file and its content sha256 are recorded in each run
   manifest. Execution-request manifests can override it per run via
   `runner_extensions.action_policy.policy_file`.
