@@ -150,8 +150,13 @@ defmodule Rondo.LiveLinearClaudeE2ETest do
       case context.action_policy_command do
         # :fake means use the TestSupport allow-all stub; omit the override so
         # write_workflow_file!/2 picks up its default_action_policy_command().
-        :fake -> overrides
-        command -> Keyword.put(overrides, :action_policy_command, command)
+        :fake ->
+          overrides
+
+        command ->
+          overrides
+          |> Keyword.put(:action_policy_command, command)
+          |> Keyword.put(:action_policy_policy_file, context.action_policy_policy_file)
       end
 
     write_workflow_file!(Workflow.workflow_file_path(), overrides)

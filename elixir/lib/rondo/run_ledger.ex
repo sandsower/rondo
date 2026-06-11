@@ -417,10 +417,7 @@ defmodule Rondo.RunLedger do
       },
       "process_provider" => process_provider_snapshot(opts),
       "mode" => mode_snapshot(opts),
-      "action_policy" => %{
-        "provider" => "beislid",
-        "run_mode" => Keyword.get(opts, :action_policy_run_mode, Config.action_policy_run_mode())
-      },
+      "action_policy" => action_policy_snapshot(opts),
       "timestamps" => %{
         "created_at" => iso_timestamp,
         "updated_at" => iso_timestamp,
@@ -431,6 +428,26 @@ defmodule Rondo.RunLedger do
       "artifacts" => [%{"kind" => "agent_events", "path" => "artifacts/agent-events.ndjson"}]
     }
     |> maybe_put_source_contract(Keyword.get(opts, :source_contract))
+  end
+
+  defp action_policy_snapshot(opts) do
+    policy_file = Keyword.get(opts, :action_policy_policy_file, Config.action_policy_policy_file())
+
+    %{
+      "provider" => "beislid",
+      "run_mode" => Keyword.get(opts, :action_policy_run_mode, Config.action_policy_run_mode()),
+      "policy_file" => policy_file && Path.expand(policy_file),
+      "policy_file_sha256" => policy_file_sha256(policy_file)
+    }
+  end
+
+  defp policy_file_sha256(nil), do: nil
+
+  defp policy_file_sha256(path) do
+    case File.read(path) do
+      {:ok, contents} -> :crypto.hash(:sha256, contents) |> Base.encode16(case: :lower)
+      {:error, _reason} -> nil
+    end
   end
 
   defp maybe_put_source_contract(manifest, nil), do: manifest

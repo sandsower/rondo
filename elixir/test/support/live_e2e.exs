@@ -184,7 +184,8 @@ defmodule Rondo.LiveE2E do
              agent_adapter: adapter,
              agent_command: agent_command,
              agent_max_turns: resolve_agent_max_turns(env),
-             action_policy_command: action_policy_command
+             action_policy_command: action_policy_command,
+             action_policy_policy_file: action_policy_policy_file(action_policy_command)
            }}
         end
     end
@@ -274,6 +275,12 @@ defmodule Rondo.LiveE2E do
     raw = canonical || deprecated
     parse_max_turns(raw)
   end
+
+  # The real evaluator runs with the scoped policy file that authorizes exactly
+  # the run-once actions the live profile needs (rondo `action_policy.policy_file`
+  # config). The allow-all fake needs no policy file.
+  defp action_policy_policy_file(:fake), do: nil
+  defp action_policy_policy_file(_command), do: Path.expand("fixtures/e2e_action_policy.json", __DIR__)
 
   defp resolve_action_policy_command(@action_policy_fake_value, _find_executable) do
     {:ok, :fake}

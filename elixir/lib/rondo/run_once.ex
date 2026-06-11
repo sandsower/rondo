@@ -52,8 +52,11 @@ defmodule Rondo.RunOnce do
       agent_opts = Keyword.get(opts, :agent_opts, [])
 
       with :ok <- Config.validate!(),
-           {:ok, %{issue: issue, source_contract: source_contract}} <- ExecutionRequest.load(path) do
-        run_agent(issue, deps, manifest_agent_opts(agent_opts), source_contract: source_contract)
+           {:ok, %{issue: issue, source_contract: source_contract}} <- ExecutionRequest.load(path),
+           {:ok, policy_file} <- manifest_policy_file(source_contract) do
+        deps = maybe_override_policy_evaluator(deps, policy_file)
+        ledger_opts = manifest_ledger_opts(source_contract, policy_file)
+        run_agent(issue, deps, manifest_agent_opts(agent_opts), ledger_opts)
       end
     else
       {:error, {:invalid_execution_request_path, path}}
@@ -62,6 +65,50 @@ defmodule Rondo.RunOnce do
 
   defp manifest_agent_opts(agent_opts) do
     Keyword.put_new(agent_opts, :issue_state_fetcher, fn _issue_ids -> {:ok, []} end)
+  end
+
+  defp manifest_ledger_opts(source_contract, nil), do: [source_contract: source_contract]
+
+  defp manifest_ledger_opts(source_contract, policy_file),
+    do: [source_contract: source_contract, action_policy_policy_file: policy_file]
+
+  @spec manifest_policy_file(map()) :: {:ok, Path.t() | nil} | {:error, term()}
+  defp manifest_policy_file(source_contract) do
+    extensions = Map.get(source_contract, :runner_extensions)
+    action_policy = if is_map(extensions), do: Map.get(extensions, "action_policy")
+    policy_file = if is_map(action_policy), do: Map.get(action_policy, "policy_file")
+
+    case policy_file do
+      nil ->
+        {:ok, nil}
+
+      value when is_binary(value) ->
+        resolved = Path.expand(value, Path.dirname(source_contract.path))
+
+        case File.stat(resolved) do
+          {:ok, %File.Stat{type: :regular, access: access}} when access in [:read, :read_write] ->
+            {:ok, resolved}
+
+          _ ->
+            {:error, {:manifest_policy_file_unreadable, resolved}}
+        end
+
+      value ->
+        {:error, {:invalid_manifest_policy_file, value}}
+    end
+  end
+
+  defp maybe_override_policy_evaluator(deps, nil), do: deps
+
+  defp maybe_override_policy_evaluator(deps, policy_file) do
+    evaluator = deps.action_policy_evaluator
+
+    %{
+      deps
+      | action_policy_evaluator: fn action, classes, opts ->
+          evaluator.(action, classes, Keyword.put(opts, :policy_file, policy_file))
+        end
+    }
   end
 
   @spec runtime_deps() :: deps()

@@ -18,7 +18,8 @@ defmodule Rondo.ExecutionRequestTest do
         allowed_actions: %{run_mode: "supervised-auto"},
         process_provider: %{name: "pi"},
         memory_provider: %{name: "memento"},
-        output_expectations: %{final_report: true}
+        output_expectations: %{final_report: true},
+        runner_extensions: %{action_policy: %{policy_file: "policy.json"}}
       })
 
     assert {:ok, request} = ExecutionRequest.load(path)
@@ -41,6 +42,7 @@ defmodule Rondo.ExecutionRequestTest do
     assert request.source_contract.process_provider == %{"name" => "pi"}
     assert request.source_contract.memory_provider == %{"name" => "memento"}
     assert request.source_contract.output_expectations == %{"final_report" => true}
+    assert request.source_contract.runner_extensions == %{"action_policy" => %{"policy_file" => "policy.json"}}
   end
 
   test "loads approved-slice-v1 with body alias" do

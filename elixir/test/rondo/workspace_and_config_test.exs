@@ -791,13 +791,32 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert {:error, {:invalid_workflow_config, _, [%{path: "process_provider.kind"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), action_policy_command: "/tmp/beislid", action_policy_run_mode: "supervised-auto")
-    assert Config.action_policy() == %{command: "/tmp/beislid", run_mode: "supervised-auto"}
+    assert Config.action_policy() == %{command: "/tmp/beislid", run_mode: "supervised-auto", policy_file: nil}
+    assert Config.action_policy_policy_file() == nil
 
     write_workflow_file!(Workflow.workflow_file_path(), action_policy_run_mode: "YOLO")
     assert {:error, {:invalid_workflow_config, _, [%{path: "action_policy.run_mode"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), action_policy_command: "")
     assert {:error, {:invalid_workflow_config, _, [%{path: "action_policy.command"}]}} = Config.validate!()
+
+    policy_file_dir = Path.join(System.tmp_dir!(), "rondo-policy-file-#{System.unique_integer([:positive, :monotonic])}")
+    File.mkdir_p!(policy_file_dir)
+    on_exit(fn -> File.rm_rf!(policy_file_dir) end)
+    policy_file = Path.join(policy_file_dir, "policy.json")
+    File.write!(policy_file, ~s({"modes": {}}))
+
+    write_workflow_file!(Workflow.workflow_file_path(), action_policy_policy_file: policy_file)
+    assert :ok = Config.validate!()
+    assert Config.action_policy_policy_file() == policy_file
+    assert %{policy_file: ^policy_file} = Config.action_policy()
+
+    missing_policy_file = Path.join(policy_file_dir, "does-not-exist.json")
+    write_workflow_file!(Workflow.workflow_file_path(), action_policy_policy_file: missing_policy_file)
+    assert {:error, {:invalid_workflow_config, _, [%{path: "action_policy.policy_file"}]}} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(), action_policy_policy_file: policy_file_dir)
+    assert {:error, {:invalid_workflow_config, _, [%{path: "action_policy.policy_file"}]}} = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), claude_permission_mode: "acceptEdits")
     assert Config.claude_permission_mode() == "acceptEdits"

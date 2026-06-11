@@ -383,7 +383,10 @@ Optional knobs:
   message directing you here. To run without Beislið installed, set this variable to
   `fake` — an explicit, auditable opt-in to the allow-all stub that approves every
   action without evaluation. Any other value is used as the evaluator command path
-  directly.
+  directly. When the real evaluator runs, the live profile sets
+  `action_policy.policy_file` to the scoped policy at
+  `test/support/fixtures/e2e_action_policy.json`, which authorizes exactly the
+  run-once actions the test needs (tracker transition, workspace lifecycle/hooks).
 
 Deprecated aliases (still accepted; generalized names above take precedence when both
 are set):

@@ -6,7 +6,7 @@ defmodule Rondo.ExecutionRequest do
   alias Rondo.Linear.Issue
 
   @schemas ["approved-slice-v1", "rondo-execution-request-v1"]
-  @metadata_keys ~w(parent_contract repo allowed_actions process_provider memory_provider output_expectations)
+  @metadata_keys ~w(parent_contract repo allowed_actions process_provider memory_provider output_expectations runner_extensions)
 
   @type t :: %{
           issue: Issue.t(),

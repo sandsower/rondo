@@ -374,6 +374,107 @@ defmodule Rondo.RunOnceTest do
     refute_received {:update_issue_state, _, _}
   end
 
+  test "manifest runner_extensions policy file overrides config and is recorded in the run ledger" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-policy-file")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    config_policy_file = Path.join(tmp_dir("run-once-config-policy"), "config-policy.json")
+    File.mkdir_p!(Path.dirname(config_policy_file))
+    File.write!(config_policy_file, ~s({"modes": {"unattended-auto": {}}}))
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      action_policy_policy_file: config_policy_file
+    )
+
+    manifest_dir = tmp_dir("manifest-policy")
+    File.mkdir_p!(manifest_dir)
+    manifest_policy_contents = ~s({"modes": {"unattended-auto": {"actions": {"tracker.issue.transition": "allow"}}}})
+    File.write!(Path.join(manifest_dir, "policy.json"), manifest_policy_contents)
+
+    manifest_path = Path.join(manifest_dir, "request.json")
+
+    File.write!(
+      manifest_path,
+      Jason.encode!(%{
+        schema: "rondo-execution-request-v1",
+        slice_id: "slice-123",
+        prompt: "Do the slice.",
+        runner_extensions: %{action_policy: %{policy_file: "policy.json"}}
+      })
+    )
+
+    assert :ok = RunOnce.run_manifest(manifest_path, deps: deps([], parent))
+    assert_received {:agent_run, %Issue{id: "slice-123"}, _agent_opts}
+
+    expected_sha256 = :crypto.hash(:sha256, manifest_policy_contents) |> Base.encode16(case: :lower)
+    manifest = latest_run_manifest!(workspace_root, "slice-123")
+
+    assert manifest["action_policy"]["policy_file"] == Path.join(manifest_dir, "policy.json")
+    assert manifest["action_policy"]["policy_file_sha256"] == expected_sha256
+  end
+
+  test "manifest runs without a policy override record the configured policy file" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-config-policy-fallback")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    config_policy_file = Path.join(tmp_dir("run-once-config-policy"), "config-policy.json")
+    File.mkdir_p!(Path.dirname(config_policy_file))
+    config_policy_contents = ~s({"modes": {"unattended-auto": {}}})
+    File.write!(config_policy_file, config_policy_contents)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      action_policy_policy_file: config_policy_file
+    )
+
+    manifest_path = write_manifest!(%{schema: "rondo-execution-request-v1", slice_id: "slice-123", prompt: "Do the slice."})
+
+    assert :ok = RunOnce.run_manifest(manifest_path, deps: deps([], parent))
+
+    expected_sha256 = :crypto.hash(:sha256, config_policy_contents) |> Base.encode16(case: :lower)
+    manifest = latest_run_manifest!(workspace_root, "slice-123")
+
+    assert manifest["action_policy"]["policy_file"] == Path.expand(config_policy_file)
+    assert manifest["action_policy"]["policy_file_sha256"] == expected_sha256
+  end
+
+  test "manifest policy file that does not exist fails closed before agent execution" do
+    parent = self()
+
+    manifest_path =
+      write_manifest!(%{
+        schema: "rondo-execution-request-v1",
+        slice_id: "slice-123",
+        prompt: "Do the slice.",
+        runner_extensions: %{action_policy: %{policy_file: "missing-policy.json"}}
+      })
+
+    expected_path = Path.join(Path.dirname(manifest_path), "missing-policy.json")
+
+    assert {:error, {:manifest_policy_file_unreadable, ^expected_path}} =
+             RunOnce.run_manifest(manifest_path, deps: deps([], parent))
+
+    refute_received {:agent_run, _, _}
+  end
+
+  test "manifest policy file with a non-string value fails closed before agent execution" do
+    parent = self()
+
+    manifest_path =
+      write_manifest!(%{
+        schema: "rondo-execution-request-v1",
+        slice_id: "slice-123",
+        prompt: "Do the slice.",
+        runner_extensions: %{action_policy: %{policy_file: 42}}
+      })
+
+    assert {:error, {:invalid_manifest_policy_file, 42}} = RunOnce.run_manifest(manifest_path, deps: deps([], parent))
+    refute_received {:agent_run, _, _}
+  end
+
   test "invalid execution request manifests fail before agent execution" do
     parent = self()
     manifest_path = write_manifest!(%{schema: "unknown-v1", slice_id: "slice-123", prompt: "Do the slice."})

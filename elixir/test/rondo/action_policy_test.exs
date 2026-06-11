@@ -134,6 +134,61 @@ defmodule Rondo.ActionPolicyTest do
              )
   end
 
+  test "appends --policy-file to evaluator args from opts and config" do
+    {command, argv_file} = argv_recording_evaluator()
+    policy_file = existing_policy_file()
+    sandbox_status = %{baseline: "separate-worktree", default_branch: false, uncommitted_changes: false}
+
+    assert {:ok, _envelope} =
+             ActionPolicy.evaluate("file.read", ["read"],
+               command: command,
+               policy_file: policy_file,
+               sandbox_status: sandbox_status
+             )
+
+    assert File.read!(argv_file) =~ "--policy-file #{policy_file}"
+
+    assert {:ok, _envelope} =
+             ActionPolicy.evaluate("file.read", ["read"], command: command, sandbox_status: sandbox_status)
+
+    refute File.read!(argv_file) =~ "--policy-file"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      action_policy_command: command,
+      action_policy_policy_file: policy_file
+    )
+
+    assert {:ok, _envelope} = ActionPolicy.evaluate("file.read", ["read"], sandbox_status: sandbox_status)
+    assert File.read!(argv_file) =~ "--policy-file #{policy_file}"
+
+    assert {:ok, _envelope} =
+             ActionPolicy.evaluate("file.read", ["read"], policy_file: nil, sandbox_status: sandbox_status, command: command)
+
+    refute File.read!(argv_file) =~ "--policy-file"
+  end
+
+  test "set but unreadable policy file fails closed without running the evaluator" do
+    {command, argv_file} = argv_recording_evaluator()
+    missing = Path.join(tmp_dir("missing-policy"), "policy.json")
+    sandbox_status = %{baseline: "separate-worktree", default_branch: false, uncommitted_changes: false}
+
+    assert {:error, {:policy_file_unreadable, ^missing}} =
+             ActionPolicy.evaluate("file.read", ["read"],
+               command: command,
+               policy_file: missing,
+               sandbox_status: sandbox_status
+             )
+
+    refute File.exists?(argv_file)
+
+    assert {:error, {:policy_file_unreadable, 42}} =
+             ActionPolicy.evaluate("file.read", ["read"],
+               command: command,
+               policy_file: 42,
+               sandbox_status: sandbox_status
+             )
+  end
+
   test "nil and outside workspaces use the conservative none baseline" do
     assert ActionPolicy.sandbox_status(nil) == %{baseline: "none", default_branch: false, uncommitted_changes: false}
 
@@ -205,6 +260,29 @@ defmodule Rondo.ActionPolicyTest do
 
     File.write!(path, body)
     File.chmod!(path, 0o755)
+    path
+  end
+
+  defp argv_recording_evaluator do
+    dir = tmp_dir("argv-evaluator")
+    path = Path.join(dir, "beislid-fake")
+    argv_file = Path.join(dir, "argv.txt")
+    File.mkdir_p!(dir)
+
+    File.write!(path, """
+    #!/bin/sh
+    printf '%s ' "$@" > '#{argv_file}'
+    printf '{"decision":"allow","action":"file.read","mode":"unattended-auto","classes":["read"],"matched_rules":[],"sandbox_status":{"baseline":"separate-worktree"},"requires_human":false,"log_level":"info","reason":"test","remediation":[]}'
+    """)
+
+    File.chmod!(path, 0o755)
+    {path, argv_file}
+  end
+
+  defp existing_policy_file do
+    path = Path.join(tmp_dir("policy-file"), "policy.json")
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, ~s({"modes": {}}))
     path
   end
 

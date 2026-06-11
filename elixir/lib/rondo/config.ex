@@ -152,7 +152,8 @@ defmodule Rondo.Config do
                                default: %{},
                                keys: [
                                  command: [type: :string, default: @default_action_policy_command],
-                                 run_mode: [type: :string, default: @default_action_policy_run_mode]
+                                 run_mode: [type: :string, default: @default_action_policy_run_mode],
+                                 policy_file: [type: {:or, [:string, nil]}, default: nil]
                                ]
                              ],
                              process_provider: [
@@ -236,7 +237,8 @@ defmodule Rondo.Config do
         }
   @type action_policy :: %{
           command: String.t(),
-          run_mode: String.t()
+          run_mode: String.t(),
+          policy_file: String.t() | nil
         }
   @type process_provider :: %{
           kind: String.t(),
@@ -467,7 +469,8 @@ defmodule Rondo.Config do
 
     %{
       command: Map.get(policy, :command),
-      run_mode: Map.get(policy, :run_mode)
+      run_mode: Map.get(policy, :run_mode),
+      policy_file: Map.get(policy, :policy_file)
     }
   end
 
@@ -479,6 +482,11 @@ defmodule Rondo.Config do
   @spec action_policy_run_mode() :: String.t()
   def action_policy_run_mode do
     get_in(validated_workflow_options(), [:action_policy, :run_mode])
+  end
+
+  @spec action_policy_policy_file() :: String.t() | nil
+  def action_policy_policy_file do
+    get_in(validated_workflow_options(), [:action_policy, :policy_file])
   end
 
   @spec process_provider() :: process_provider()
@@ -892,6 +900,7 @@ defmodule Rondo.Config do
     %{}
     |> put_if_present(:command, command_value(Map.get(section, "command")))
     |> put_if_present(:run_mode, scalar_string_value(Map.get(section, "run_mode")))
+    |> put_if_present(:policy_file, binary_value(Map.get(section, "policy_file")))
   end
 
   defp extract_process_provider_options(section) do
@@ -1020,6 +1029,7 @@ defmodule Rondo.Config do
       validate_positive_integer_field(pi, "pi.stall_timeout_ms"),
       validate_string_field(action_policy, "action_policy.command"),
       validate_inclusion_field(action_policy, "action_policy.run_mode", @valid_action_policy_run_modes),
+      validate_existing_file_field(action_policy, "action_policy.policy_file"),
       validate_inclusion_field(process_provider, "process_provider.kind", @valid_process_provider_kinds),
       validate_boolean_field(process_provider, "process_provider.required"),
       validate_string_field(process_provider, "process_provider.artifact_path"),
@@ -1122,6 +1132,24 @@ defmodule Rondo.Config do
 
       value ->
         [config_error(path, value, "must be a list of non-empty strings")]
+    end)
+  end
+
+  defp validate_existing_file_field(section, path) do
+    validate_present_value(section, path, fn
+      value when is_binary(value) ->
+        expanded = value |> String.trim() |> Path.expand()
+
+        case File.stat(expanded) do
+          {:ok, %File.Stat{type: :regular, access: access}} when access in [:read, :read_write] ->
+            []
+
+          _ ->
+            [config_error(path, value, "must reference an existing readable file")]
+        end
+
+      value ->
+        [config_error(path, value, "must be a string path to an existing file")]
     end)
   end
 
