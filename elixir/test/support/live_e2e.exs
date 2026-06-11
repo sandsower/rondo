@@ -37,9 +37,6 @@ defmodule Rondo.LiveE2E do
   # Default commands per adapter
   @default_commands %{"claude_code" => "claude", "pi" => "pi"}
 
-  # Env var to set to override the agent command per adapter (used in error messages)
-  @agent_command_env_var @agent_command_var
-
   @team_query """
   query RondoE2EResolveTeam($key: String!) {
     teams(filter: {key: {eq: $key}}, first: 1) {
@@ -241,9 +238,15 @@ defmodule Rondo.LiveE2E do
   end
 
   defp resolve_agent_command(adapter, env, find_executable) do
-    explicit = env.(@agent_command_var) || env.(@deprecated_command_var)
+    canonical = env.(@agent_command_var)
+    deprecated = env.(@deprecated_command_var)
+    explicit = canonical || deprecated
 
     if explicit do
+      if is_nil(canonical) and not is_nil(deprecated) do
+        Logger.warning("#{@deprecated_command_var} is deprecated; use #{@agent_command_var} instead")
+      end
+
       # Explicit command path — trust it; user knows it exists.
       {:ok, explicit}
     else
@@ -251,15 +254,22 @@ defmodule Rondo.LiveE2E do
       default_command = Map.fetch!(@default_commands, adapter)
 
       case find_executable.(default_command) do
-        nil -> {:error, {:agent_cli_missing, default_command, @agent_command_env_var}}
+        nil -> {:error, {:agent_cli_missing, default_command, @agent_command_var}}
         _path -> {:ok, default_command}
       end
     end
   end
 
   defp resolve_agent_max_turns(env) do
+    canonical = env.(@agent_max_turns_var)
+    deprecated = env.(@deprecated_max_turns_var)
+
+    if is_nil(canonical) and not is_nil(deprecated) do
+      Logger.warning("#{@deprecated_max_turns_var} is deprecated; use #{@agent_max_turns_var} instead")
+    end
+
     # Generalized var wins over deprecated alias
-    raw = env.(@agent_max_turns_var) || env.(@deprecated_max_turns_var)
+    raw = canonical || deprecated
     parse_max_turns(raw)
   end
 

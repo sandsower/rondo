@@ -155,6 +155,7 @@ defmodule Rondo.LiveE2ESupportTest do
                )
 
       assert context.agent_adapter == "pi"
+      assert context.agent_command == "pi"
     end
 
     test "returns config error for unknown adapter value" do
@@ -165,6 +166,19 @@ defmodule Rondo.LiveE2ESupportTest do
 
       assert "claude_code" in accepted
       assert "pi" in accepted
+    end
+
+    test "probe-honest failure when claude CLI is not on PATH (claude_code adapter)" do
+      # Use action-policy fake opt-in so we isolate the agent CLI probe failure.
+      overrides = %{
+        "RONDO_E2E_ACTION_POLICY_COMMAND" => LiveE2E.action_policy_fake_value()
+      }
+
+      assert {:error, {:agent_cli_missing, command, env_var}} =
+               LiveE2E.load_context(env(full_env(overrides)), &find_executable_missing/1)
+
+      assert command == "claude"
+      assert env_var == "RONDO_E2E_AGENT_COMMAND"
     end
 
     test "probe-honest failure when pi CLI is not on PATH" do
@@ -227,26 +241,38 @@ defmodule Rondo.LiveE2ESupportTest do
       assert context.agent_max_turns == 7
     end
 
-    test "RONDO_E2E_CLAUDE_COMMAND still works as deprecated alias" do
+    test "RONDO_E2E_CLAUDE_COMMAND still works as deprecated alias and logs a warning" do
       overrides = %{"RONDO_E2E_CLAUDE_COMMAND" => "/usr/local/bin/claude-beta"}
 
-      assert {:ok, context} =
-               LiveE2E.load_context(env(full_env(overrides)), &find_executable_found/1)
+      log =
+        capture_log(fn ->
+          assert {:ok, context} =
+                   LiveE2E.load_context(env(full_env(overrides)), &find_executable_found/1)
 
-      assert context.agent_command == "/usr/local/bin/claude-beta"
+          assert context.agent_command == "/usr/local/bin/claude-beta"
+        end)
+
+      assert log =~ "RONDO_E2E_CLAUDE_COMMAND is deprecated"
+      assert log =~ "RONDO_E2E_AGENT_COMMAND"
     end
 
-    test "RONDO_E2E_CLAUDE_MAX_TURNS still works as deprecated alias" do
+    test "RONDO_E2E_CLAUDE_MAX_TURNS still works as deprecated alias and logs a warning" do
       overrides = %{"RONDO_E2E_CLAUDE_MAX_TURNS" => "15"}
 
-      assert {:ok, context} =
-               LiveE2E.load_context(env(full_env(overrides)), &find_executable_found/1)
+      log =
+        capture_log(fn ->
+          assert {:ok, context} =
+                   LiveE2E.load_context(env(full_env(overrides)), &find_executable_found/1)
 
-      assert context.agent_max_turns == 15
+          assert context.agent_max_turns == 15
+        end)
+
+      assert log =~ "RONDO_E2E_CLAUDE_MAX_TURNS is deprecated"
+      assert log =~ "RONDO_E2E_AGENT_MAX_TURNS"
     end
   end
 
-  describe "workflow_content_for_adapter/1" do
+  describe "workflow_overrides_for_adapter/1" do
     test "emits claude: section for claude_code adapter" do
       context = %{
         agent_adapter: "claude_code",

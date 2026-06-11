@@ -406,9 +406,10 @@ What it does and mutates:
   or `pi:`) in the temporary `WORKFLOW.md` are set to match `RONDO_E2E_AGENT_ADAPTER`.
 - The agent task only writes `rondo_e2e_marker.txt` into a temporary workspace; the
   test asserts the marker content and that the issue reached `In Progress`. Note the
-  Claude subprocess inherits the workflow defaults `permission_mode: bypassPermissions`
-  and `dangerously_skip_permissions: true` (acceptable for this sandboxed, single-file
-  task; the prompt forbids any other action and turns are capped).
+  agent subprocess inherits the workflow defaults `permission_mode: bypassPermissions`
+  and `dangerously_skip_permissions: true` (claude_code adapter only; acceptable for
+  this sandboxed, single-file task; the prompt forbids any other action and turns are
+  capped).
 - Cleanup runs in `on_exit` even when the test fails: the disposable issue is deleted
   (moved to Linear's trash, recoverable) and the temporary workspace is removed.
   Cleanup is best-effort; failures are logged with the issue URL so you can delete it

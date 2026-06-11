@@ -1,6 +1,6 @@
 defmodule Rondo.LiveLinearClaudeE2ETest do
   @moduledoc """
-  Opt-in live end-to-end profile: Linear issue fetch, workspace prep, Claude
+  Opt-in live end-to-end profile: Linear issue fetch, workspace prep, agent
   subprocess, tracker state transition, and cleanup against a disposable
   `[rondo-e2e]` issue in a dedicated test team/project.
 
@@ -67,7 +67,7 @@ defmodule Rondo.LiveLinearClaudeE2ETest do
     marker_path = Path.join([workspace_root, issue.identifier, LiveE2E.marker_file_name()])
 
     assert File.exists?(marker_path),
-           "expected Claude to create workspace marker #{marker_path}; #{debug_context}"
+           "expected agent to create workspace marker #{marker_path}; #{debug_context}"
 
     assert marker_path |> File.read!() |> String.trim() == LiveE2E.marker_content(),
            "unexpected marker content in #{marker_path}; #{debug_context}"
