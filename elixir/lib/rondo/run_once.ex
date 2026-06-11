@@ -64,7 +64,7 @@ defmodule Rondo.RunOnce do
   end
 
   defp manifest_agent_opts(agent_opts) do
-    Keyword.put_new(agent_opts, :issue_state_fetcher, fn _issue_ids -> {:ok, []} end)
+    Keyword.put_new(agent_opts, :issue_state_fetcher, &AgentRunner.no_tracker_issue_state_fetcher/1)
   end
 
   # Threads the per-run frozen policy file (copied into the run dir at ledger

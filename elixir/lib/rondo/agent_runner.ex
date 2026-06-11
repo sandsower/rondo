@@ -7,7 +7,7 @@ defmodule Rondo.AgentRunner do
   alias Rondo.Agent.Adapter
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.PiAdapter
-  alias Rondo.{Config, Gates, Linear.Issue, ProcessProvider, Tracker, Workspace}
+  alias Rondo.{Config, FinalReport, Gates, Linear.Issue, ProcessProvider, Tracker, Workspace}
   alias Rondo.ProcessProvider.{Beislid, Native}
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
@@ -37,6 +37,15 @@ defmodule Rondo.AgentRunner do
         handle_agent_run_error(issue, reason)
     end
   end
+
+  @doc """
+  Sentinel issue-state fetcher for runs without tracker tools (run-once /
+  manifest envelope runs). Its function identity signals "no tracker capability"
+  to the continuation decision, so these runs never loop on tracker state. Always
+  returns `{:ok, []}`.
+  """
+  @spec no_tracker_issue_state_fetcher([String.t()]) :: {:ok, []}
+  def no_tracker_issue_state_fetcher(_issue_ids), do: {:ok, []}
 
   defp workspace_policy_opts(opts) do
     ledger_opts =
@@ -183,7 +192,7 @@ defmodule Rondo.AgentRunner do
         )
 
         with :ok <- run_gates(context, issue, turn_number) do
-          continue_agent_turns(context, issue, turn_number, effective_run_ref)
+          continue_agent_turns(context, issue, turn_number, effective_run_ref, Map.get(invocation_result, :final_report))
         end
 
       {:error, reason} ->
@@ -370,14 +379,14 @@ defmodule Rondo.AgentRunner do
     }
   end
 
-  defp continue_agent_turns(context, issue, turn_number, effective_run_ref) do
-    case continue_with_issue?(issue, context.issue_state_fetcher) do
+  defp continue_agent_turns(context, issue, turn_number, effective_run_ref, final_report) do
+    case continuation_decision(context, issue, final_report) do
       {:continue, refreshed_issue} when turn_number < context.max_turns ->
         Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} turn=#{turn_number}/#{context.max_turns}")
         do_run_agent_turns(context, refreshed_issue, turn_number + 1, effective_run_ref)
 
       {:continue, refreshed_issue} ->
-        Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active")
+        Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with delivery still incomplete")
         :ok
 
       {:done, _refreshed_issue} ->
@@ -386,6 +395,34 @@ defmodule Rondo.AgentRunner do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  # Continuation is delivery-driven. A valid `rondo.final_report/v0` decides
+  # directly via its declared `next_state` (terminal -> stop, active -> continue),
+  # regardless of tracker state. Without a usable report we only fall back to
+  # tracker-state continuation when the run actually has tracker capability (a
+  # real issue_state_fetcher); tracker-less envelope/manifest runs stop instead
+  # of looping on an unsatisfiable "issue still active" nudge.
+  defp continuation_decision(context, issue, final_report) do
+    case FinalReport.extract(final_report) do
+      {:ok, report} ->
+        if active_issue_state?(Map.get(report, "next_state")) do
+          {:continue, issue}
+        else
+          {:done, issue}
+        end
+
+      {:error, _missing_or_invalid} ->
+        if tracker_capable?(context) do
+          continue_with_issue?(issue, context.issue_state_fetcher)
+        else
+          {:done, issue}
+        end
+    end
+  end
+
+  defp tracker_capable?(%{issue_state_fetcher: fetcher}) do
+    fetcher != (&__MODULE__.no_tracker_issue_state_fetcher/1)
   end
 
   defp adapter_module(opts) do
@@ -439,7 +476,7 @@ defmodule Rondo.AgentRunner do
     """
     Continuation guidance:
 
-    - The previous turn completed normally, but the tracker issue is still in an active state.
+    - The previous turn completed normally, but the work is not yet complete (your final report did not declare a terminal next_state, or the tracker issue is still active).
     - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
     - Resume from the current workspace state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this session, so do not restate them before acting.
