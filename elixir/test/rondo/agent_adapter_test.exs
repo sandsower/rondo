@@ -428,6 +428,60 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  test "agent runner forwards action_policy_policy_file to workspace side-effect evaluations" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-policy-file-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      evaluator_path = Path.join(test_root, "beislid-argv-recorder")
+      argv_file = Path.join(test_root, "argv.txt")
+
+      File.write!(evaluator_path, """
+      #!/bin/sh
+      printf '%s ' "$@" >> '#{argv_file}'
+      printf '\\n' >> '#{argv_file}'
+      printf '{"decision":"allow","action":"x","mode":"unattended-auto","classes":[],"matched_rules":[],"requires_human":false,"log_level":"info","reason":"test","remediation":[]}'
+      """)
+
+      File.chmod!(evaluator_path, 0o755)
+
+      policy_file = Path.join(test_root, "policy.json")
+      File.write!(policy_file, ~s({"modes": {}}))
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        action_policy_command: evaluator_path
+      )
+
+      issue = %Issue{
+        id: "issue-policy-file",
+        identifier: "MT-POLICY-FILE",
+        title: "Policy file threading",
+        description: "Workspace evaluations must receive the manifest policy file",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end,
+                 test_pid: parent,
+                 action_policy_policy_file: policy_file
+               )
+
+      argv_lines = argv_file |> File.read!() |> String.split("\n", trim: true)
+      assert argv_lines != []
+      assert Enum.all?(argv_lines, &(&1 =~ "--policy-file #{policy_file}"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner forwards result-only adapter metadata through compatibility updates" do
     test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-result-only-adapter-#{System.unique_integer([:positive])}")
 

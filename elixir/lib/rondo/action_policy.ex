@@ -87,7 +87,7 @@ defmodule Rondo.ActionPolicy do
     end
   end
 
-  defp validate_policy_file(path), do: {:error, {:policy_file_unreadable, path}}
+  defp validate_policy_file(value), do: {:error, {:invalid_policy_file, value}}
 
   defp run_evaluator(command, args, timeout_ms) do
     with :ok <- executable_available?(command) do

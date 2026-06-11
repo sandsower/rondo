@@ -406,7 +406,8 @@ defmodule Rondo.RunOnceTest do
     )
 
     assert :ok = RunOnce.run_manifest(manifest_path, deps: deps([], parent))
-    assert_received {:agent_run, %Issue{id: "slice-123"}, _agent_opts}
+    assert_received {:agent_run, %Issue{id: "slice-123"}, agent_opts}
+    assert Keyword.fetch!(agent_opts, :action_policy_policy_file) == Path.join(manifest_dir, "policy.json")
 
     expected_sha256 = :crypto.hash(:sha256, manifest_policy_contents) |> Base.encode16(case: :lower)
     manifest = latest_run_manifest!(workspace_root, "slice-123")
@@ -472,6 +473,34 @@ defmodule Rondo.RunOnceTest do
       })
 
     assert {:error, {:invalid_manifest_policy_file, 42}} = RunOnce.run_manifest(manifest_path, deps: deps([], parent))
+    refute_received {:agent_run, _, _}
+  end
+
+  test "misshapen manifest runner_extensions fail closed before agent execution" do
+    parent = self()
+
+    flat_extensions =
+      write_manifest!(%{
+        schema: "rondo-execution-request-v1",
+        slice_id: "slice-123",
+        prompt: "Do the slice.",
+        runner_extensions: "policy.json"
+      })
+
+    assert {:error, {:invalid_manifest_runner_extensions, "policy.json"}} =
+             RunOnce.run_manifest(flat_extensions, deps: deps([], parent))
+
+    flat_action_policy =
+      write_manifest!(%{
+        schema: "rondo-execution-request-v1",
+        slice_id: "slice-123",
+        prompt: "Do the slice.",
+        runner_extensions: %{action_policy: "policy.json"}
+      })
+
+    assert {:error, {:invalid_manifest_runner_extensions, "policy.json"}} =
+             RunOnce.run_manifest(flat_action_policy, deps: deps([], parent))
+
     refute_received {:agent_run, _, _}
   end
 

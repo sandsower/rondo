@@ -900,8 +900,17 @@ defmodule Rondo.Config do
     %{}
     |> put_if_present(:command, command_value(Map.get(section, "command")))
     |> put_if_present(:run_mode, scalar_string_value(Map.get(section, "run_mode")))
-    |> put_if_present(:policy_file, binary_value(Map.get(section, "policy_file")))
+    |> put_if_present(:policy_file, policy_file_value(Map.get(section, "policy_file")))
   end
+
+  defp policy_file_value(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> :omit
+      trimmed -> Path.expand(trimmed)
+    end
+  end
+
+  defp policy_file_value(_value), do: :omit
 
   defp extract_process_provider_options(section) do
     %{}

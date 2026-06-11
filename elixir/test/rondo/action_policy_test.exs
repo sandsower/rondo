@@ -181,7 +181,7 @@ defmodule Rondo.ActionPolicyTest do
 
     refute File.exists?(argv_file)
 
-    assert {:error, {:policy_file_unreadable, 42}} =
+    assert {:error, {:invalid_policy_file, 42}} =
              ActionPolicy.evaluate("file.read", ["read"],
                command: command,
                policy_file: 42,

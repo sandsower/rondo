@@ -811,6 +811,10 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Config.action_policy_policy_file() == policy_file
     assert %{policy_file: ^policy_file} = Config.action_policy()
 
+    write_workflow_file!(Workflow.workflow_file_path(), action_policy_policy_file: "  #{policy_file}  ")
+    assert :ok = Config.validate!()
+    assert Config.action_policy_policy_file() == policy_file
+
     missing_policy_file = Path.join(policy_file_dir, "does-not-exist.json")
     write_workflow_file!(Workflow.workflow_file_path(), action_policy_policy_file: missing_policy_file)
     assert {:error, {:invalid_workflow_config, _, [%{path: "action_policy.policy_file"}]}} = Config.validate!()

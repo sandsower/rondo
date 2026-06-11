@@ -323,7 +323,7 @@ defmodule Rondo.Workspace do
   end
 
   defp evaluate_side_effect(side_effect, workspace, opts) do
-    policy_opts = Keyword.take(opts, [:evaluator, :ledger, :mode, :command, :now, :resume, :timeout_ms])
+    policy_opts = Keyword.take(opts, [:evaluator, :ledger, :mode, :command, :now, :resume, :timeout_ms, :policy_file])
     SideEffectPolicy.evaluate(side_effect, Keyword.put(policy_opts, :workspace, workspace))
   end
 

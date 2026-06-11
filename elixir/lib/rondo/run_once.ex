@@ -56,7 +56,8 @@ defmodule Rondo.RunOnce do
            {:ok, policy_file} <- manifest_policy_file(source_contract) do
         deps = maybe_override_policy_evaluator(deps, policy_file)
         ledger_opts = manifest_ledger_opts(source_contract, policy_file)
-        run_agent(issue, deps, manifest_agent_opts(agent_opts), ledger_opts)
+        agent_opts = maybe_put_policy_file_agent_opt(manifest_agent_opts(agent_opts), policy_file)
+        run_agent(issue, deps, agent_opts, ledger_opts)
       end
     else
       {:error, {:invalid_execution_request_path, path}}
@@ -67,6 +68,11 @@ defmodule Rondo.RunOnce do
     Keyword.put_new(agent_opts, :issue_state_fetcher, fn _issue_ids -> {:ok, []} end)
   end
 
+  defp maybe_put_policy_file_agent_opt(agent_opts, nil), do: agent_opts
+
+  defp maybe_put_policy_file_agent_opt(agent_opts, policy_file),
+    do: Keyword.put_new(agent_opts, :action_policy_policy_file, policy_file)
+
   defp manifest_ledger_opts(source_contract, nil), do: [source_contract: source_contract]
 
   defp manifest_ledger_opts(source_contract, policy_file),
@@ -74,29 +80,36 @@ defmodule Rondo.RunOnce do
 
   @spec manifest_policy_file(map()) :: {:ok, Path.t() | nil} | {:error, term()}
   defp manifest_policy_file(source_contract) do
-    extensions = Map.get(source_contract, :runner_extensions)
-    action_policy = if is_map(extensions), do: Map.get(extensions, "action_policy")
-    policy_file = if is_map(action_policy), do: Map.get(action_policy, "policy_file")
-
-    case policy_file do
-      nil ->
-        {:ok, nil}
-
-      value when is_binary(value) ->
-        resolved = Path.expand(value, Path.dirname(source_contract.path))
-
-        case File.stat(resolved) do
-          {:ok, %File.Stat{type: :regular, access: access}} when access in [:read, :read_write] ->
-            {:ok, resolved}
-
-          _ ->
-            {:error, {:manifest_policy_file_unreadable, resolved}}
-        end
-
-      value ->
-        {:error, {:invalid_manifest_policy_file, value}}
+    case Map.get(source_contract, :runner_extensions) do
+      nil -> {:ok, nil}
+      extensions when is_map(extensions) -> manifest_action_policy_file(extensions, source_contract)
+      other -> {:error, {:invalid_manifest_runner_extensions, other}}
     end
   end
+
+  defp manifest_action_policy_file(extensions, source_contract) do
+    case Map.get(extensions, "action_policy") do
+      nil -> {:ok, nil}
+      action_policy when is_map(action_policy) -> resolve_manifest_policy_file(Map.get(action_policy, "policy_file"), source_contract)
+      other -> {:error, {:invalid_manifest_runner_extensions, other}}
+    end
+  end
+
+  defp resolve_manifest_policy_file(nil, _source_contract), do: {:ok, nil}
+
+  defp resolve_manifest_policy_file(value, source_contract) when is_binary(value) do
+    resolved = Path.expand(value, Path.dirname(source_contract.path))
+
+    case File.stat(resolved) do
+      {:ok, %File.Stat{type: :regular, access: access}} when access in [:read, :read_write] ->
+        {:ok, resolved}
+
+      _ ->
+        {:error, {:manifest_policy_file_unreadable, resolved}}
+    end
+  end
+
+  defp resolve_manifest_policy_file(value, _source_contract), do: {:error, {:invalid_manifest_policy_file, value}}
 
   defp maybe_override_policy_evaluator(deps, nil), do: deps
 
