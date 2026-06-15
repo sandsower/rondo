@@ -10,7 +10,7 @@
 │
 │   ID       STAGE          PHASE    AGE / TURN   TOKENS     SESSION        EVENT                                  
 │   ───────────────────────────────────────────────────────────────────────────────────────────────────────────────
-│ ● MT-638   retrying       claude   20m 25s / 7      14,200 thre...567890  agent message streaming: waiting on ...
+│ ● MT-638   retrying       agent    20m 25s / 7      14,200 thre...567890  agent message streaming: waiting on ...
 │
 ├─ Backoff queue
 │

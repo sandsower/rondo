@@ -269,12 +269,82 @@ defmodule Rondo.Agent.PiAdapter do
   defp normalize_event(_raw_event), do: nil
 
   defp normalized_message(raw_event) do
-    StreamParser.assistant_text(raw_event) || tool_message(raw_event)
+    tool_message(raw_event) || StreamParser.assistant_text(raw_event)
   end
 
-  defp tool_message(%{"toolName" => tool_name}) when is_binary(tool_name), do: tool_name
-  defp tool_message(%{toolName: tool_name}) when is_binary(tool_name), do: tool_name
+  defp tool_message(%{"toolName" => tool_name} = raw_event) when is_binary(tool_name), do: summarize_tool(tool_name, raw_event)
+  defp tool_message(%{toolName: tool_name} = raw_event) when is_binary(tool_name), do: summarize_tool(tool_name, raw_event)
+  defp tool_message(%{"name" => tool_name} = raw_event) when is_binary(tool_name), do: summarize_tool(tool_name, raw_event)
+  defp tool_message(%{name: tool_name} = raw_event) when is_binary(tool_name), do: summarize_tool(tool_name, raw_event)
+
+  defp tool_message(%{"message" => %{} = message}), do: tool_message(message)
+  defp tool_message(%{message: %{} = message}), do: tool_message(message)
+  defp tool_message(%{"content" => content}) when is_list(content), do: tool_message_from_content(content)
+  defp tool_message(%{content: content}) when is_list(content), do: tool_message_from_content(content)
   defp tool_message(_raw_event), do: nil
+
+  defp tool_message_from_content(content) when is_list(content) do
+    Enum.find_value(content, fn
+      %{"type" => "toolCall", "name" => name} = block when is_binary(name) -> summarize_tool(name, block)
+      %{type: "toolCall", name: name} = block when is_binary(name) -> summarize_tool(name, block)
+      %{"type" => "tool_use", "name" => name} = block when is_binary(name) -> summarize_tool(name, block)
+      %{type: "tool_use", name: name} = block when is_binary(name) -> summarize_tool(name, block)
+      _ -> nil
+    end)
+  end
+
+  defp tool_message_from_content(_content), do: nil
+
+  defp summarize_tool(tool_name, raw_event) do
+    input = tool_input(raw_event)
+    result_text = raw_event |> Map.get("content", Map.get(raw_event, :content)) |> summarize_content_text()
+
+    case {non_empty_map(input), result_text} do
+      {%{} = input, _result_text} -> "#{tool_name}: #{summarize_tool_input(input)}"
+      {nil, result_text} when is_binary(result_text) -> "#{tool_name}: #{result_text}"
+      _ -> tool_name
+    end
+  end
+
+  defp tool_input(raw_event) do
+    Map.get(raw_event, "arguments") ||
+      Map.get(raw_event, :arguments) ||
+      Map.get(raw_event, "args") ||
+      Map.get(raw_event, :args) ||
+      Map.get(raw_event, "input") ||
+      Map.get(raw_event, :input)
+  end
+
+  defp non_empty_map(%{} = map) when map_size(map) > 0, do: map
+  defp non_empty_map(_value), do: nil
+
+  defp summarize_tool_input(input) when is_map(input) do
+    case Enum.find(input, fn {_key, value} -> is_binary(value) and value != "" end) do
+      {key, value} -> "#{key}=#{truncate(value, 160)}"
+      nil -> truncate(inspect(input), 160)
+    end
+  end
+
+  defp summarize_content_text(content) when is_list(content) do
+    content
+    |> Enum.flat_map(fn
+      %{"type" => "text", "text" => text} when is_binary(text) -> [text]
+      %{type: "text", text: text} when is_binary(text) -> [text]
+      _ -> []
+    end)
+    |> Enum.join(" ")
+    |> String.trim()
+    |> blank_to_nil()
+  end
+
+  defp summarize_content_text(content) when is_binary(content), do: blank_to_nil(String.trim(content))
+  defp summarize_content_text(_content), do: nil
+
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil(value), do: value
+
+  defp truncate(value, max) when is_binary(value) and byte_size(value) > max, do: String.slice(value, 0, max) <> "..."
+  defp truncate(value, _max), do: value
 
   defp run_ref_from_cli_result(%{session_id: session_id}, _previous_run_ref) when is_binary(session_id) do
     Adapter.run_ref(@id, session_id, "session_id", true)

@@ -54,6 +54,8 @@ defmodule Rondo.Pi.StreamParser do
 
   def assistant_text(%{"messages" => messages}) when is_list(messages), do: last_assistant_text(messages)
   def assistant_text(%{messages: messages}) when is_list(messages), do: last_assistant_text(messages)
+  def assistant_text(%{"content" => content}) when is_binary(content) or is_list(content), do: content_text(content)
+  def assistant_text(%{content: content}) when is_binary(content) or is_list(content), do: content_text(content)
   def assistant_text(%{} = message), do: assistant_text_from_message(message)
   def assistant_text(_payload), do: nil
 
@@ -66,14 +68,31 @@ defmodule Rondo.Pi.StreamParser do
   defp categorize_type("agent_start", _payload), do: :invocation_started
   defp categorize_type("agent_end", _payload), do: :invocation_completed
   defp categorize_type("turn_start", _payload), do: :turn_started
+  defp categorize_type("message", payload), do: message_type(payload)
   defp categorize_type("message_end", payload), do: message_end_type(payload)
+  defp categorize_type("toolCall", _payload), do: :tool_started
+  defp categorize_type("toolResult", _payload), do: :tool_completed
   defp categorize_type("tool_execution_start", _payload), do: :tool_started
   defp categorize_type("tool_execution_update", _payload), do: :tool_updated
   defp categorize_type("tool_execution_end", _payload), do: :tool_completed
+  defp categorize_type("custom_message", payload), do: custom_message_type(payload)
+  defp categorize_type("model_change", _payload), do: :warning
+  defp categorize_type("thinking_level_change", _payload), do: :warning
   defp categorize_type("auto_retry_start", _payload), do: :warning
   defp categorize_type("auto_retry_end", _payload), do: :warning
   defp categorize_type("extension_error", _payload), do: :warning
   defp categorize_type(_type, _payload), do: :ignore
+
+  defp message_type(payload) do
+    message = Map.get(payload, "message") || Map.get(payload, :message)
+
+    cond do
+      tool_result_message?(message) -> :tool_completed
+      assistant_tool_call_message?(message) -> :tool_started
+      assistant_message?(message) -> :assistant_message
+      true -> :ignore
+    end
+  end
 
   defp message_end_type(payload) do
     message = Map.get(payload, "message") || Map.get(payload, :message)
@@ -85,9 +104,38 @@ defmodule Rondo.Pi.StreamParser do
     end
   end
 
+  defp custom_message_type(payload) do
+    case Map.get(payload, "display", Map.get(payload, :display, true)) do
+      false -> :ignore
+      _ -> :warning
+    end
+  end
+
   defp assistant_message?(%{"role" => "assistant"}), do: true
   defp assistant_message?(%{role: "assistant"}), do: true
   defp assistant_message?(_message), do: false
+
+  defp tool_result_message?(%{"role" => role}) when role in ["tool", "toolResult"], do: true
+  defp tool_result_message?(%{role: role}) when role in ["tool", "toolResult", :tool, :toolResult], do: true
+  defp tool_result_message?(_message), do: false
+
+  defp assistant_tool_call_message?(%{} = message) do
+    assistant_message?(message) and message |> Map.get("content", Map.get(message, :content)) |> content_has_tool_call?()
+  end
+
+  defp assistant_tool_call_message?(_message), do: false
+
+  defp content_has_tool_call?(content) when is_list(content) do
+    Enum.any?(content, fn
+      %{"type" => "toolCall"} -> true
+      %{type: "toolCall"} -> true
+      %{"type" => "tool_use"} -> true
+      %{type: "tool_use"} -> true
+      _ -> false
+    end)
+  end
+
+  defp content_has_tool_call?(_content), do: false
 
   defp usage_payload(event) do
     Map.get(event, "usage") ||

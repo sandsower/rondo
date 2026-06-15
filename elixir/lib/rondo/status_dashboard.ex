@@ -850,12 +850,33 @@ defmodule Rondo.StatusDashboard do
 
   defp infer_phase(running_entry) do
     cond do
-      running_entry.session_id != nil -> "claude"
-      running_entry.last_claude_event in [:claude_starting, :session_started, :assistant, :tool_use, :result] -> "claude"
-      running_entry.last_claude_event != nil -> "claude"
-      true -> "hooks"
+      is_binary(Map.get(running_entry, :adapter)) ->
+        adapter_phase(running_entry.adapter)
+
+      running_entry.session_id != nil ->
+        "agent"
+
+      running_entry.last_claude_event in [
+        :claude_starting,
+        :session_started,
+        :assistant,
+        :assistant_message,
+        :tool_use,
+        :result
+      ] ->
+        "agent"
+
+      running_entry.last_claude_event != nil ->
+        "agent"
+
+      true ->
+        "hooks"
     end
   end
+
+  defp adapter_phase("pi"), do: "pi"
+  defp adapter_phase("claude_code"), do: "claude"
+  defp adapter_phase(adapter) when is_binary(adapter), do: adapter |> String.replace("_", "-") |> truncate_plain(@running_phase_width)
 
   defp compact_session_id(nil), do: "n/a"
   defp compact_session_id(session_id) when not is_binary(session_id), do: "n/a"
@@ -1096,33 +1117,40 @@ defmodule Rondo.StatusDashboard do
   end
 
   @doc false
-  @spec humanize_claude_message(term()) :: String.t()
-  def humanize_claude_message(nil), do: "no claude message yet"
+  @spec humanize_agent_message(term()) :: String.t()
+  def humanize_agent_message(nil), do: "no agent message yet"
 
-  def humanize_claude_message(%{event: event, message: message}) do
+  def humanize_agent_message(message), do: do_humanize_agent_message(message)
+
+  @doc false
+  @spec humanize_claude_message(term()) :: String.t()
+  def humanize_claude_message(nil), do: "no agent message yet"
+  def humanize_claude_message(message), do: do_humanize_agent_message(message)
+
+  defp do_humanize_agent_message(%{event: event, message: message}) do
     payload = unwrap_claude_message_payload(message)
 
     (humanize_claude_event(event, message, payload) || humanize_claude_payload(payload))
     |> truncate(140)
   end
 
-  def humanize_claude_message(%{message: message}) do
+  defp do_humanize_agent_message(%{message: message}) do
     message
     |> unwrap_claude_message_payload()
     |> humanize_claude_payload()
     |> truncate(140)
   end
 
-  def humanize_claude_message(message) do
+  defp do_humanize_agent_message(message) do
     message
     |> unwrap_claude_message_payload()
     |> humanize_claude_payload()
     |> truncate(140)
   end
 
-  defp summarize_message(message), do: humanize_claude_message(message)
+  defp summarize_message(message), do: humanize_agent_message(message)
 
-  defp humanize_claude_event(:claude_starting, _message, _payload), do: "claude cli starting..."
+  defp humanize_claude_event(:claude_starting, _message, _payload), do: "agent cli starting..."
 
   defp humanize_claude_event(:session_started, _message, payload) do
     session_id = map_value(payload, ["session_id", :session_id])
@@ -1179,7 +1207,7 @@ defmodule Rondo.StatusDashboard do
   defp humanize_claude_event(:startup_failed, message, _payload), do: "startup failed: #{format_reason(message)}"
   defp humanize_claude_event(:turn_failed, _message, payload), do: humanize_claude_method("turn/failed", payload)
   defp humanize_claude_event(:turn_cancelled, _message, _payload), do: "turn cancelled"
-  defp humanize_claude_event(:malformed, _message, _payload), do: "malformed JSON event from claude"
+  defp humanize_claude_event(:malformed, _message, _payload), do: "malformed JSON event from agent"
   defp humanize_claude_event(_event, _message, _payload), do: nil
 
   defp unwrap_claude_message_payload(%{} = message) do

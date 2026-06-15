@@ -1703,6 +1703,7 @@ defmodule Rondo.Orchestrator do
 
     {
       Map.merge(running_entry, %{
+        adapter: adapter_for_update(Map.get(running_entry, :adapter), update),
         last_claude_timestamp: timestamp,
         last_claude_message: summarize_claude_update(update),
         session_id: session_id_for_update(running_entry.session_id, update),
@@ -1778,6 +1779,10 @@ defmodule Rondo.Orchestrator do
   defp run_ref_for_update(_existing, %{"run_ref" => run_ref}) when not is_nil(run_ref), do: run_ref
   defp run_ref_for_update(existing, _update), do: existing
 
+  defp adapter_for_update(_existing, %{adapter: adapter}) when is_binary(adapter), do: adapter
+  defp adapter_for_update(_existing, %{"adapter" => adapter}) when is_binary(adapter), do: adapter
+  defp adapter_for_update(existing, _update), do: existing
+
   defp final_report_for_update(existing, update) do
     case Map.get(update, :final_report) || Map.get(update, "final_report") do
       nil -> existing
@@ -1835,10 +1840,15 @@ defmodule Rondo.Orchestrator do
     }
   end
 
-  defp refine_event_label(:assistant, message, %{raw: raw}) when is_map(raw) do
-    content = get_in_any(raw, ["message", "content"])
+  defp refine_event_label(event, message, %{raw: raw}) when event in [:assistant, :assistant_message] and is_map(raw) do
+    content = get_in_any(raw, ["message", "content"]) || Map.get(raw, "content") || Map.get(raw, :content)
     tool_name = extract_first_tool_name(content)
 
+    tool_event_label(tool_name, message)
+  end
+
+  defp refine_event_label(event, message, %{raw: raw}) when event in [:tool_started, :tool_updated, :tool_completed] and is_map(raw) do
+    tool_name = extract_tool_name(raw)
     tool_event_label(tool_name, message)
   end
 
@@ -1848,29 +1858,51 @@ defmodule Rondo.Orchestrator do
     cond do
       linear_event?(tool_name, message) -> :linear
       github_event?(tool_name, message) -> :github
-      tool_name in ["Bash", "Read", "Write", "Edit", "Grep", "Glob", "Agent"] -> tool_atom(tool_name)
+      tool_atom(tool_name) != nil -> tool_atom(tool_name)
       tool_name != nil -> :tool
       is_binary(message) and message != "" -> :assistant
       true -> :assistant
     end
   end
 
-  defp tool_atom("Bash"), do: :bash
-  defp tool_atom("Read"), do: :read
-  defp tool_atom("Write"), do: :write
-  defp tool_atom("Edit"), do: :edit
-  defp tool_atom("Grep"), do: :grep
-  defp tool_atom("Glob"), do: :glob
-  defp tool_atom("Agent"), do: :agent
+  defp tool_atom(tool_name) when is_binary(tool_name) do
+    case String.downcase(tool_name) do
+      "bash" -> :bash
+      "read" -> :read
+      "write" -> :write
+      "edit" -> :edit
+      "grep" -> :grep
+      "glob" -> :glob
+      "agent" -> :agent
+      _ -> nil
+    end
+  end
+
+  defp tool_atom(_tool_name), do: nil
 
   defp extract_first_tool_name(content) when is_list(content) do
     Enum.find_value(content, fn
-      %{"type" => "tool_use", "name" => name} -> name
+      %{"type" => type, "name" => name} when type in ["tool_use", "toolCall"] -> name
+      %{type: type, name: name} when type in ["tool_use", "toolCall"] -> name
       _ -> nil
     end)
   end
 
   defp extract_first_tool_name(_), do: nil
+
+  defp extract_tool_name(raw) when is_map(raw) do
+    nested_content = get_in_any(raw, ["message", "content"])
+    top_level_content = Map.get(raw, "content") || Map.get(raw, :content)
+
+    Map.get(raw, "toolName") ||
+      Map.get(raw, :toolName) ||
+      Map.get(raw, "name") ||
+      Map.get(raw, :name) ||
+      get_in_any(raw, ["message", "toolName"]) ||
+      get_in_any(raw, ["message", "name"]) ||
+      extract_first_tool_name(nested_content) ||
+      extract_first_tool_name(top_level_content)
+  end
 
   defp linear_event?(tool_name, message) do
     tool_name_str = to_string(tool_name)
@@ -1887,7 +1919,9 @@ defmodule Rondo.Orchestrator do
     github_command? =
       String.starts_with?(message_str, "$ gh ") or String.starts_with?(message_str, "$ git ")
 
-    (tool_name == "Bash" and github_command?) or
+    tool_name_str = to_string(tool_name) |> String.downcase()
+
+    (tool_name_str == "bash" and github_command?) or
       (tool_name == "ToolSearch" and String.contains?(message_str, "github"))
   end
 
@@ -1895,12 +1929,21 @@ defmodule Rondo.Orchestrator do
   defp loggable_event?(:unknown, _message), do: false
   defp loggable_event?(:assistant, nil), do: false
   defp loggable_event?(:assistant, ""), do: false
+  defp loggable_event?(:assistant_message, nil), do: false
+  defp loggable_event?(:assistant_message, ""), do: false
   defp loggable_event?(_event, _message), do: true
 
-  defp extract_event_summary(:assistant, %{raw: raw}) when is_map(raw) do
-    raw
-    |> get_in_any(["message", "content"])
-    |> extract_content_text()
+  defp extract_event_summary(event, update) when event in [:assistant, :assistant_message] do
+    Map.get(update, :message) ||
+      case Map.get(update, :raw) do
+        raw when is_map(raw) ->
+          raw
+          |> get_in_any(["message", "content"])
+          |> extract_content_text()
+
+        _ ->
+          nil
+      end
   end
 
   defp extract_event_summary(:tool_use, %{raw: raw}) when is_map(raw) do
@@ -1912,6 +1955,14 @@ defmodule Rondo.Orchestrator do
       tool_name -> tool_name
       true -> nil
     end
+  end
+
+  defp extract_event_summary(event, update) when event in [:tool_started, :tool_updated, :tool_completed] do
+    Map.get(update, :message) || summarize_pi_tool_event(Map.get(update, :raw))
+  end
+
+  defp extract_event_summary(:warning, update) do
+    Map.get(update, :message) || summarize_warning_event(Map.get(update, :raw))
   end
 
   defp extract_event_summary(:result, %{raw: raw}) when is_map(raw) do
@@ -1946,12 +1997,56 @@ defmodule Rondo.Orchestrator do
     ArgumentError -> nil
   end
 
+  defp summarize_pi_tool_event(raw) when is_map(raw) do
+    tool_name = extract_tool_name(raw)
+    content = event_content(raw)
+    input = first_tool_input(content) || event_tool_input(raw)
+    result = extract_content_text(content)
+
+    case {tool_name, input, result} do
+      {tool_name, input, _result} when is_binary(tool_name) and is_map(input) -> summarize_tool_use(tool_name, input)
+      {tool_name, _input, result} when is_binary(tool_name) and is_binary(result) -> "#{tool_name}: #{truncate_text(result, 200)}"
+      {tool_name, _input, _result} when is_binary(tool_name) -> tool_name
+      _ -> nil
+    end
+  end
+
+  defp summarize_pi_tool_event(_raw), do: nil
+
+  defp event_content(raw), do: get_in_any(raw, ["message", "content"]) || Map.get(raw, "content") || Map.get(raw, :content)
+
+  defp event_tool_input(raw) do
+    Map.get(raw, "arguments") ||
+      Map.get(raw, :arguments) ||
+      Map.get(raw, "args") ||
+      Map.get(raw, :args)
+  end
+
+  defp summarize_warning_event(%{"type" => "custom_message", "content" => content}) when is_binary(content), do: content
+  defp summarize_warning_event(%{type: "custom_message", content: content}) when is_binary(content), do: content
+  defp summarize_warning_event(%{"type" => "model_change", "provider" => provider, "modelId" => model}), do: "model changed: #{provider}/#{model}"
+  defp summarize_warning_event(%{"type" => "thinking_level_change", "thinkingLevel" => level}), do: "thinking level: #{level}"
+  defp summarize_warning_event(_raw), do: nil
+
+  defp first_tool_input(content) when is_list(content) do
+    Enum.find_value(content, fn
+      %{"type" => type, "arguments" => input} when type in ["tool_use", "toolCall"] -> input
+      %{"type" => type, "input" => input} when type in ["tool_use", "toolCall"] -> input
+      %{type: type, arguments: input} when type in ["tool_use", "toolCall"] -> input
+      %{type: type, input: input} when type in ["tool_use", "toolCall"] -> input
+      _ -> nil
+    end)
+  end
+
+  defp first_tool_input(_content), do: nil
+
   defp extract_content_text(content) when is_list(content) do
     content
     |> Enum.flat_map(fn
       %{"type" => "text", "text" => text} -> [text]
-      %{"type" => "tool_use", "name" => name, "input" => input} -> [summarize_tool_use(name, input)]
-      %{"type" => "tool_use", "name" => name} -> [name]
+      %{"type" => type, "name" => name, "arguments" => input} when type in ["tool_use", "toolCall"] -> [summarize_tool_use(name, input)]
+      %{"type" => type, "name" => name, "input" => input} when type in ["tool_use", "toolCall"] -> [summarize_tool_use(name, input)]
+      %{"type" => type, "name" => name} when type in ["tool_use", "toolCall"] -> [name]
       %{type: "text", text: text} -> [text]
       _ -> []
     end)

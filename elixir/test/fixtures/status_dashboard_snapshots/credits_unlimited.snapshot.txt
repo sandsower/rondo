@@ -9,7 +9,7 @@
 │
 │   \e[90mID       STAGE          PHASE    AGE / TURN   TOKENS     SESSION        EVENT                                  \e[0m
 │   \e[90m───────────────────────────────────────────────────────────────────────────────────────────────────────────────\e[0m
-│ \e[33m●\e[0m \e[36mMT-777  \e[0m \e[33mrunning       \e[0m \e[33mclaude  \e[0m \e[35m1m 15s / 7  \e[0m \e[33m     3,200\e[0m \e[36mthre...567890 \e[0m \e[33mthread token usage updated (in 90, o...\e[0m
+│ \e[33m●\e[0m \e[36mMT-777  \e[0m \e[33mrunning       \e[0m \e[33magent   \e[0m \e[35m1m 15s / 7  \e[0m \e[33m     3,200\e[0m \e[36mthre...567890 \e[0m \e[33mthread token usage updated (in 90, o...\e[0m
 │
 \e[1m├─ Backoff queue\e[0m
 │
