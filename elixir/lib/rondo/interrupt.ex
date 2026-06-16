@@ -30,6 +30,31 @@ defmodule Rondo.Interrupt do
     |> drop_nil_values()
   end
 
+  @spec blocked_state_unparsed(map()) :: payload()
+  def blocked_state_unparsed(context) when is_map(context) do
+    disposition = value(context, :final_report_disposition) || %{}
+
+    %{
+      "reason" => "blocked_state_unparsed",
+      "state" => "paused",
+      "created_at" => timestamp(context),
+      "question" => "The agent reported a blocked state, but did not emit a valid rondo.final_report/v0 JSON report. How should Rondo proceed?",
+      "last_reported_next_state" => value(disposition, :inferred_next_state),
+      "final_report_status" => value(disposition, :status),
+      "final_report_reason" => value(disposition, :reason),
+      "final_report_excerpt" => value(disposition, :text),
+      "options" => [
+        %{"id" => "resume", "label" => "Resume with operator guidance"},
+        %{"id" => "abort", "label" => "Abort this run"},
+        %{"id" => "defer", "label" => "Keep paused and decide later"}
+      ],
+      "recommendation" => "Resolve the external blocker or provide guidance; do not blindly continue the same blocked turn.",
+      "issue" => issue_payload(value(context, :issue)),
+      "resume" => resume_payload(context)
+    }
+    |> drop_nil_values()
+  end
+
   @spec action_policy_guidance_required(map()) :: payload()
   def action_policy_guidance_required(context) when is_map(context) do
     %{

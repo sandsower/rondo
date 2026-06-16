@@ -317,7 +317,9 @@ defmodule RondoWeb.Presenter do
     %{
       status: Map.get(gate, :status) || Map.get(gate, "status"),
       results_path: Map.get(gate, :results_path) || Map.get(gate, "results_path"),
-      failed: failed
+      failed: failed,
+      reused: Map.get(gate, :reused) || Map.get(gate, "reused"),
+      reused_from: Map.get(gate, :reused_from) || Map.get(gate, "reused_from")
     }
   end
 

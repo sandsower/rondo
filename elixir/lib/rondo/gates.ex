@@ -27,7 +27,9 @@ defmodule Rondo.Gates do
           required(:status) => gate_status(),
           required(:results_path) => Path.t(),
           required(:results) => [gate_result()],
-          optional(:gate_selection) => map()
+          optional(:gate_selection) => map(),
+          optional(:reused) => boolean(),
+          optional(:reused_from) => Path.t()
         }
 
   @spec run([gate()], Path.t(), keyword()) :: {:ok, summary()} | {:error, summary() | term()}
@@ -62,7 +64,9 @@ defmodule Rondo.Gates do
       status: summary.status,
       results_path: summary.results_path,
       results: Enum.map(summary.results, &gate_result_to_json/1),
-      gate_selection: Map.get(summary, :gate_selection)
+      gate_selection: Map.get(summary, :gate_selection),
+      reused: Map.get(summary, :reused),
+      reused_from: Map.get(summary, :reused_from)
     }
     |> drop_nil_values()
   end
@@ -245,7 +249,8 @@ defmodule Rondo.Gates do
         command: Keyword.get(opts, :action_policy_command, Config.action_policy_command()),
         evaluator: Keyword.get(opts, :action_policy_evaluator, &ActionPolicy.evaluate/3),
         mode: Keyword.get(opts, :action_policy_run_mode, Config.action_policy_run_mode()),
-        sandbox_status: Keyword.get_lazy(opts, :sandbox_status, fn -> ActionPolicy.sandbox_status(workspace) end)
+        sandbox_status: Keyword.get_lazy(opts, :sandbox_status, fn -> ActionPolicy.sandbox_status(workspace) end),
+        policy_file: Keyword.get(opts, :action_policy_policy_file, Config.action_policy_policy_file())
       ]
     else
       false

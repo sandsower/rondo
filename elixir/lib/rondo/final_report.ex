@@ -27,6 +27,16 @@ defmodule Rondo.FinalReport do
   @fenced_json_pattern ~r/```json\s*\n(.*?)```/s
 
   @type validation_error :: String.t()
+  @type disposition :: %{
+          required(:action) => :continue | :stop | :pause | :unknown,
+          required(:status) => :valid | :invalid | :missing,
+          required(:reason) => atom(),
+          optional(:next_state) => String.t(),
+          optional(:inferred_next_state) => String.t(),
+          optional(:text) => String.t(),
+          optional(:report) => map(),
+          optional(:errors) => [validation_error()]
+        }
 
   @doc "Returns the final report schema identifier."
   @spec schema() :: String.t()
@@ -58,6 +68,120 @@ defmodule Rondo.FinalReport do
       errors -> {:error, {:invalid, errors}}
     end
   end
+
+  @doc "Classifies a report for continuation decisions without hiding validation errors."
+  @spec disposition(term(), keyword()) :: disposition()
+  def disposition(source, opts \\ []) do
+    active_states = Keyword.get(opts, :active_states, [])
+
+    case extract(source) do
+      {:ok, report} -> valid_disposition(report, active_states)
+      {:error, :missing} -> invalid_disposition(source, :missing, [], :missing_report)
+      {:error, {:invalid, errors}} -> invalid_disposition(source, :invalid, errors, :invalid_report)
+    end
+  end
+
+  defp valid_disposition(report, active_states) do
+    next_state = Map.get(report, "next_state")
+
+    if active_next_state?(next_state, active_states) do
+      %{action: :continue, status: :valid, reason: :active_next_state, next_state: next_state, report: report}
+    else
+      %{action: :stop, status: :valid, reason: :terminal_next_state, next_state: next_state, report: report}
+    end
+  end
+
+  defp invalid_disposition(source, status, errors, fallback_reason) do
+    case textual_next_state(source) do
+      {:ok, "blocked", text} ->
+        %{
+          action: :pause,
+          status: status,
+          reason: :blocked_state_unparsed,
+          inferred_next_state: "blocked",
+          text: text,
+          errors: errors
+        }
+
+      {:ok, inferred_next_state, text} ->
+        %{
+          action: :stop,
+          status: status,
+          reason: :terminal_state_unparsed,
+          inferred_next_state: inferred_next_state,
+          text: text,
+          errors: errors
+        }
+
+      :error ->
+        %{action: :unknown, status: status, reason: fallback_reason, errors: errors}
+    end
+    |> drop_empty_errors()
+  end
+
+  defp active_next_state?(next_state, active_states) when is_binary(next_state) and is_list(active_states) do
+    normalized_next_state = normalize_state(next_state)
+
+    Enum.any?(active_states, fn state -> normalize_state(state) == normalized_next_state end)
+  end
+
+  defp active_next_state?(_next_state, _active_states), do: false
+
+  defp textual_next_state(text) when is_binary(text) do
+    normalized = String.downcase(text)
+
+    cond do
+      Regex.match?(~r/\b"?next_state"?\s*:\s*"?blocked"?\b/i, text) or Regex.match?(~r/^\s*blocked\b/im, text) ->
+        {:ok, "blocked", String.trim(text)}
+
+      Regex.match?(~r/\b"?next_state"?\s*:\s*"?(done|complete|completed|ready_for_review|ready for review)"?\b/i, text) ->
+        {:ok, terminal_state_from_text(normalized), String.trim(text)}
+
+      Regex.match?(~r/\A\s*(done|complete|completed|ready_for_review|ready for review)[.!]?\s*\z/i, text) ->
+        {:ok, terminal_state_from_text(normalized), String.trim(text)}
+
+      true ->
+        :error
+    end
+  end
+
+  defp textual_next_state(source) when is_map(source) do
+    source
+    |> next_state_value()
+    |> textual_next_state_from_value(source)
+  end
+
+  defp textual_next_state(_source), do: :error
+
+  defp textual_next_state_from_value(next_state, source) when is_binary(next_state) do
+    normalized = normalize_state(next_state)
+
+    cond do
+      normalized == "blocked" -> {:ok, "blocked", inspect(source)}
+      terminal_state?(normalized) -> {:ok, terminal_state_from_text(normalized), inspect(source)}
+      true -> :error
+    end
+  end
+
+  defp textual_next_state_from_value(_next_state, _source), do: :error
+
+  defp next_state_value(source), do: Map.get(source, "next_state") || Map.get(source, :next_state)
+
+  defp terminal_state?(state), do: state in ["done", "complete", "completed", "ready_for_review", "ready for review"]
+
+  defp terminal_state_from_text(text) do
+    cond do
+      String.contains?(text, "ready_for_review") or String.contains?(text, "ready for review") -> "ready_for_review"
+      String.contains?(text, "complete") or String.contains?(text, "completed") -> "completed"
+      true -> "done"
+    end
+  end
+
+  defp normalize_state(state) when is_binary(state), do: state |> String.trim() |> String.downcase()
+  defp normalize_state(state), do: state |> to_string() |> normalize_state()
+
+  defp drop_empty_errors(%{errors: []} = disposition), do: Map.delete(disposition, :errors)
+  defp drop_empty_errors(disposition), do: disposition
 
   # Decodes every JSON candidate and prefers the first one that validates as a
   # final report, so unrelated JSON blocks in the agent output cannot shadow a

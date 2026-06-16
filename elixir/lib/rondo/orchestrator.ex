@@ -7,7 +7,18 @@ defmodule Rondo.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias Rondo.{AgentRunner, Config, Interrupt, RunLedger, SideEffectPolicy, StatusDashboard, Tracker, Workspace}
+  alias Rondo.{
+    AgentRunner,
+    Config,
+    FinalReport,
+    Interrupt,
+    RunLedger,
+    SideEffectPolicy,
+    StatusDashboard,
+    Tracker,
+    Workspace
+  }
+
   alias Rondo.Linear.Issue
 
   @timeseries_sample_interval_ms 10_000
@@ -173,40 +184,7 @@ defmodule Rondo.Orchestrator do
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
 
-        state =
-          cond do
-            reason == :normal ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
-
-              state
-              |> archive_running_entry(running_entry, reason)
-              |> complete_issue(issue_id)
-              |> schedule_issue_retry(issue_id, 1, %{
-                identifier: running_entry.identifier,
-                delay_type: :continuation
-              })
-
-            action_policy_guidance_exit?(reason) ->
-              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=action_policy_guidance")
-              pause_running_entry(state, issue_id, running_entry, reason)
-
-            pause_after_gate_failure?(running_entry, reason) ->
-              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=repeated_gate_failure")
-              pause_running_entry(state, issue_id, running_entry, reason)
-
-            true ->
-              Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
-
-              next_attempt = next_retry_attempt_from_running(running_entry)
-
-              state
-              |> archive_running_entry(running_entry, reason)
-              |> schedule_issue_retry(issue_id, next_attempt, %{
-                identifier: running_entry.identifier,
-                error: "agent exited: #{inspect(reason)}",
-                failure_reason: retry_failure_reason(running_entry, reason)
-              })
-          end
+        state = handle_agent_down_reason(state, issue_id, running_entry, reason, session_id)
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
 
@@ -1027,8 +1005,82 @@ defmodule Rondo.Orchestrator do
     previous_failure == :gate_failed and gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate))
   end
 
+  defp handle_agent_down_reason(state, issue_id, running_entry, :normal = reason, session_id) do
+    cond do
+      final_report_pause?(running_entry) ->
+        Logger.warning(
+          "Agent task paused " <>
+            "for issue_id=#{issue_id} session_id=#{session_id} reason=blocked_state_unparsed"
+        )
+
+        pause_running_entry(
+          state,
+          issue_id,
+          running_entry,
+          {:blocked_state_unparsed, final_report_disposition(running_entry)}
+        )
+
+      final_report_stop?(running_entry) ->
+        Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; final report disposition is terminal")
+
+        state
+        |> archive_running_entry(running_entry, reason)
+        |> complete_issue(issue_id)
+
+      true ->
+        Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+        state
+        |> archive_running_entry(running_entry, reason)
+        |> complete_issue(issue_id)
+        |> schedule_issue_retry(issue_id, 1, %{
+          identifier: running_entry.identifier,
+          delay_type: :continuation
+        })
+    end
+  end
+
+  defp handle_agent_down_reason(state, issue_id, running_entry, reason, session_id) do
+    cond do
+      action_policy_guidance_exit?(reason) ->
+        Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=action_policy_guidance")
+        pause_running_entry(state, issue_id, running_entry, reason)
+
+      pause_after_gate_failure?(running_entry, reason) ->
+        Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=repeated_gate_failure")
+        pause_running_entry(state, issue_id, running_entry, reason)
+
+      true ->
+        Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+
+        next_attempt = next_retry_attempt_from_running(running_entry)
+
+        state
+        |> archive_running_entry(running_entry, reason)
+        |> schedule_issue_retry(issue_id, next_attempt, %{
+          identifier: running_entry.identifier,
+          error: "agent exited: #{inspect(reason)}",
+          failure_reason: retry_failure_reason(running_entry, reason)
+        })
+    end
+  end
+
   defp action_policy_guidance_exit?({:action_policy_guidance_required, interrupt}) when is_map(interrupt), do: true
   defp action_policy_guidance_exit?(_reason), do: false
+
+  defp final_report_pause?(running_entry) do
+    match?(%{action: :pause}, final_report_disposition(running_entry))
+  end
+
+  defp final_report_stop?(running_entry) do
+    match?(%{action: :stop}, final_report_disposition(running_entry))
+  end
+
+  defp final_report_disposition(running_entry) when is_map(running_entry) do
+    running_entry
+    |> Map.get(:final_report)
+    |> FinalReport.disposition(active_states: Config.tracker_active_states())
+  end
 
   defp retry_failure_reason(running_entry, reason) do
     if gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate)), do: :gate_failed
@@ -1075,6 +1127,14 @@ defmodule Rondo.Orchestrator do
   end
 
   defp pause_interrupt_for_reason(_running_entry, {:action_policy_guidance_required, interrupt}) when is_map(interrupt), do: interrupt
+
+  defp pause_interrupt_for_reason(running_entry, {:blocked_state_unparsed, disposition}) when is_map(disposition) do
+    running_entry
+    |> interrupt_context()
+    |> Map.put(:final_report_disposition, disposition)
+    |> Interrupt.blocked_state_unparsed()
+  end
+
   defp pause_interrupt_for_reason(running_entry, _reason), do: Interrupt.repeated_gate_failure(interrupt_context(running_entry))
 
   defp interrupt_context(running_entry) do
@@ -1689,6 +1749,9 @@ defmodule Rondo.Orchestrator do
 
     message = extract_event_summary(event, update)
     refined_event = refine_event_label(event, message, update)
+    reported_input = reported_token_value(last_reported_input, token_delta.input_reported, token_delta)
+    reported_output = reported_token_value(last_reported_output, token_delta.output_reported, token_delta)
+    reported_total = reported_token_value(last_reported_total, token_delta.total_reported, token_delta)
 
     event_log =
       if loggable_event?(refined_event, message) do
@@ -1712,9 +1775,9 @@ defmodule Rondo.Orchestrator do
         claude_input_tokens: claude_input_tokens + token_delta.input_tokens,
         claude_output_tokens: claude_output_tokens + token_delta.output_tokens,
         claude_total_tokens: claude_total_tokens + token_delta.total_tokens,
-        claude_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
-        claude_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
-        claude_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
+        claude_last_reported_input_tokens: reported_input,
+        claude_last_reported_output_tokens: reported_output,
+        claude_last_reported_total_tokens: reported_total,
         turn_count: turn_count_for_update(turn_count, running_entry.session_id, update),
         latest_gate: latest_gate_for_update(running_entry, update),
         event_log: event_log
@@ -1789,8 +1852,12 @@ defmodule Rondo.Orchestrator do
     %{
       status: map_value(raw, :status),
       results_path: map_value(raw, :results_path),
-      failed: gate_failed_results(map_value(raw, :results))
+      failed: gate_failed_results(map_value(raw, :results)),
+      reused: map_value(raw, :reused),
+      reused_from: map_value(raw, :reused_from)
     }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
   end
 
   defp latest_gate_for_update(running_entry, _update), do: Map.get(running_entry, :latest_gate)
@@ -2508,24 +2575,96 @@ defmodule Rondo.Orchestrator do
     }
   end
 
+  defp reported_token_value(_previous_reported, current_reported, %{usage_accounting: :cumulative_snapshot}),
+    do: max(current_reported, 0)
+
+  defp reported_token_value(previous_reported, current_reported, _token_delta),
+    do: max(previous_reported, current_reported)
+
   # Claude CLI reports per-message usage on assistant events (not cumulative),
-  # so each event's tokens are added directly to the running total.
-  defp extract_token_delta(_running_entry, %{event: _, timestamp: _} = update) do
+  # so each event's tokens are added directly to the running total. Pi reports
+  # cumulative snapshots and may repeat the last snapshot on multiple events, so
+  # only positive movement from the last accounted snapshot is fresh usage.
+  defp extract_token_delta(running_entry, %{event: _, timestamp: _} = update) do
     usage = extract_token_usage(update)
 
     input = get_token_usage(usage, :input) || 0
     output = get_token_usage(usage, :output) || 0
     total = get_token_usage(usage, :total) || 0
 
+    if cumulative_usage_snapshot?(update) do
+      cumulative_token_delta(running_entry, update, input, output, total)
+    else
+      %{
+        input_tokens: input,
+        output_tokens: output,
+        total_tokens: total,
+        input_reported: input,
+        output_reported: output,
+        total_reported: total,
+        usage_accounting: :event_delta
+      }
+    end
+  end
+
+  defp cumulative_usage_snapshot?(update) when is_map(update) do
+    adapter = Map.get(update, :adapter) || Map.get(update, "adapter")
+    adapter == "pi"
+  end
+
+  defp cumulative_token_delta(running_entry, update, input, output, total) do
+    {previous_input, previous_output, previous_total} = previous_usage_snapshot(running_entry, update)
+
     %{
-      input_tokens: input,
-      output_tokens: output,
-      total_tokens: total,
+      input_tokens: cumulative_counter_delta(input, previous_input),
+      output_tokens: cumulative_counter_delta(output, previous_output),
+      total_tokens: cumulative_counter_delta(total, previous_total),
       input_reported: input,
       output_reported: output,
-      total_reported: total
+      total_reported: total,
+      usage_accounting: :cumulative_snapshot
     }
   end
+
+  defp previous_usage_snapshot(running_entry, update) do
+    if usage_snapshot_continuation?(running_entry, update) do
+      {
+        Map.get(running_entry, :claude_last_reported_input_tokens, 0),
+        Map.get(running_entry, :claude_last_reported_output_tokens, 0),
+        Map.get(running_entry, :claude_last_reported_total_tokens, 0)
+      }
+    else
+      {0, 0, 0}
+    end
+  end
+
+  defp usage_snapshot_continuation?(running_entry, update) do
+    same_session?(Map.get(running_entry, :session_id), Map.get(update, :session_id) || Map.get(update, "session_id")) and
+      same_run_ref?(Map.get(running_entry, :run_ref), Map.get(update, :run_ref) || Map.get(update, "run_ref"))
+  end
+
+  defp same_session?(_existing, nil), do: true
+  defp same_session?(nil, _current), do: true
+  defp same_session?(existing, current), do: existing == current
+
+  defp same_run_ref?(_existing, nil), do: true
+  defp same_run_ref?(nil, _current), do: true
+
+  defp same_run_ref?(existing, current) when is_map(existing) and is_map(current) do
+    run_ref_provider(existing) == run_ref_provider(current)
+  end
+
+  defp same_run_ref?(existing, current), do: existing == current
+
+  defp run_ref_provider(run_ref) when is_map(run_ref) do
+    Map.get(run_ref, :provider_ref) || Map.get(run_ref, "provider_ref")
+  end
+
+  defp cumulative_counter_delta(current, previous) when is_integer(current) and is_integer(previous) and current >= previous,
+    do: current - previous
+
+  defp cumulative_counter_delta(current, _previous) when is_integer(current), do: current
+  defp cumulative_counter_delta(_current, _previous), do: 0
 
   defp extract_token_usage(update) do
     usage = Map.get(update, :usage) || Map.get(update, "usage") || %{}

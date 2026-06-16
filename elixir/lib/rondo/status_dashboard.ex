@@ -657,6 +657,8 @@ defmodule Rondo.StatusDashboard do
     "gates: #{status} #{names}"
   end
 
+  defp gate_summary(%{status: status, reused: true}), do: "gates: #{status} reused"
+  defp gate_summary(%{status: status, reused: "true"}), do: "gates: #{status} reused"
   defp gate_summary(%{status: status}), do: "gates: #{status}"
 
   defp gate_status_color(%{latest_gate: %{status: status}}) when status in [:pass, "pass"], do: @ansi_green

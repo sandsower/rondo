@@ -254,24 +254,35 @@ defmodule Rondo.AgentRunner do
 
   defp run_selected_gates(context, issue, turn_number, gate_selection) do
     {action_policy_provider, gate_selection} = action_policy_provider_for_gates(gate_selection, context)
+    action_policy_policy_file = effective_action_policy_policy_file(context.opts)
+    execution_id = gate_execution_id(turn_number)
 
-    case Gates.run(gate_selection.gates, context.workspace,
-           run_dir: context.run_dir,
-           execution_id: gate_execution_id(turn_number),
-           gate_selection: Map.drop(gate_selection, [:gates, :action_policy_provider]),
-           action_policy: true,
-           action_policy_evaluator: action_policy_evaluator(action_policy_provider, context.opts)
-         ) do
+    case reuse_gate_summary(context, gate_selection, execution_id, action_policy_provider) do
       {:ok, summary} ->
         send_gate_update(context.claude_update_recipient, issue, summary)
         :ok
 
-      {:error, summary} when is_map(summary) ->
-        send_gate_update(context.claude_update_recipient, issue, summary)
-        {:error, {:gate_failed, gate_error_summary(summary)}}
+      :miss ->
+        case Gates.run(gate_selection.gates, context.workspace,
+               run_dir: context.run_dir,
+               execution_id: execution_id,
+               gate_selection: Map.drop(gate_selection, [:gates, :action_policy_provider]),
+               action_policy: true,
+               action_policy_evaluator: action_policy_evaluator(action_policy_provider, context.opts),
+               action_policy_policy_file: action_policy_policy_file
+             ) do
+          {:ok, summary} ->
+            remember_gate_summary(context, gate_selection, summary, action_policy_provider)
+            send_gate_update(context.claude_update_recipient, issue, summary)
+            :ok
 
-      {:error, reason} ->
-        {:error, {:gate_error, reason}}
+          {:error, summary} when is_map(summary) ->
+            send_gate_update(context.claude_update_recipient, issue, summary)
+            {:error, {:gate_failed, gate_error_summary(summary)}}
+
+          {:error, reason} ->
+            {:error, {:gate_error, reason}}
+        end
     end
   end
 
@@ -328,6 +339,17 @@ defmodule Rondo.AgentRunner do
   end
 
   defp action_policy_evaluator(provider, _context_opts), do: ProcessProvider.action_policy_evaluator(provider)
+
+  defp effective_action_policy_policy_file(opts) do
+    Keyword.get(opts, :action_policy_policy_file) ||
+      opts
+      |> Keyword.get(:run_ledger)
+      |> run_ledger_policy_file() ||
+      Config.action_policy_policy_file()
+  end
+
+  defp run_ledger_policy_file(%{policy_file: policy_file}), do: policy_file
+  defp run_ledger_policy_file(_ledger), do: nil
 
   defp context_provider_opts(context_opts) do
     case Keyword.get(context_opts, :source_contract) do
@@ -403,6 +425,141 @@ defmodule Rondo.AgentRunner do
     }
   end
 
+  defp reuse_gate_summary(context, gate_selection, execution_id, action_policy_provider) do
+    with {:ok, fingerprint} <- gate_reuse_fingerprint(context, gate_selection, action_policy_provider),
+         %{summary: previous_summary} <- Map.get(gate_reuse_cache(), fingerprint),
+         true <- Map.get(previous_summary, :status) == :pass,
+         {:ok, summary} <- write_reused_gate_summary(context.run_dir, execution_id, previous_summary) do
+      {:ok, summary}
+    else
+      _ -> :miss
+    end
+  end
+
+  defp remember_gate_summary(context, gate_selection, summary, action_policy_provider) do
+    if Map.get(summary, :status) == :pass do
+      case gate_reuse_fingerprint(context, gate_selection, action_policy_provider) do
+        {:ok, fingerprint} ->
+          Process.put(gate_reuse_cache_key(), Map.put(gate_reuse_cache(), fingerprint, %{summary: summary}))
+
+        {:error, _reason} ->
+          :ok
+      end
+    end
+
+    :ok
+  end
+
+  defp gate_reuse_fingerprint(context, gate_selection, action_policy_provider) do
+    with {:ok, workspace_identity} <- workspace_content_identity(context.workspace) do
+      payload = %{
+        workspace: workspace_identity,
+        gates: gate_selection.gates,
+        gate_selection: Map.drop(gate_selection, [:gates, :action_policy_provider]),
+        action_policy_provider: provider_id(action_policy_provider),
+        action_policy_policy_file: action_policy_file_identity(effective_action_policy_policy_file(context.opts))
+      }
+
+      {:ok, :crypto.hash(:sha256, :erlang.term_to_binary(payload)) |> Base.encode16(case: :lower)}
+    end
+  end
+
+  defp workspace_content_identity(workspace) do
+    case git_workspace_identity(workspace) do
+      {:ok, identity} -> {:ok, identity}
+      {:error, _reason} -> directory_workspace_identity(workspace)
+    end
+  end
+
+  defp git_workspace_identity(workspace) do
+    with {head, 0} <- System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true),
+         {diff, 0} <- System.cmd("git", ["diff", "--binary", "HEAD"], cd: workspace, stderr_to_stdout: true),
+         {status, 0} <- System.cmd("git", ["status", "--porcelain=v1", "--untracked-files=all"], cd: workspace, stderr_to_stdout: true),
+         {untracked, 0} <- System.cmd("git", ["ls-files", "--others", "--exclude-standard", "-z"], cd: workspace, stderr_to_stdout: true) do
+      {:ok,
+       %{
+         kind: :git,
+         head: String.trim(head),
+         diff_sha256: sha256(diff),
+         status_sha256: sha256(status),
+         untracked_files_sha256: untracked_files_sha256(workspace, untracked)
+       }}
+    else
+      other -> {:error, other}
+    end
+  end
+
+  defp directory_workspace_identity(workspace) do
+    if File.dir?(workspace) do
+      entries =
+        workspace
+        |> Path.join("**/*")
+        |> Path.wildcard(match_dot: true)
+        |> Enum.reject(&(File.dir?(&1) or String.contains?(&1, "/.git/") or String.ends_with?(&1, "/.git")))
+        |> Enum.map(fn path -> {Path.relative_to(path, workspace), file_sha256(path)} end)
+        |> Enum.sort()
+
+      {:ok, %{kind: :directory, files_sha256: sha256(:erlang.term_to_binary(entries))}}
+    else
+      {:error, :workspace_missing}
+    end
+  end
+
+  defp write_reused_gate_summary(run_dir, execution_id, previous_summary) do
+    results_path = Path.join(["artifacts/gates", execution_id, "results.json"])
+
+    summary =
+      previous_summary
+      |> Map.put(:results_path, results_path)
+      |> Map.put(:reused, true)
+      |> Map.put(:reused_from, previous_summary.results_path)
+
+    path = Path.join(run_dir, results_path)
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         {:ok, json} <- Jason.encode(Gates.summary_to_json(summary)),
+         :ok <- File.write(path, json) do
+      {:ok, summary}
+    end
+  end
+
+  defp gate_reuse_cache do
+    Process.get(gate_reuse_cache_key(), %{})
+  end
+
+  defp gate_reuse_cache_key, do: :rondo_agent_runner_gate_reuse_cache
+
+  defp action_policy_file_identity(nil), do: nil
+
+  defp action_policy_file_identity(path) when is_binary(path) do
+    expanded_path = Path.expand(path)
+
+    case File.read(expanded_path) do
+      {:ok, contents} -> %{path: expanded_path, sha256: sha256(contents)}
+      {:error, reason} -> %{path: expanded_path, error: reason}
+    end
+  end
+
+  defp action_policy_file_identity(path), do: path
+
+  defp untracked_files_sha256(workspace, untracked_output) when is_binary(untracked_output) do
+    untracked_output
+    |> String.split(<<0>>, trim: true)
+    |> Enum.map(fn relative_path -> {relative_path, file_sha256(Path.join(workspace, relative_path))} end)
+    |> Enum.sort()
+    |> :erlang.term_to_binary()
+    |> sha256()
+  end
+
+  defp sha256(data), do: :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
+
+  defp file_sha256(path) do
+    case File.read(path) do
+      {:ok, contents} -> sha256(contents)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp continue_agent_turns(context, issue, turn_number, effective_run_ref, final_report) do
     case continuation_decision(context, issue, final_report) do
       {:continue, refreshed_issue} when turn_number < context.max_turns ->
@@ -428,15 +585,14 @@ defmodule Rondo.AgentRunner do
   # real issue_state_fetcher); tracker-less envelope/manifest runs stop instead
   # of looping on an unsatisfiable "issue still active" nudge.
   defp continuation_decision(context, issue, final_report) do
-    case FinalReport.extract(final_report) do
-      {:ok, report} ->
-        if active_issue_state?(Map.get(report, "next_state")) do
-          {:continue, issue}
-        else
-          {:done, issue}
-        end
+    case FinalReport.disposition(final_report, active_states: Config.tracker_active_states()) do
+      %{action: :continue, status: :valid} ->
+        {:continue, issue}
 
-      {:error, _missing_or_invalid} ->
+      %{action: action} when action in [:stop, :pause] ->
+        {:done, issue}
+
+      %{action: :unknown} ->
         if tracker_capable?(context) do
           continue_with_issue?(issue, context.issue_state_fetcher)
         else

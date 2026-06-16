@@ -40,6 +40,14 @@ defmodule Rondo.AgentAdapterTest do
 
       send(test_pid, {:fake_adapter_invoked, invocation, prompt, workspace, previous_run_ref})
 
+      if Keyword.get(opts, :fake_touch_workspace?, false) do
+        File.write!(Path.join(workspace, "fake-touch-#{invocation}.txt"), "touch #{invocation}\n")
+      end
+
+      if touch_path = Keyword.get(opts, :fake_touch_workspace_path) do
+        File.write!(Path.join(workspace, touch_path), "touch #{invocation}\n")
+      end
+
       run_ref = Adapter.run_ref(id(), "fake-run-#{invocation}", "fake_run_id", true)
 
       on_event.(
@@ -54,7 +62,7 @@ defmodule Rondo.AgentAdapterTest do
       {:ok,
        Adapter.result(
          run_ref: run_ref,
-         final_report: "fake final #{invocation}",
+         final_report: Keyword.get(opts, :fake_final_report, "fake final #{invocation}"),
          usage: %{input_tokens: invocation, output_tokens: 2, total_tokens: invocation + 2},
          capabilities: capabilities(),
          raw: %{invocation: invocation}
@@ -198,7 +206,18 @@ defmodule Rondo.AgentAdapterTest do
       on_event = Map.fetch!(request, :on_event)
       run_ref = Adapter.run_ref(id(), "first-only", "fake_run_id", false)
       on_event.(Adapter.event(:session_started, adapter: id(), run_ref: run_ref, raw: %{"type" => "fake.started"}))
-      {:ok, Adapter.result(run_ref: run_ref, capabilities: capabilities(), final_report: "done")}
+
+      final_report = %{
+        "schema" => Rondo.FinalReport.schema(),
+        "summary" => "still active",
+        "changed_files" => [],
+        "gates_run" => [],
+        "failures" => [],
+        "risks" => [],
+        "next_state" => "In Progress"
+      }
+
+      {:ok, Adapter.result(run_ref: run_ref, capabilities: capabilities(), final_report: final_report)}
     end
 
     def invoke(%{previous_run_ref: previous_run_ref}) do
@@ -582,6 +601,45 @@ defmodule Rondo.AgentAdapterTest do
       assert previous_run_ref == Adapter.run_ref("fake", "fake-run-1", "fake_run_id", true)
 
       assert_receive {:claude_worker_update, "issue-fake", %{event: :session_started, session_id: nil, raw: %{adapter: "fake"}}}, 500
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner stops same-run continuation on textual blocked final report" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-blocked-final-report-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 2,
+        gates: []
+      )
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-blocked-final",
+        identifier: "MT-BLOCKED-FINAL",
+        title: "Blocked final report",
+        description: "Do not continue obvious blocked prose",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
+                 test_pid: parent,
+                 fake_final_report: "Blocked: external auth is unavailable\nnext_state: blocked"
+               )
+
+      assert_receive {:fake_adapter_invoked, 1, _prompt, _workspace, nil}, 500
+      refute_receive {:fake_adapter_invoked, 2, _prompt, _workspace, _run_ref}, 100
     after
       File.rm_rf(test_root)
     end
@@ -1239,6 +1297,199 @@ defmodule Rondo.AgentAdapterTest do
       assert second_raw.results_path == "artifacts/gates/turn-0002/results.json"
       assert File.read!(Path.join(run_dir, first_raw.results_path)) =~ "turn-0001"
       assert File.read!(Path.join(run_dir, second_raw.results_path)) =~ "turn-0002"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner reuses passing gates on unchanged continuation workspaces" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-gate-reuse-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-GATE-REUSE/run-1")
+      count_file = Path.join(test_root, "gate-count.txt")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 2,
+        gates: [
+          %{
+            name: "proof",
+            command: "count=$(cat #{count_file} 2>/dev/null || echo 0); expr $count + 1 > #{count_file}",
+            timeout_ms: 1_000
+          }
+        ]
+      )
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-gate-reuse",
+        identifier: "MT-GATE-REUSE",
+        title: "Gate reuse proof",
+        description: "Reuse unchanged gate results",
+        state: "In Progress",
+        labels: []
+      }
+
+      fetcher = fn [_issue_id] ->
+        fetch_count = Process.get(:gate_reuse_fetch_count, 0) + 1
+        Process.put(:gate_reuse_fetch_count, fetch_count)
+
+        state = if fetch_count == 1, do: "In Progress", else: "Done"
+        {:ok, [%{issue | state: state}]}
+      end
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 issue_state_fetcher: fetcher,
+                 run_dir: run_dir,
+                 test_pid: parent
+               )
+
+      assert_receive {:claude_worker_update, "issue-gate-reuse", %{event: :gates_completed, raw: first_raw}}, 500
+      assert_receive {:claude_worker_update, "issue-gate-reuse", %{event: :gates_completed, raw: second_raw}}, 500
+
+      assert File.read!(count_file) == "1\n"
+      assert first_raw.results_path == "artifacts/gates/turn-0001/results.json"
+      assert second_raw.results_path == "artifacts/gates/turn-0002/results.json"
+      assert second_raw.reused == true
+      assert second_raw.reused_from == first_raw.results_path
+
+      second_results = run_dir |> Path.join(second_raw.results_path) |> File.read!() |> Jason.decode!()
+      assert second_results["reused"] == true
+      assert second_results["reused_from"] == first_raw.results_path
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner reruns gates when continuation workspace changes" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-gate-no-reuse-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-GATE-NO-REUSE/run-1")
+      count_file = Path.join(test_root, "gate-count.txt")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 2,
+        gates: [
+          %{
+            name: "proof",
+            command: "count=$(cat #{count_file} 2>/dev/null || echo 0); expr $count + 1 > #{count_file}",
+            timeout_ms: 1_000
+          }
+        ]
+      )
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-gate-no-reuse",
+        identifier: "MT-GATE-NO-REUSE",
+        title: "Gate no reuse proof",
+        description: "Rerun gates after workspace changes",
+        state: "In Progress",
+        labels: []
+      }
+
+      fetcher = fn [_issue_id] ->
+        fetch_count = Process.get(:gate_no_reuse_fetch_count, 0) + 1
+        Process.put(:gate_no_reuse_fetch_count, fetch_count)
+
+        state = if fetch_count == 1, do: "In Progress", else: "Done"
+        {:ok, [%{issue | state: state}]}
+      end
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 issue_state_fetcher: fetcher,
+                 run_dir: run_dir,
+                 test_pid: parent,
+                 fake_touch_workspace_path: "fake-touch.txt"
+               )
+
+      assert_receive {:claude_worker_update, "issue-gate-no-reuse", %{event: :gates_completed, raw: first_raw}}, 500
+      assert_receive {:claude_worker_update, "issue-gate-no-reuse", %{event: :gates_completed, raw: second_raw}}, 500
+
+      assert File.read!(count_file) == "2\n"
+      refute Map.get(second_raw, :reused)
+      assert first_raw.results_path == "artifacts/gates/turn-0001/results.json"
+      assert second_raw.results_path == "artifacts/gates/turn-0002/results.json"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner reruns gates when action policy file content changes" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-gate-policy-change-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-GATE-POLICY/run-1")
+      count_file = Path.join(test_root, "gate-count.txt")
+      policy_file = Path.join(test_root, "policy.json")
+      File.mkdir_p!(workspace_root)
+      File.write!(policy_file, ~s({"version":1}))
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 2,
+        action_policy_policy_file: policy_file,
+        gates: [
+          %{
+            name: "proof",
+            command: "count=$(cat #{count_file} 2>/dev/null || echo 0); expr $count + 1 > #{count_file}",
+            timeout_ms: 1_000
+          }
+        ]
+      )
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-gate-policy",
+        identifier: "MT-GATE-POLICY",
+        title: "Gate policy proof",
+        description: "Rerun gates after policy file changes",
+        state: "In Progress",
+        labels: []
+      }
+
+      fetcher = fn [_issue_id] ->
+        fetch_count = Process.get(:gate_policy_fetch_count, 0) + 1
+        Process.put(:gate_policy_fetch_count, fetch_count)
+
+        if fetch_count == 1 do
+          File.write!(policy_file, ~s({"version":2}))
+        end
+
+        state = if fetch_count == 1, do: "In Progress", else: "Done"
+        {:ok, [%{issue | state: state}]}
+      end
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 issue_state_fetcher: fetcher,
+                 run_dir: run_dir,
+                 test_pid: parent
+               )
+
+      assert_receive {:claude_worker_update, "issue-gate-policy", %{event: :gates_completed, raw: first_raw}}, 500
+      assert_receive {:claude_worker_update, "issue-gate-policy", %{event: :gates_completed, raw: second_raw}}, 500
+
+      assert File.read!(count_file) == "2\n"
+      refute Map.get(second_raw, :reused)
+      assert first_raw.results_path == "artifacts/gates/turn-0001/results.json"
+      assert second_raw.results_path == "artifacts/gates/turn-0002/results.json"
     after
       File.rm_rf(test_root)
     end

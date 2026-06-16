@@ -149,6 +149,61 @@ defmodule Rondo.OrchestratorStatusTest do
            }
   end
 
+  test "orchestrator pauses instead of retrying after textual blocked final report" do
+    issue_id = "issue-blocked-final-report"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-BLOCKED-REPORT",
+      title: "Blocked final report",
+      description: "Pause invalid blocked final reports",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-BLOCKED-REPORT"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :BlockedFinalReportOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "session-blocked",
+      run_id: "run-blocked",
+      run_dir: "/tmp/run-blocked",
+      workspace: "/tmp/workspace-blocked",
+      run_ref: %{adapter: "pi", provider_ref: "session-blocked", provider_ref_kind: "session_id", resumable?: true},
+      final_report: "Blocked: external Claude auth is unavailable\nnext_state: blocked",
+      turn_count: 3,
+      latest_gate: nil,
+      started_at: DateTime.utc_now(),
+      event_log: []
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, process_ref, :process, self(), :normal})
+    Process.sleep(50)
+
+    state = :sys.get_state(pid)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert %{interrupt: %{"reason" => "blocked_state_unparsed", "last_reported_next_state" => "blocked"}} = state.paused_interrupts[issue_id]
+  end
+
   test "orchestrator snapshot tracks claude session totals and session id" do
     issue_id = "issue-usage-snapshot"
 
@@ -607,6 +662,89 @@ defmodule Rondo.OrchestratorStatusTest do
     assert snapshot_entry.claude_input_tokens == 200
     assert snapshot_entry.claude_output_tokens == 100
     assert snapshot_entry.claude_total_tokens == 300
+  end
+
+  test "orchestrator token accounting treats repeated pi usage snapshots as cumulative" do
+    issue_id = "issue-pi-cumulative-usage"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PI-USAGE",
+      title: "Pi cumulative usage",
+      description: "Do not double count repeated pi snapshots",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-PI-USAGE"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :PiCumulativeUsageOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "pi-session-1",
+      run_ref: %{adapter: "pi", provider_ref: "pi-session-1", provider_ref_kind: "session_id", resumable?: true},
+      last_claude_message: nil,
+      last_claude_timestamp: nil,
+      last_claude_event: nil,
+      claude_input_tokens: 0,
+      claude_output_tokens: 0,
+      claude_total_tokens: 0,
+      claude_last_reported_input_tokens: 0,
+      claude_last_reported_output_tokens: 0,
+      claude_last_reported_total_tokens: 0,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    for usage <- [
+          %{input_tokens: 100, output_tokens: 20, total_tokens: 120},
+          %{input_tokens: 100, output_tokens: 20, total_tokens: 120},
+          %{input_tokens: 130, output_tokens: 30, total_tokens: 160}
+        ] do
+      send(
+        pid,
+        {:claude_worker_update, issue_id,
+         %{
+           event: :assistant_message,
+           adapter: "pi",
+           session_id: "pi-session-1",
+           run_ref: %{adapter: "pi", provider_ref: "pi-session-1", provider_ref_kind: "session_id", resumable?: true},
+           usage: usage,
+           timestamp: DateTime.utc_now()
+         }}
+      )
+    end
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.claude_input_tokens == 130
+    assert snapshot_entry.claude_output_tokens == 30
+    assert snapshot_entry.claude_total_tokens == 160
+
+    send(pid, {:DOWN, process_ref, :process, self(), :normal})
+    completed_state = :sys.get_state(pid)
+
+    assert completed_state.claude_totals.input_tokens == 130
+    assert completed_state.claude_totals.output_tokens == 30
+    assert completed_state.claude_totals.total_tokens == 160
   end
 
   test "orchestrator token accounting accumulates monotonic thread token usage totals" do
@@ -1324,6 +1462,26 @@ defmodule Rondo.OrchestratorStatusTest do
     assert is_list(disk_config.file)
     assert disk_config.max_no_bytes > 0
     assert disk_config.max_no_files > 0
+  end
+
+  test "status dashboard renders reused gate status in EVENT column" do
+    row =
+      StatusDashboard.format_running_summary_for_test(
+        %{
+          identifier: "MT-GATE-REUSED",
+          state: "In Progress",
+          session_id: "session-gate-reused",
+          last_claude_event: :gates_completed,
+          last_claude_message: %{event: :gates_completed},
+          latest_gate: %{status: :pass, reused: true, reused_from: "artifacts/gates/turn-0001/results.json"},
+          runtime_seconds: 12,
+          turn_count: 2,
+          claude_total_tokens: 42
+        },
+        140
+      )
+
+    assert row =~ "gates: pass reused"
   end
 
   test "status dashboard renders latest gate status in EVENT column" do
