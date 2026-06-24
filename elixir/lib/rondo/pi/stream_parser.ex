@@ -54,8 +54,13 @@ defmodule Rondo.Pi.StreamParser do
 
   def assistant_text(%{"messages" => messages}) when is_list(messages), do: last_assistant_text(messages)
   def assistant_text(%{messages: messages}) when is_list(messages), do: last_assistant_text(messages)
-  def assistant_text(%{"content" => content}) when is_binary(content) or is_list(content), do: content_text(content)
-  def assistant_text(%{content: content}) when is_binary(content) or is_list(content), do: content_text(content)
+
+  def assistant_text(%{"type" => "custom_message", "content" => content}) when is_binary(content) or is_list(content),
+    do: content_text(content)
+
+  def assistant_text(%{type: "custom_message", content: content}) when is_binary(content) or is_list(content),
+    do: content_text(content)
+
   def assistant_text(%{} = message), do: assistant_text_from_message(message)
   def assistant_text(_payload), do: nil
 

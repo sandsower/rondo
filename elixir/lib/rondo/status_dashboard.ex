@@ -875,7 +875,6 @@ defmodule Rondo.StatusDashboard do
   end
 
   defp adapter_phase("pi"), do: "pi"
-  defp adapter_phase("claude_code"), do: "claude"
   defp adapter_phase(adapter) when is_binary(adapter), do: adapter |> String.replace("_", "-") |> truncate_plain(@running_phase_width)
 
   defp compact_session_id(nil), do: "n/a"

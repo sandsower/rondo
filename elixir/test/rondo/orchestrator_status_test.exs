@@ -1352,17 +1352,17 @@ defmodule Rondo.OrchestratorStatusTest do
         identifier: "MT-PI",
         state: "In Progress",
         adapter: "pi",
-        session_id: "pi-session-123456",
+        session_id: "agent-session-123456",
         runtime_seconds: 15,
         turn_count: 1,
         claude_total_tokens: 42,
         last_claude_event: :assistant_message,
-        last_claude_message: %{event: :assistant_message, message: "Working from pi"}
+        last_claude_message: %{event: :assistant_message, message: "Working"}
       })
 
     plain = String.replace(rendered, ~r/\e\[[0-9;]*m/, "")
-    assert plain =~ "pi"
-    assert plain =~ "Working from pi"
+    assert plain =~ ~r/MT-PI\s+In Progress\s+pi\s+/
+    assert plain =~ "Working"
     refute plain =~ "claude"
   end
 

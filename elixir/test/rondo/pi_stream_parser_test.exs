@@ -75,4 +75,12 @@ defmodule Rondo.Pi.StreamParserTest do
     assert event.event_type == :warning
     assert StreamParser.assistant_text(event) == "[vault] Project: rondo"
   end
+
+  test "does not extract assistant text from top-level tool results" do
+    line = ~s({"type":"toolResult","content":[{"type":"text","text":"tool output"}]})
+
+    assert {:ok, event} = StreamParser.parse_line(line)
+    assert event.event_type == :tool_completed
+    assert StreamParser.assistant_text(event) == nil
+  end
 end
