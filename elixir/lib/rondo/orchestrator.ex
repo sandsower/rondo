@@ -1216,12 +1216,13 @@ defmodule Rondo.Orchestrator do
   defp normalize_run_ref(run_ref) when is_map(run_ref) do
     provider_ref = map_value(run_ref, :provider_ref)
     provider_ref_kind = map_value(run_ref, :provider_ref_kind)
+    resumable? = Map.get(run_ref, :resumable?, Map.get(run_ref, "resumable?"))
 
     cond do
       !is_binary(provider_ref) or String.trim(provider_ref) == "" ->
         {:error, :invalid_resume_ref}
 
-      map_value(run_ref, :resumable?) == false ->
+      resumable? == false ->
         {:error, :resume_ref_not_resumable}
 
       true ->

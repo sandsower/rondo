@@ -284,12 +284,17 @@ defmodule RondoWeb.Presenter do
   end
 
   defp guidance_entry?(entry) when is_map(entry) do
-    entry
-    |> Map.get(:interrupt, Map.get(entry, "interrupt", %{}))
-    |> payload_value(:reason)
-    |> case do
-      reason when is_binary(reason) and reason != "" -> true
-      _ -> false
+    interrupt = Map.get(entry, :interrupt, Map.get(entry, "interrupt", %{}))
+
+    if is_map(interrupt) do
+      interrupt
+      |> payload_value(:reason)
+      |> case do
+        reason when is_binary(reason) and reason != "" -> true
+        _ -> false
+      end
+    else
+      false
     end
   end
 

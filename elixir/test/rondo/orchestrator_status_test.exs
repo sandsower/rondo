@@ -2754,6 +2754,74 @@ defmodule Rondo.OrchestratorStatusTest do
     assert GenServer.call(pid, :snapshot).paused == []
   end
 
+  test "freeform guidance rejects non-resumable paused run refs" do
+    workspace_root = tmp_dir("orchestrator-operator-guidance-nonresumable")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: fake_claude_script(workspace_root, "nonresumable-session", 0),
+      max_turns: 1
+    )
+
+    issue = %Issue{
+      id: "issue-nonresumable-guidance",
+      identifier: "MT-NONRESUME-GUIDE",
+      title: "Non-resumable guidance test",
+      description: "Should not resume non-resumable refs",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-NONRESUME-GUIDE"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :NonResumableGuidanceOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    paused_entry = %{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      issue: issue,
+      state: issue.state,
+      session_id: "paused-session",
+      run_id: "run-paused",
+      run_dir: nil,
+      workspace: Path.join(workspace_root, issue.identifier),
+      paused_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      retry_attempt: 1,
+      latest_gate: nil,
+      interrupt: %{
+        "reason" => "repeated_gate_failure",
+        "resume" => %{
+          "run_ref" => %{
+            adapter: "claude_code",
+            provider_ref: "paused-session",
+            provider_ref_kind: "session_id",
+            resumable?: false
+          }
+        }
+      },
+      tracker_visibility: "known",
+      ledger: nil
+    }
+
+    :sys.replace_state(pid, fn state ->
+      %{state | paused_interrupts: %{issue.id => paused_entry}, claimed: MapSet.new([issue.id])}
+    end)
+
+    assert {:error, {:guidance_resume_failed, :resume_ref_not_resumable}} =
+             Orchestrator.submit_guidance(orchestrator_name, issue.id, "Please continue.")
+
+    assert [%{issue_id: "issue-nonresumable-guidance"}] = GenServer.call(pid, :snapshot).paused
+    assert GenServer.call(pid, :snapshot).running == []
+  end
+
   test "approve_once guidance revalidates tracker transition before resume" do
     workspace_root = tmp_dir("orchestrator-transition-policy-stale")
 

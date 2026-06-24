@@ -298,10 +298,10 @@ defmodule RondoWeb.DashboardLive do
                           class="subtle-button"
                           phx-click="submit_guidance"
                           phx-value-issue-id={entry.issue_id}
-                          phx-value-guidance={quick_guidance_response(entry).guidance}
+                          phx-value-guidance={quick_guidance_response(entry).guidance || quick_guidance_response(entry).id}
                           onclick="event.stopPropagation()"
                         >
-                          <%= quick_guidance_response(entry).label %>
+                          <%= quick_guidance_response(entry).label || quick_guidance_response(entry).id %>
                         </button>
                       <% end %>
                     </td>
