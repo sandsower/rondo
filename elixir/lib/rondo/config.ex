@@ -942,8 +942,6 @@ defmodule Rondo.Config do
     |> put_if_present(:defaults, normalize_model_routing_map(Map.get(section, "defaults")))
   end
 
-  defp extract_model_routing_options(_section), do: %{}
-
   defp normalize_model_routing_tiers(tiers) when is_map(tiers) do
     tiers
     |> Enum.reduce(%{}, fn {tier, candidates}, acc ->
