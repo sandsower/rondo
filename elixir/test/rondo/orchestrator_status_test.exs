@@ -2668,6 +2668,92 @@ defmodule Rondo.OrchestratorStatusTest do
     end)
   end
 
+  test "freeform guidance resumes paused run with operator prompt and previous run ref" do
+    workspace_root = tmp_dir("orchestrator-operator-guidance-resume")
+    trace_file = Path.join(workspace_root, "claude-resume.trace")
+    claude_script = Path.join(workspace_root, "fake-claude-guidance.sh")
+
+    File.write!(claude_script, """
+    #!/bin/sh
+    printf '%s\n' "$@" > #{trace_file}
+    echo '{"type":"system","subtype":"init","session_id":"operator-session","tools":[]}'
+    echo '{"type":"result","subtype":"success","session_id":"operator-session","usage":{"input_tokens":1,"output_tokens":1}}'
+    """)
+
+    File.chmod!(claude_script, 0o755)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: claude_script,
+      max_turns: 1
+    )
+
+    issue = %Issue{
+      id: "issue-operator-guidance",
+      identifier: "MT-OP-GUIDE",
+      title: "Operator guidance test",
+      description: "Should resume with operator guidance",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-OP-GUIDE"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :OperatorGuidanceOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    paused_entry = %{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      issue: issue,
+      state: issue.state,
+      session_id: "paused-session",
+      run_id: "run-paused",
+      run_dir: nil,
+      workspace: Path.join(workspace_root, issue.identifier),
+      paused_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      retry_attempt: 1,
+      latest_gate: nil,
+      interrupt: %{
+        "reason" => "repeated_gate_failure",
+        "resume" => %{
+          "run_ref" => %{
+            "adapter" => "claude_code",
+            "provider_ref" => "paused-session",
+            "provider_ref_kind" => "session_id",
+            "resumable?" => true
+          }
+        }
+      },
+      tracker_visibility: "known",
+      ledger: nil
+    }
+
+    :sys.replace_state(pid, fn state ->
+      %{state | paused_interrupts: %{issue.id => paused_entry}, claimed: MapSet.new([issue.id])}
+    end)
+
+    assert {:ok, %{status: :resumed}} =
+             Orchestrator.submit_guidance(orchestrator_name, issue.id, "Please reuse the existing fix and add the missing regression test.")
+
+    trace =
+      wait_until(fn ->
+        if File.exists?(trace_file), do: File.read!(trace_file)
+      end)
+
+    assert trace =~ "--resume\npaused-session"
+    assert trace =~ "Operator guidance for paused run"
+    assert trace =~ "Please reuse the existing fix and add the missing regression test."
+    assert GenServer.call(pid, :snapshot).paused == []
+  end
+
   test "approve_once guidance revalidates tracker transition before resume" do
     workspace_root = tmp_dir("orchestrator-transition-policy-stale")
 

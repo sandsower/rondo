@@ -525,6 +525,49 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  test "agent runner resumes a paused run with operator guidance and initial run ref" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-operator-guidance-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1
+      )
+
+      parent = self()
+      previous_run_ref = Adapter.run_ref("fake", "paused-run-1", "fake_run_id", true)
+
+      issue = %Issue{
+        id: "issue-guidance",
+        identifier: "MT-GUIDANCE",
+        title: "Operator guidance proof",
+        description: "Exercise paused run resume",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 initial_run_ref: previous_run_ref,
+                 operator_guidance: "Use the existing patch and add the missing test.",
+                 issue_state_fetcher: &AgentRunner.no_tracker_issue_state_fetcher/1,
+                 test_pid: parent
+               )
+
+      {:ok, workspace} = Rondo.PathSafety.canonicalize(Path.join(workspace_root, "MT-GUIDANCE"))
+      assert_receive {:fake_adapter_invoked, 1, prompt, ^workspace, ^previous_run_ref}, 500
+      assert prompt =~ "Operator guidance"
+      assert prompt =~ "Use the existing patch and add the missing test."
+      refute prompt =~ "You are an agent for this repository."
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner can use a fake adapter for first invocation, continuation, and events" do
     test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-fake-adapter-#{System.unique_integer([:positive])}")
 

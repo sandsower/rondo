@@ -100,6 +100,11 @@ defmodule Rondo.PresenterTest do
 
     payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
     assert payload.counts.paused == 1
+    assert payload.counts.needs_guidance == 1
+    assert [guidance] = payload.needs_guidance
+    assert guidance.issue_identifier == "MT-PAUSED"
+    assert guidance.interrupt.reason == "repeated_gate_failure"
+    assert guidance.tokens.total_tokens == 0
     assert [paused] = payload.paused
     assert paused.issue_identifier == "MT-PAUSED"
     assert paused.interrupt.reason == "repeated_gate_failure"
