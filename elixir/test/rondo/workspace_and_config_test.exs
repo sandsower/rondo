@@ -773,6 +773,20 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Config.process_provider() == %{kind: "native", required: false, artifact_path: nil}
     assert Config.process_provider_kind() == "native"
     assert Config.process_provider_required?() == false
+    assert Config.model_routing() == %{tiers: %{}, floor: %{}, defaults: %{}}
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      model_routing: %{
+        "tiers" => %{"light" => [%{"adapter" => "pi", "model" => "openai/gpt-4o-mini"}]},
+        "floor" => %{"tier" => "standard", "mode" => "require"}
+      }
+    )
+
+    assert Config.model_routing() == %{
+             tiers: %{light: [%{adapter: "pi", model: "openai/gpt-4o-mini"}]},
+             floor: %{tier: "standard", mode: "require"},
+             defaults: %{}
+           }
 
     write_workflow_file!(Workflow.workflow_file_path(), process_provider_required: true)
     assert Config.process_provider() == %{kind: "native", required: true, artifact_path: nil}

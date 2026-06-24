@@ -591,6 +591,47 @@ defmodule Rondo.Claude.CLITest do
     end
   end
 
+  test "ClaudeCLI.run uses per-run model before configured model" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-claude-cli-run-model-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-113")
+      claude_binary = Path.join(test_root, "fake-claude")
+      trace_file = Path.join(test_root, "claude-run-model.trace")
+      File.mkdir_p!(workspace)
+
+      File.write!(claude_binary, """
+      #!/bin/sh
+      printf 'ARGV:%s\n' "$*" > "#{trace_file}"
+      echo '{"type":"system","subtype":"init","session_id":"run-model-session","tools":[]}'
+      echo '{"type":"result","subtype":"success","session_id":"run-model-session","usage":{"input_tokens":20,"output_tokens":10}}'
+      exit 0
+      """)
+
+      File.chmod!(claude_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        claude_command: claude_binary,
+        claude_model: "configured-model"
+      )
+
+      assert {:ok, result} = ClaudeCLI.run("Use routed model", workspace, model: "per-run-model")
+      assert result.session_id == "run-model-session"
+
+      trace = File.read!(trace_file)
+      assert trace =~ "--model per-run-model"
+      refute trace =~ "--model configured-model"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "ClaudeCLI.resume includes configured model and allowed tools" do
     test_root =
       Path.join(

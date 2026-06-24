@@ -165,6 +165,15 @@ defmodule Rondo.Config do
                                  artifact_path: [type: {:or, [:string, nil]}, default: nil]
                                ]
                              ],
+                             model_routing: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 tiers: [type: :map, default: %{}],
+                                 floor: [type: :map, default: %{}],
+                                 defaults: [type: :map, default: %{}]
+                               ]
+                             ],
                              hooks: [
                                type: :map,
                                default: %{},
@@ -245,6 +254,7 @@ defmodule Rondo.Config do
           required: boolean(),
           artifact_path: Path.t() | nil
         }
+  @type model_routing :: map()
 
   @spec current_workflow() :: {:ok, workflow_payload()} | {:error, term()}
   def current_workflow do
@@ -513,6 +523,11 @@ defmodule Rondo.Config do
   @spec process_provider_artifact_path() :: Path.t() | nil
   def process_provider_artifact_path do
     get_in(validated_workflow_options(), [:process_provider, :artifact_path])
+  end
+
+  @spec model_routing() :: model_routing()
+  def model_routing do
+    get_in(validated_workflow_options(), [:model_routing]) || %{}
   end
 
   @spec pi_turn_timeout_ms() :: pos_integer()
@@ -833,6 +848,7 @@ defmodule Rondo.Config do
       pi: extract_pi_options(section_map(config, "pi")),
       action_policy: extract_action_policy_options(section_map(config, "action_policy")),
       process_provider: extract_process_provider_options(section_map(config, "process_provider")),
+      model_routing: extract_model_routing_options(section_map(config, "model_routing")),
       hooks: extract_hooks_options(section_map(config, "hooks")),
       gates: extract_gates_options(Map.get(config, "gates")),
       clean_eval: extract_clean_eval_options(section_map(config, "clean_eval")),
@@ -919,6 +935,56 @@ defmodule Rondo.Config do
     |> put_if_present(:artifact_path, binary_value(Map.get(section, "artifact_path")))
   end
 
+  defp extract_model_routing_options(section) when is_map(section) do
+    %{}
+    |> put_if_present(:tiers, normalize_model_routing_tiers(Map.get(section, "tiers")))
+    |> put_if_present(:floor, normalize_model_routing_map(Map.get(section, "floor")))
+    |> put_if_present(:defaults, normalize_model_routing_map(Map.get(section, "defaults")))
+  end
+
+  defp extract_model_routing_options(_section), do: %{}
+
+  defp normalize_model_routing_tiers(tiers) when is_map(tiers) do
+    tiers
+    |> Enum.reduce(%{}, fn {tier, candidates}, acc ->
+      case normalize_tier_key(tier) do
+        nil -> acc
+        normalized -> Map.put(acc, normalized, normalize_model_routing_candidates(candidates))
+      end
+    end)
+  end
+
+  defp normalize_model_routing_tiers(_tiers), do: :omit
+
+  defp normalize_model_routing_candidates(candidates) when is_list(candidates), do: Enum.map(candidates, &normalize_model_routing_map/1)
+  defp normalize_model_routing_candidates(_candidates), do: []
+
+  defp normalize_model_routing_map(map) when is_map(map) do
+    map
+    |> Enum.reduce(%{}, fn {key, value}, acc ->
+      case normalize_model_routing_key(key) do
+        nil -> acc
+        normalized -> Map.put(acc, normalized, value)
+      end
+    end)
+  end
+
+  defp normalize_model_routing_map(_map), do: :omit
+
+  defp normalize_tier_key(value) when value in ["light", :light], do: :light
+  defp normalize_tier_key(value) when value in ["standard", :standard], do: :standard
+  defp normalize_tier_key(value) when value in ["heavy", :heavy], do: :heavy
+  defp normalize_tier_key(value) when value in ["frontier", :frontier], do: :frontier
+  defp normalize_tier_key(_value), do: nil
+
+  defp normalize_model_routing_key(value) when value in ["adapter", :adapter], do: :adapter
+  defp normalize_model_routing_key(value) when value in ["agent_adapter", :agent_adapter], do: :agent_adapter
+  defp normalize_model_routing_key(value) when value in ["model", :model], do: :model
+  defp normalize_model_routing_key(value) when value in ["tier", :tier], do: :tier
+  defp normalize_model_routing_key(value) when value in ["mode", :mode], do: :mode
+  defp normalize_model_routing_key(value) when value in ["required", :required], do: :required
+  defp normalize_model_routing_key(_value), do: nil
+
   defp tools_list_value(values) when is_list(values) do
     filtered = Enum.filter(values, &is_binary/1) |> Enum.reject(&(String.trim(&1) == ""))
     if filtered == [], do: :omit, else: filtered
@@ -999,6 +1065,7 @@ defmodule Rondo.Config do
       validate_section_map(config, "pi"),
       validate_section_map(config, "action_policy"),
       validate_section_map(config, "process_provider"),
+      validate_section_map(config, "model_routing"),
       validate_section_map(config, "hooks"),
       validate_gates_field(gates),
       validate_section_map(config, "clean_eval"),

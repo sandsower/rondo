@@ -24,7 +24,7 @@ defmodule Rondo.ProcessProvider.Beislid do
       gate_selection: "fixture",
       guide_selection: "deferred_metadata",
       action_policy: "fixture_decision",
-      model_routing_hints: "unsupported_required_hints",
+      model_routing_hints: "deferred_runtime_resolution",
       proof_requirements: "fixture_metadata",
       probes: "beislid"
     }
@@ -45,8 +45,7 @@ defmodule Rondo.ProcessProvider.Beislid do
 
   @impl true
   def select_gates(opts \\ []) do
-    with {:ok, artifact} <- load_artifact(opts),
-         :ok <- ensure_no_blocking_required_constraints(artifact) do
+    with {:ok, artifact} <- load_artifact(opts) do
       gates = Enum.map(Map.get(artifact, :gates, []), &gate_definition/1)
 
       {:ok,
@@ -310,9 +309,9 @@ defmodule Rondo.ProcessProvider.Beislid do
       gate_selection: :ok,
       guide_selection: guide_status(artifact),
       proof_requirements: proof_status(artifact),
+      model_routing_hints: model_routing_status(artifact),
       action_policy: action_policy_status(artifact)
     }
-    |> maybe_put_blocking(artifact)
   end
 
   defp guide_status(%{guides: []}), do: :unsupported
@@ -324,30 +323,13 @@ defmodule Rondo.ProcessProvider.Beislid do
   defp action_policy_status(%{action_policy: %{"decision" => decision}}) when decision in ["allow", "ask", "deny"], do: :ok
   defp action_policy_status(%{action_policy: policy}) when map_size(policy) == 0, do: :missing
 
+  defp model_routing_status(%{model_routing_hints: hints}) when is_map(hints) and map_size(hints) > 0, do: :deferred
+  defp model_routing_status(_artifact), do: :unsupported
+
   defp artifact_action_policy_decision(%{action_policy: %{"decision" => decision}}) when decision in ["allow", "ask", "deny"], do: {:ok, decision}
   defp artifact_action_policy_decision(_artifact), do: {:error, :action_policy_unavailable}
 
-  defp maybe_put_blocking(checks, artifact) do
-    if required_model_hint?(artifact) do
-      Map.put(checks, :blocking, %{model_routing_hints: :unsupported_required_capability})
-    else
-      checks
-    end
-  end
-
-  defp ensure_no_blocking_required_constraints(artifact) do
-    if required_model_hint?(artifact) do
-      {:error, {:unsupported_required_capability, :model_routing_hints}}
-    else
-      :ok
-    end
-  end
-
   defp blocking_checks?(checks), do: map_size(Map.get(checks, :blocking, %{})) > 0
-
-  defp required_model_hint?(%{model_routing_hints: hints}) when is_map(hints) do
-    Map.get(hints, "required") == true or Map.get(hints, "mode") == "require"
-  end
 
   defp source_contract_process_provider_path(source_contract) when is_map(source_contract) do
     source_contract

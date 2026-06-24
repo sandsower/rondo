@@ -228,7 +228,8 @@ Notes:
 - When `agent.adapter: pi`, `pi.command` launches `pi --mode json`; `pi.turn_timeout_ms` and
   `pi.stall_timeout_ms` mirror the Claude timeout settings. Resume uses pi `--session <id>` when a
   stable session id is available; usage/rate-limit/sandbox metadata is best-effort/degraded based on
-  pi JSON-mode events.
+  pi JSON-mode events. Per-run model routing passes `--model <id>` to pi when a resolved model is
+  available; the pi adapter probe reports whether the installed CLI advertises `--model` support.
 - `action_policy.command` points to the Beislið CLI used for deterministic action-risk evaluation.
   Default: `beislid`.
 - `action_policy.run_mode` selects Beislið's policy mode. Supported values: `supervised-auto` and
@@ -261,7 +262,16 @@ Notes:
 - `process_provider.required` controls provider failure behavior. Default: `false`. Optional provider
   gate-selection failures can warn and fall back to native flat gates only when doing so does not
   ignore loaded approved required constraints; required provider failures stop the run clearly before
-  agent invocation or gate execution.
+  agent invocation or gate execution. Beislið `model_routing_hints` are deferred to Rondo's runtime
+  resolver: `mode: require` no longer blocks at provider probe/gate-selection time unless no concrete
+  candidate can be honored before agent invocation.
+- `model_routing` optionally overrides the built-in tier map and repo floor used by per-run model
+  resolution. Hints from execution request manifests (`model_routing`) outrank Beislið process
+  artifacts, which outrank repo routing/global config. Supported provider-neutral tiers are `light`,
+  `standard`, `heavy`, and `frontier`; built-in defaults map them to Claude Code aliases `haiku`,
+  `sonnet`, `opus`, and `opus`. A repo floor such as `floor: {tier: standard, mode: require}` raises
+  lower requested tiers to the floor and records status `fallback` with an explanatory reason. Resolved
+  routing is passed to adapters per run and persisted under `agent.model_routing` in the run ledger.
 - `agent.max_turns` caps how many back-to-back agent turns Rondo will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Rondo uses a default prompt template that includes the issue
@@ -322,6 +332,14 @@ process_provider:
   kind: native
   required: false
   artifact_path: null
+model_routing:
+  tiers:
+    light:
+      - adapter: pi
+        model: openai/gpt-4o-mini
+  floor:
+    tier: standard
+    mode: require
 ```
 
 For early Beislið integration scaffolding, use an explicit approved artifact:
@@ -409,9 +427,9 @@ are set):
 - `RONDO_E2E_CLAUDE_COMMAND` — superseded by `RONDO_E2E_AGENT_COMMAND`
 - `RONDO_E2E_CLAUDE_MAX_TURNS` — superseded by `RONDO_E2E_AGENT_MAX_TURNS`
 
-> **Note on pi model selection**: when `RONDO_E2E_AGENT_ADAPTER=pi`, the model used by
-> pi is whatever your pi installation is configured for. There is currently no env var
-> to select the model from the E2E side — that plumbing lands in RON-30.
+> **Note on pi model selection**: when `RONDO_E2E_AGENT_ADAPTER=pi`, per-run model routing can
+> pass a resolved model to pi via `--model`. If no routing hint/config is present, pi uses whatever
+> your pi installation is configured for.
 
 What it does and mutates:
 

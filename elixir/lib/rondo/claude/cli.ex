@@ -21,7 +21,7 @@ defmodule Rondo.Claude.CLI do
   """
   @spec run(String.t(), Path.t(), keyword()) :: {:ok, run_result()} | {:error, term()}
   def run(prompt, workspace, opts \\ []) do
-    args = build_first_turn_args(prompt, workspace)
+    args = build_first_turn_args(prompt, workspace, opts)
     execute(args, workspace, opts)
   end
 
@@ -30,7 +30,7 @@ defmodule Rondo.Claude.CLI do
   """
   @spec resume(String.t(), String.t(), Path.t(), keyword()) :: {:ok, run_result()} | {:error, term()}
   def resume(session_id, prompt, workspace, opts \\ []) do
-    args = build_resume_args(session_id, prompt, workspace)
+    args = build_resume_args(session_id, prompt, workspace, opts)
     execute(args, workspace, opts)
   end
 
@@ -154,7 +154,7 @@ defmodule Rondo.Claude.CLI do
     end
   end
 
-  defp build_first_turn_args(prompt, _workspace) do
+  defp build_first_turn_args(prompt, _workspace, opts) do
     base = [
       "-p",
       prompt,
@@ -169,11 +169,11 @@ defmodule Rondo.Claude.CLI do
 
     base
     |> maybe_add_flag(Config.claude_dangerously_skip_permissions?(), "--dangerously-skip-permissions")
-    |> maybe_add_option(Config.claude_model(), "--model")
+    |> maybe_add_option(Keyword.get(opts, :model, Config.claude_model()), "--model")
     |> maybe_add_allowed_tools(Config.claude_allowed_tools())
   end
 
-  defp build_resume_args(session_id, prompt, _workspace) do
+  defp build_resume_args(session_id, prompt, _workspace, opts) do
     base = [
       "--resume",
       session_id,
@@ -190,7 +190,7 @@ defmodule Rondo.Claude.CLI do
 
     base
     |> maybe_add_flag(Config.claude_dangerously_skip_permissions?(), "--dangerously-skip-permissions")
-    |> maybe_add_option(Config.claude_model(), "--model")
+    |> maybe_add_option(Keyword.get(opts, :model, Config.claude_model()), "--model")
     |> maybe_add_allowed_tools(Config.claude_allowed_tools())
   end
 

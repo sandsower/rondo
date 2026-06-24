@@ -21,7 +21,7 @@ defmodule Rondo.Pi.CLI do
   """
   @spec run(String.t(), Path.t(), keyword()) :: {:ok, run_result()} | {:error, term()}
   def run(prompt, workspace, opts \\ []) do
-    args = build_first_turn_args(prompt)
+    args = build_first_turn_args(prompt, opts)
     execute(args, workspace, opts)
   end
 
@@ -30,7 +30,7 @@ defmodule Rondo.Pi.CLI do
   """
   @spec resume(String.t(), String.t(), Path.t(), keyword()) :: {:ok, run_result()} | {:error, term()}
   def resume(session_id, prompt, workspace, opts \\ []) do
-    args = build_resume_args(session_id, prompt)
+    args = build_resume_args(session_id, prompt, opts)
     execute(args, workspace, opts)
   end
 
@@ -170,8 +170,15 @@ defmodule Rondo.Pi.CLI do
   defp flush_buffer(_on_event, %{buffer: ""} = state), do: state
   defp flush_buffer(on_event, state), do: handle_line("", on_event, state)
 
-  defp build_first_turn_args(prompt), do: ["--mode", "json", prompt]
-  defp build_resume_args(session_id, prompt), do: ["--mode", "json", "--session", session_id, prompt]
+  defp build_first_turn_args(prompt, opts), do: ["--mode", "json"] |> maybe_add_model(opts) |> Kernel.++([prompt])
+  defp build_resume_args(session_id, prompt, opts), do: ["--mode", "json", "--session", session_id] |> maybe_add_model(opts) |> Kernel.++([prompt])
+
+  defp maybe_add_model(args, opts) do
+    case Keyword.get(opts, :model) do
+      model when is_binary(model) and model != "" -> args ++ ["--model", model]
+      _model -> args
+    end
+  end
 
   defp validate_workspace(workspace) do
     expanded = Path.expand(workspace)

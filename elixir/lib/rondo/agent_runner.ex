@@ -7,7 +7,7 @@ defmodule Rondo.AgentRunner do
   alias Rondo.Agent.Adapter
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.PiAdapter
-  alias Rondo.{Config, FinalReport, Gates, Linear.Issue, ProcessProvider, Tracker, Workspace}
+  alias Rondo.{Config, FinalReport, Gates, Linear.Issue, ModelRouting, ProcessProvider, RunLedger, Tracker, Workspace}
   alias Rondo.ProcessProvider.{Beislid, Native}
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
@@ -161,9 +161,10 @@ defmodule Rondo.AgentRunner do
   defp send_phase_update(_recipient, _issue, _phase), do: :ok
 
   defp run_agent_turns(workspace, issue, claude_update_recipient, opts) do
-    with {:ok, adapter} <- adapter_module(opts),
-         {:ok, provider} <- process_provider_module(opts),
-         :ok <- preflight_process_provider(provider, opts) do
+    with {:ok, provider} <- process_provider_module(opts),
+         :ok <- preflight_process_provider(provider, opts),
+         {:ok, opts} <- model_routing_opts(provider, opts),
+         {:ok, adapter} <- adapter_module(opts) do
       context = %{
         workspace: workspace,
         claude_update_recipient: claude_update_recipient,
@@ -177,6 +178,46 @@ defmodule Rondo.AgentRunner do
       }
 
       do_run_agent_turns(context, issue, 1, Keyword.get(opts, :initial_run_ref))
+    end
+  end
+
+  defp model_routing_opts(provider, opts) do
+    routing = resolve_model_routing(provider, opts)
+
+    if routing.status == :blocked do
+      {:error, {:model_routing_blocked, routing}}
+    else
+      opts = apply_model_routing_opts(opts, routing)
+      maybe_record_model_routing(opts, routing)
+      {:ok, opts}
+    end
+  end
+
+  defp resolve_model_routing(provider, opts) do
+    ModelRouting.resolve(
+      source_contract: Keyword.get(opts, :source_contract, %{}),
+      model_routing_hints: provider.model_routing_hints(opts),
+      repo_model_routing: Config.model_routing()
+    )
+  end
+
+  defp apply_model_routing_opts(opts, routing) do
+    opts
+    |> Keyword.put(:model_routing, routing)
+    |> maybe_put_routed_model(routing)
+    |> maybe_put_routed_adapter(routing)
+  end
+
+  defp maybe_put_routed_model(opts, %{resolved: %{model: model}}) when is_binary(model), do: Keyword.put(opts, :model, model)
+  defp maybe_put_routed_model(opts, _routing), do: opts
+
+  defp maybe_put_routed_adapter(opts, %{resolved: %{adapter: adapter}}) when is_binary(adapter), do: Keyword.put(opts, :agent_adapter, adapter)
+  defp maybe_put_routed_adapter(opts, _routing), do: opts
+
+  defp maybe_record_model_routing(opts, routing) do
+    case Keyword.get(opts, :run_ledger) do
+      %RunLedger{} = ledger -> RunLedger.update_agent_metadata(ledger, %{"model_routing" => routing})
+      _ledger -> :ok
     end
   end
 
