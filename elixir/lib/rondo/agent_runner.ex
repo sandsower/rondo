@@ -121,6 +121,7 @@ defmodule Rondo.AgentRunner do
          run_ref: Map.get(event, :run_ref),
          session_id: session_id,
          usage: usage,
+         message: Map.get(event, :message),
          capabilities: Map.get(event, :capabilities),
          final_report: Map.get(event, :final_report),
          diff_source: Map.get(event, :diff_source),

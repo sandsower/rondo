@@ -1346,6 +1346,26 @@ defmodule Rondo.OrchestratorStatusTest do
     assert row =~ "gates: fail unit"
   end
 
+  test "status dashboard labels pi runs as pi in the phase column" do
+    rendered =
+      StatusDashboard.format_running_summary_for_test(%{
+        identifier: "MT-PI",
+        state: "In Progress",
+        adapter: "pi",
+        session_id: "agent-session-123456",
+        runtime_seconds: 15,
+        turn_count: 1,
+        claude_total_tokens: 42,
+        last_claude_event: :assistant_message,
+        last_claude_message: %{event: :assistant_message, message: "Working"}
+      })
+
+    plain = String.replace(rendered, ~r/\e\[[0-9;]*m/, "")
+    assert plain =~ ~r/MT-PI\s+In Progress\s+pi\s+/
+    assert plain =~ "Working"
+    refute plain =~ "claude"
+  end
+
   test "status dashboard renders last claude message in EVENT column" do
     row =
       StatusDashboard.format_running_summary_for_test(%{
@@ -1856,6 +1876,110 @@ defmodule Rondo.OrchestratorStatusTest do
     assert middle.event == :notification
     assert newest.event == :assistant
     assert newest.message == "hello world"
+  end
+
+  test "snapshot includes meaningful event_log from pi v3 events" do
+    issue_id = "issue-pi-event-log"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PI-LOG",
+      title: "Pi event log test",
+      description: "Verify pi events are observable",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-PI-LOG"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :PiEventLogOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    initial_state = :sys.get_state(pid)
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      turn_count: 0,
+      last_claude_message: nil,
+      last_claude_timestamp: nil,
+      last_claude_event: nil,
+      claude_input_tokens: 0,
+      claude_output_tokens: 0,
+      claude_total_tokens: 0,
+      claude_last_reported_input_tokens: 0,
+      claude_last_reported_output_tokens: 0,
+      claude_last_reported_total_tokens: 0,
+      started_at: started_at,
+      event_log: []
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    now = DateTime.utc_now()
+
+    send(
+      pid,
+      {:claude_worker_update, issue_id, %{event: :session_started, adapter: "pi", session_id: "pi-sess", timestamp: now}}
+    )
+
+    send(
+      pid,
+      {:claude_worker_update, issue_id,
+       %{
+         event: :assistant_message,
+         adapter: "pi",
+         message: "Working from pi",
+         raw: %{"type" => "message", "message" => %{"role" => "assistant", "content" => [%{"type" => "text", "text" => "Working from pi"}]}},
+         timestamp: now
+       }}
+    )
+
+    send(
+      pid,
+      {:claude_worker_update, issue_id,
+       %{
+         event: :tool_started,
+         adapter: "pi",
+         message: "bash: command=mix test",
+         raw: %{"type" => "message", "message" => %{"role" => "assistant", "content" => [%{"type" => "toolCall", "name" => "bash", "arguments" => %{"command" => "mix test"}}]}},
+         timestamp: now
+       }}
+    )
+
+    send(
+      pid,
+      {:claude_worker_update, issue_id,
+       %{
+         event: :tool_completed,
+         adapter: "pi",
+         message: "bash: ok",
+         raw: %{"type" => "message", "message" => %{"role" => "toolResult", "toolName" => "bash", "content" => [%{"type" => "text", "text" => "ok"}]}},
+         timestamp: now
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [entry]} = snapshot
+
+    assert [newest, tool_started, assistant, oldest] = entry.event_log
+    assert oldest.event == :session_started
+    assert assistant.event == :assistant
+    assert assistant.message == "Working from pi"
+    assert tool_started.event == :bash
+    assert tool_started.message == "bash: command=mix test"
+    assert newest.event == :bash
+    assert newest.message == "bash: ok"
   end
 
   test "dispatch creates run ledger and exposes it in running snapshot" do

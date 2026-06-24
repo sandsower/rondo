@@ -45,4 +45,42 @@ defmodule Rondo.Pi.StreamParserTest do
     assert update.event_type == :tool_updated
     assert stop.event_type == :tool_completed
   end
+
+  test "normalizes current pi v3 assistant and tool message events" do
+    assistant_line =
+      ~s({"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"text","text":"Working from pi"}]},"usage":{"input":11,"output":7}})
+
+    assert {:ok, assistant} = StreamParser.parse_line(assistant_line)
+    assert assistant.event_type == :assistant_message
+    assert StreamParser.assistant_text(assistant) == "Working from pi"
+    assert StreamParser.extract_usage(assistant).total_tokens == 18
+
+    tool_call_line =
+      ~s({"type":"message","id":"msg-2","message":{"role":"assistant","content":[{"type":"toolCall","name":"read","arguments":{"path":"lib/rondo.ex"}}]}})
+
+    assert {:ok, tool_call} = StreamParser.parse_line(tool_call_line)
+    assert tool_call.event_type == :tool_started
+
+    tool_result_line =
+      ~s({"type":"message","id":"msg-3","message":{"role":"toolResult","toolName":"read","content":[{"type":"text","text":"defmodule Rondo do"}]}})
+
+    assert {:ok, tool_result} = StreamParser.parse_line(tool_result_line)
+    assert tool_result.event_type == :tool_completed
+  end
+
+  test "keeps visible pi custom messages observable" do
+    line = ~s({"type":"custom_message","customType":"memento-lifecycle","content":"[vault] Project: rondo","display":true})
+
+    assert {:ok, event} = StreamParser.parse_line(line)
+    assert event.event_type == :warning
+    assert StreamParser.assistant_text(event) == "[vault] Project: rondo"
+  end
+
+  test "does not extract assistant text from top-level tool results" do
+    line = ~s({"type":"toolResult","content":[{"type":"text","text":"tool output"}]})
+
+    assert {:ok, event} = StreamParser.parse_line(line)
+    assert event.event_type == :tool_completed
+    assert StreamParser.assistant_text(event) == nil
+  end
 end

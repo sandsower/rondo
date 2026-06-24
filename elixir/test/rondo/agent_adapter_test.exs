@@ -1355,7 +1355,7 @@ defmodule Rondo.AgentAdapterTest do
 
       assert_receive {:adapter_event, %{event_type: :session_started, adapter: "pi", run_ref: %{provider_ref: "pi-adapter-session"}}}, 500
       assert_receive {:adapter_event, %{event_type: :assistant_message, adapter: "pi", message: "assistant fallback"}}, 500
-      assert_receive {:adapter_event, %{event_type: :tool_started, adapter: "pi", message: "bash"}}, 500
+      assert_receive {:adapter_event, %{event_type: :tool_started, adapter: "pi", message: "bash: command=mix test"}}, 500
       assert_receive {:adapter_event, %{event_type: :invocation_completed, adapter: "pi", final_report: "explicit pi result"}}, 500
       refute_receive {:adapter_event, %{raw: %{"type" => "message_update"}}}, 100
     after
@@ -1374,7 +1374,9 @@ defmodule Rondo.AgentAdapterTest do
       File.write!(pi_binary, """
       #!/bin/sh
       echo '{"type":"session","version":3,"id":"runner-pi-session"}'
-      echo '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Working"}]}}'
+      echo '{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Working"}]},"usage":{"input":2,"output":3}}'
+      echo '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"mix test"}}]}}'
+      echo '{"type":"message","message":{"role":"toolResult","toolName":"bash","content":[{"type":"text","text":"ok"}]}}'
       echo '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"runner final"}]}]}'
       exit 0
       """)
@@ -1406,7 +1408,24 @@ defmodule Rondo.AgentAdapterTest do
                         event: :assistant_message,
                         adapter: "pi",
                         run_ref: %{provider_ref: "runner-pi-session"},
-                        session_id: "runner-pi-session"
+                        session_id: "runner-pi-session",
+                        message: "Working"
+                      }},
+                     500
+
+      assert_receive {:claude_worker_update, "issue-pi",
+                      %{
+                        event: :tool_started,
+                        adapter: "pi",
+                        message: "bash: command=mix test"
+                      }},
+                     500
+
+      assert_receive {:claude_worker_update, "issue-pi",
+                      %{
+                        event: :tool_completed,
+                        adapter: "pi",
+                        message: "bash: ok"
                       }},
                      500
 
