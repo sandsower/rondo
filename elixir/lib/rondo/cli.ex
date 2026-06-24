@@ -5,8 +5,7 @@ defmodule Rondo.CLI do
 
   alias Rondo.{LogFile, RunOnce}
 
-  @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
-  @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer, debug: :boolean]
+  @switches [logs_root: :string, port: :integer, debug: :boolean]
   @run_once_switches @switches ++ [issue: :string, manifest: :string]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
@@ -40,24 +39,21 @@ defmodule Rondo.CLI do
   def evaluate(args, deps \\ runtime_deps()) do
     case parse_args(args) do
       {opts, [], []} ->
-        with :ok <- require_guardrails_acknowledgement(opts),
-             :ok <- maybe_set_logs_root(opts, deps),
+        with :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps),
              :ok <- maybe_set_debug(opts) do
           run(Path.expand("WORKFLOW.md"), deps)
         end
 
       {opts, [workflow_path], []} ->
-        with :ok <- require_guardrails_acknowledgement(opts),
-             :ok <- maybe_set_logs_root(opts, deps),
+        with :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps),
              :ok <- maybe_set_debug(opts) do
           run(workflow_path, deps)
         end
 
       {:run_once, opts, [workflow_path]} ->
-        with :ok <- require_guardrails_acknowledgement(opts),
-             :ok <- require_run_once_target(opts),
+        with :ok <- require_run_once_target(opts),
              :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_debug(opts),
              :ok <- run_once(workflow_path, opts, deps) do
@@ -208,47 +204,6 @@ defmodule Rondo.CLI do
   end
 
   defp normalize_target_value(_value), do: nil
-
-  defp require_guardrails_acknowledgement(opts) do
-    if Keyword.get(opts, @acknowledgement_switch, false) do
-      :ok
-    else
-      {:error, acknowledgement_banner()}
-    end
-  end
-
-  @spec acknowledgement_banner() :: String.t()
-  defp acknowledgement_banner do
-    lines = [
-      "This Rondo implementation is a low key engineering preview.",
-      "Claude will run without any guardrails.",
-      "Rondo is not a supported product and is presented as-is.",
-      "To proceed, start with `--i-understand-that-this-will-be-running-without-the-usual-guardrails` CLI argument"
-    ]
-
-    width = Enum.max(Enum.map(lines, &String.length/1))
-    border = String.duplicate("─", width + 2)
-    top = "╭" <> border <> "╮"
-    bottom = "╰" <> border <> "╯"
-    spacer = "│ " <> String.duplicate(" ", width) <> " │"
-
-    content =
-      [
-        top,
-        spacer
-        | Enum.map(lines, fn line ->
-            "│ " <> String.pad_trailing(line, width) <> " │"
-          end)
-      ] ++ [spacer, bottom]
-
-    [
-      IO.ANSI.red(),
-      IO.ANSI.bright(),
-      Enum.join(content, "\n"),
-      IO.ANSI.reset()
-    ]
-    |> IO.iodata_to_binary()
-  end
 
   defp set_logs_root(logs_root) do
     Application.put_env(:rondo, :log_file, LogFile.default_log_file(logs_root))
