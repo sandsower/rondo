@@ -245,7 +245,7 @@ defmodule RondoWeb.DashboardLive do
           <div class="section-header">
             <div>
               <h2 class="section-title">Needs guidance</h2>
-              <p class="section-copy">Paused runs waiting for operator guidance at action-policy boundaries.</p>
+              <p class="section-copy">Paused runs waiting for operator guidance before they can continue.</p>
             </div>
           </div>
 
@@ -285,8 +285,8 @@ defmodule RondoWeb.DashboardLive do
                     </td>
                     <td>
                       <div class="detail-stack">
-                        <span class="event-text"><%= Map.get(entry.blocked_side_effect || %{}, :label) || "Side effect" %></span>
-                        <span class="muted event-meta"><%= Map.get(entry.blocked_side_effect || %{}, :action) || "action_policy.ask" %></span>
+                        <span class="event-text"><%= guidance_waiting_label(entry) %></span>
+                        <span class="muted event-meta"><%= guidance_waiting_meta(entry) %></span>
                       </div>
                     </td>
                     <td class="mono"><%= entry.paused_at || "n/a" %></td>
@@ -298,9 +298,10 @@ defmodule RondoWeb.DashboardLive do
                           class="subtle-button"
                           phx-click="submit_guidance"
                           phx-value-issue-id={entry.issue_id}
-                          phx-value-guidance={quick_guidance_response(entry).guidance}
+                          phx-value-guidance={quick_guidance_response(entry).guidance || quick_guidance_response(entry).id}
+                          onclick="event.stopPropagation()"
                         >
-                          <%= quick_guidance_response(entry).label %>
+                          <%= quick_guidance_response(entry).label || quick_guidance_response(entry).id %>
                         </button>
                       <% end %>
                     </td>
@@ -534,25 +535,17 @@ defmodule RondoWeb.DashboardLive do
               <span class={state_badge_class(@selected_issue_data[:state] || "n/a")}><%= @selected_issue_data[:state] || "n/a" %></span>
             </div>
             <div class="panel-metric">
-              <span class="panel-metric-label">
-                <%= if @selected_issue_data[:finished_at], do: "Duration", else: "Runtime" %>
-              </span>
-              <span class="numeric">
-                <%= if @selected_issue_data[:finished_at] do %>
-                  <%= format_duration(@selected_issue_data.started_at, @selected_issue_data.finished_at) %>
-                <% else %>
-                  <%= format_runtime_and_turns(@selected_issue_data.started_at, @selected_issue_data.turn_count, @now) %>
-                <% end %>
-              </span>
+              <span class="panel-metric-label"><%= selected_time_label(@selected_issue_data) %></span>
+              <span class="numeric"><%= selected_time_value(@selected_issue_data, @now) %></span>
             </div>
             <div class="panel-metric">
               <span class="panel-metric-label">Tokens</span>
-              <span class="numeric"><%= format_int(@selected_issue_data.tokens.total_tokens) %></span>
+              <span class="numeric"><%= format_int(selected_total_tokens(@selected_issue_data)) %></span>
             </div>
             <div class="panel-metric">
               <%= if @selected_issue_data[:exit_reason] do %>
                 <span class="panel-metric-label">Result</span>
-                <span class={exit_reason_class(@selected_issue_data.exit_reason)}><%= @selected_issue_data.exit_reason %></span>
+                <span class={exit_reason_class(@selected_issue_data[:exit_reason])}><%= @selected_issue_data[:exit_reason] %></span>
               <% else %>
                 <span class="panel-metric-label">Session</span>
                 <span class="mono" style="font-size: 11px;"><%= @selected_issue_data[:session_id] || "n/a" %></span>
@@ -577,16 +570,48 @@ defmodule RondoWeb.DashboardLive do
             </div>
           <% end %>
 
+          <%= if @selected_issue_data[:interrupt] do %>
+            <div class="section-card" style="margin-bottom: 16px; padding: 16px;">
+              <p class="panel-metric-label">Guidance</p>
+              <p class="muted" style="font-size: 12px; margin-bottom: 12px;">
+                <%= get_in(@selected_issue_data, [:interrupt, :question]) || get_in(@selected_issue_data, [:interrupt, :recommendation]) || "Provide operator guidance to resume this paused run." %>
+              </p>
+              <form phx-submit="submit_guidance">
+                <input type="hidden" name="issue-id" value={@selected_issue_data[:issue_id]} />
+                <textarea
+                  name="guidance"
+                  rows="4"
+                  placeholder="Tell the agent how to unblock this run..."
+                  style="width: 100%; resize: vertical; border-radius: 12px; border: 1px solid var(--border); background: var(--surface); color: var(--text); padding: 10px;"
+                ></textarea>
+                <div style="margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
+                  <button type="submit" class="subtle-button">Resume with guidance</button>
+                  <%= if quick_guidance_response(@selected_issue_data) do %>
+                    <button
+                      type="button"
+                      class="subtle-button"
+                      phx-click="submit_guidance"
+                      phx-value-issue-id={@selected_issue_data[:issue_id]}
+                      phx-value-guidance={quick_guidance_response(@selected_issue_data).guidance || quick_guidance_response(@selected_issue_data).id}
+                    >
+                      <%= quick_guidance_response(@selected_issue_data).label || quick_guidance_response(@selected_issue_data).id %>
+                    </button>
+                  <% end %>
+                </div>
+              </form>
+            </div>
+          <% end %>
+
           <div class="panel-stream-header">
             <span class="panel-metric-label">Event stream</span>
-            <span class="muted" style="font-size: 11px;"><%= length(@selected_issue_data.event_log) %> events</span>
+            <span class="muted" style="font-size: 11px;"><%= length(selected_event_log(@selected_issue_data)) %> events</span>
           </div>
 
-          <%= if @selected_issue_data.event_log == [] do %>
+          <%= if selected_event_log(@selected_issue_data) == [] do %>
             <p class="empty-state">Waiting for agent activity...</p>
           <% else %>
             <div class="event-stream" id="event-stream" phx-hook="ScrollBottom">
-              <div :for={entry <- @selected_issue_data.event_log} class="event-row">
+              <div :for={entry <- selected_event_log(@selected_issue_data)} class="event-row">
                 <span class={event_type_class(entry.event)}>
                   <%= if tool_event?(entry.event) do %><svg class="event-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg><% end %><%= entry.event %>
                 </span>
@@ -621,8 +646,9 @@ defmodule RondoWeb.DashboardLive do
   end
 
   defp find_issue_entry(payload, identifier) do
-    running = Map.get(payload, :running, [])
-    Enum.find(running, &(&1.issue_identifier == identifier))
+    [:needs_guidance, :paused, :running, :retrying]
+    |> Enum.flat_map(&Map.get(payload, &1, []))
+    |> Enum.find(&(&1.issue_identifier == identifier))
   end
 
   defp load_payload do
@@ -639,6 +665,39 @@ defmodule RondoWeb.DashboardLive do
 
   defp completed_runtime_seconds(payload) do
     payload.claude_totals.seconds_running || 0
+  end
+
+  defp selected_time_label(selected_issue_data) do
+    cond do
+      selected_issue_data[:finished_at] -> "Duration"
+      selected_issue_data[:paused_at] -> "Paused"
+      selected_issue_data[:started_at] -> "Runtime"
+      true -> "Time"
+    end
+  end
+
+  defp selected_time_value(selected_issue_data, now) do
+    cond do
+      selected_issue_data[:finished_at] ->
+        format_duration(selected_issue_data[:started_at], selected_issue_data[:finished_at])
+
+      selected_issue_data[:paused_at] ->
+        selected_issue_data[:paused_at]
+
+      selected_issue_data[:started_at] ->
+        format_runtime_and_turns(selected_issue_data[:started_at], selected_issue_data[:turn_count], now)
+
+      true ->
+        "n/a"
+    end
+  end
+
+  defp selected_total_tokens(selected_issue_data) do
+    get_in(selected_issue_data, [:tokens, :total_tokens])
+  end
+
+  defp selected_event_log(selected_issue_data) do
+    Map.get(selected_issue_data, :event_log, []) || []
   end
 
   defp total_runtime_seconds(payload, now) do
@@ -699,6 +758,31 @@ defmodule RondoWeb.DashboardLive do
     |> Map.get(:suggested_responses, [])
     |> Enum.find(fn response -> Map.get(response, :quick) == true end)
   end
+
+  defp guidance_waiting_label(entry) do
+    Map.get(entry.blocked_side_effect || %{}, :label) ||
+      entry
+      |> get_in([:interrupt, :reason])
+      |> humanize_interrupt_reason()
+  end
+
+  defp guidance_waiting_meta(entry) do
+    Map.get(entry.blocked_side_effect || %{}, :action) ||
+      get_in(entry, [:interrupt, :question]) ||
+      get_in(entry, [:interrupt, :recommendation]) ||
+      "operator guidance"
+  end
+
+  defp humanize_interrupt_reason("repeated_gate_failure"), do: "Gate failure"
+  defp humanize_interrupt_reason("action_policy_guidance_required"), do: "Action policy"
+
+  defp humanize_interrupt_reason(reason) when is_binary(reason) do
+    reason
+    |> String.replace("_", " ")
+    |> String.capitalize()
+  end
+
+  defp humanize_interrupt_reason(_reason), do: "Paused run"
 
   defp guidance_severity_class("critical"), do: "state-badge state-badge-danger"
   defp guidance_severity_class("warning"), do: "state-badge state-badge-warning"

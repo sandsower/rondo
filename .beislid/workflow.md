@@ -92,7 +92,7 @@ overrides:
 
 ## Action policy
 
-Canonical policy lives in `.beislid/action-policy.json` (the evaluator only reads `--policy-file`; inline `modes:` here never reached it). Allows dependency install, git push, PR merge, PR review reply, and ticket comment without prompting in both supervised-auto and unattended-auto. The evaluator's sandbox floor still applies: unattended-auto pushes/merges on the default branch or with uncommitted changes downgrade to ask.
+Canonical policy lives in `.beislid/action-policy.json` (the evaluator only reads `--policy-file`; inline `modes:` here never reached it). Allows dependency install, git push, PR create/ready/merge, PR review reply, and ticket comment without prompting in both supervised-auto and unattended-auto. The evaluator's sandbox floor still applies: unattended-auto pushes/merges on the default branch or with uncommitted changes downgrade to ask.
 
 ```beislid:action_policy
 policy_file: .beislid/action-policy.json

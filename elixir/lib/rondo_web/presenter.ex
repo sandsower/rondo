@@ -15,7 +15,7 @@ defmodule RondoWeb.Presenter do
         retrying = Map.get(snapshot, :retrying, [])
         archived = Map.get(snapshot, :archived, [])
         paused = Map.get(snapshot, :paused, [])
-        needs_guidance = Enum.filter(paused, &action_policy_guidance_entry?/1)
+        needs_guidance = Enum.filter(paused, &guidance_entry?/1)
 
         %{
           generated_at: generated_at,
@@ -181,6 +181,11 @@ defmodule RondoWeb.Presenter do
       tracker_visibility: Map.get(entry, :tracker_visibility),
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       interrupt: interrupt_payload(Map.get(entry, :interrupt)),
+      tokens: %{
+        input_tokens: Map.get(entry, :claude_input_tokens, 0),
+        output_tokens: Map.get(entry, :claude_output_tokens, 0),
+        total_tokens: Map.get(entry, :claude_total_tokens, 0)
+      },
       event_log: format_event_log(Map.get(entry, :event_log, []))
     }
   end
@@ -201,6 +206,7 @@ defmodule RondoWeb.Presenter do
       :paused_at,
       :retry_attempt,
       :tracker_visibility,
+      :tokens,
       :event_log
     ])
     |> Map.merge(%{
@@ -277,14 +283,22 @@ defmodule RondoWeb.Presenter do
     Map.get(map, key) || Map.get(map, Atom.to_string(key))
   end
 
-  defp action_policy_guidance_entry?(entry) when is_map(entry) do
-    entry
-    |> Map.get(:interrupt, Map.get(entry, "interrupt", %{}))
-    |> payload_value(:reason)
-    |> Kernel.==("action_policy_guidance_required")
+  defp guidance_entry?(entry) when is_map(entry) do
+    interrupt = Map.get(entry, :interrupt, Map.get(entry, "interrupt", %{}))
+
+    if is_map(interrupt) do
+      interrupt
+      |> payload_value(:reason)
+      |> case do
+        reason when is_binary(reason) and reason != "" -> true
+        _ -> false
+      end
+    else
+      false
+    end
   end
 
-  defp action_policy_guidance_entry?(_entry), do: false
+  defp guidance_entry?(_entry), do: false
 
   defp normalize_payload_list(values) when is_list(values), do: Enum.map(values, &normalize_payload_map/1)
   defp normalize_payload_list(_values), do: []

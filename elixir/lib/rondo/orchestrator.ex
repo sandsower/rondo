@@ -7,6 +7,7 @@ defmodule Rondo.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
+  alias Rondo.Agent.Adapter, as: AgentAdapter
   alias Rondo.{AgentRunner, Config, Interrupt, RunLedger, SideEffectPolicy, StatusDashboard, Tracker, Workspace}
   alias Rondo.Linear.Issue
 
@@ -803,13 +804,15 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  defp start_agent_for_issue(%State{} = state, issue, attempt, attempt_metadata, recipient, ledger) do
+  defp start_agent_for_issue(%State{} = state, issue, attempt, attempt_metadata, recipient, ledger, agent_opts \\ []) do
     case Task.Supervisor.start_child(Rondo.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient,
+           base_opts = [
              attempt: normalize_retry_attempt(attempt),
              run_dir: run_ledger_dir(ledger),
              run_ledger: ledger
-           )
+           ]
+
+           AgentRunner.run(issue, recipient, Keyword.merge(base_opts, agent_opts))
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -1127,7 +1130,7 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  defp apply_guidance_response(state, issue_id, paused_entry, "abort_run") do
+  defp apply_guidance_response(state, issue_id, paused_entry, guidance) when guidance in ["abort_run", "abort"] do
     ledger = Map.get(paused_entry, :ledger)
     ledger = complete_run_ledger(ledger, :aborted, %{reason: "operator guidance abort"})
     _ledger = ledger
@@ -1141,7 +1144,99 @@ defmodule Rondo.Orchestrator do
     {{:ok, %{status: :aborted, issue_id: issue_id}}, state}
   end
 
-  defp apply_guidance_response(state, _issue_id, _paused_entry, _guidance), do: {{:error, :unsupported_guidance_response}, state}
+  defp apply_guidance_response(state, _issue_id, _paused_entry, ""), do: {{:error, :empty_guidance}, state}
+
+  defp apply_guidance_response(state, issue_id, paused_entry, guidance),
+    do: resume_with_operator_guidance(state, issue_id, paused_entry, guidance)
+
+  defp resume_with_operator_guidance(state, issue_id, paused_entry, guidance) do
+    ledger = Map.get(paused_entry, :ledger)
+
+    with {:ok, issue} <- paused_entry_issue(issue_id, paused_entry),
+         {:ok, run_ref} <- paused_entry_run_ref(paused_entry) do
+      ledger = write_run_ledger_checkpoint(ledger, :guidance_submitted, %{response: "operator_guidance", guidance: guidance})
+
+      state = %{
+        state
+        | paused_interrupts: Map.delete(state.paused_interrupts, issue_id),
+          claimed: MapSet.delete(state.claimed, issue_id)
+      }
+
+      state =
+        start_agent_for_issue(state, issue, Map.get(paused_entry, :retry_attempt, 0), [], self(), ledger,
+          initial_run_ref: run_ref,
+          operator_guidance: guidance
+        )
+
+      {{:ok, %{status: :resumed, issue_id: issue_id}}, state}
+    else
+      {:error, reason} ->
+        {{:error, {:guidance_resume_failed, reason}}, state}
+    end
+  end
+
+  defp paused_entry_issue(issue_id, paused_entry) do
+    case Map.get(paused_entry, :issue) do
+      %Issue{} = issue -> {:ok, issue}
+      issue when is_map(issue) -> {:ok, issue_from_manifest(Map.new(issue, fn {key, value} -> {to_string(key), value} end))}
+      _other -> {:ok, %Issue{id: issue_id, identifier: Map.get(paused_entry, :identifier), state: Map.get(paused_entry, :state)}}
+    end
+  end
+
+  defp paused_entry_run_ref(paused_entry) do
+    interrupt = Map.get(paused_entry, :interrupt, %{}) || %{}
+    ledger = Map.get(paused_entry, :ledger)
+
+    [
+      Map.get(paused_entry, :run_ref),
+      get_in(interrupt, ["resume", "run_ref"]),
+      get_in(interrupt, [:resume, :run_ref]),
+      get_in(ledger_manifest(ledger), ["agent", "run_ref"])
+    ]
+    |> Enum.find(& &1)
+    |> case do
+      nil -> run_ref_from_session(paused_entry, interrupt)
+      run_ref -> normalize_run_ref(run_ref)
+    end
+  end
+
+  defp ledger_manifest(%RunLedger{manifest: manifest}) when is_map(manifest), do: manifest
+  defp ledger_manifest(_ledger), do: %{}
+
+  defp run_ref_from_session(paused_entry, interrupt) do
+    session_id = Map.get(paused_entry, :session_id) || get_in(interrupt, ["resume", "session_id"]) || get_in(interrupt, [:resume, :session_id])
+
+    if is_binary(session_id) and String.trim(session_id) != "" do
+      {:ok, AgentAdapter.run_ref(Config.agent_adapter(), session_id, "session_id", true)}
+    else
+      {:error, :missing_resume_ref}
+    end
+  end
+
+  defp normalize_run_ref(run_ref) when is_map(run_ref) do
+    provider_ref = map_value(run_ref, :provider_ref)
+    provider_ref_kind = map_value(run_ref, :provider_ref_kind)
+    resumable? = Map.get(run_ref, :resumable?, Map.get(run_ref, "resumable?"))
+
+    cond do
+      !is_binary(provider_ref) or String.trim(provider_ref) == "" ->
+        {:error, :invalid_resume_ref}
+
+      resumable? == false ->
+        {:error, :resume_ref_not_resumable}
+
+      true ->
+        {:ok,
+         AgentAdapter.run_ref(
+           map_value(run_ref, :adapter) || Config.agent_adapter(),
+           provider_ref,
+           provider_ref_kind,
+           true
+         )}
+    end
+  end
+
+  defp normalize_run_ref(_run_ref), do: {:error, :invalid_resume_ref}
 
   defp approve_tracker_transition_guidance(state, issue_id, paused_entry) do
     ledger = Map.get(paused_entry, :ledger)

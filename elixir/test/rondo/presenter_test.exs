@@ -100,6 +100,11 @@ defmodule Rondo.PresenterTest do
 
     payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
     assert payload.counts.paused == 1
+    assert payload.counts.needs_guidance == 1
+    assert [guidance] = payload.needs_guidance
+    assert guidance.issue_identifier == "MT-PAUSED"
+    assert guidance.interrupt.reason == "repeated_gate_failure"
+    assert guidance.tokens.total_tokens == 0
     assert [paused] = payload.paused
     assert paused.issue_identifier == "MT-PAUSED"
     assert paused.interrupt.reason == "repeated_gate_failure"
@@ -177,6 +182,12 @@ defmodule Rondo.PresenterTest do
           interrupt: %{"reason" => "repeated_gate_failure"}
         },
         %{
+          issue_id: "issue-nil-interrupt",
+          identifier: "MT-NIL-INTERRUPT",
+          state: "In Progress",
+          interrupt: nil
+        },
+        %{
           run_id: "missing-required-fields",
           interrupt: %{"reason" => "repeated_gate_failure"}
         }
@@ -190,11 +201,14 @@ defmodule Rondo.PresenterTest do
     on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
 
     payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
-    assert [string_keyed, missing_fields] = payload.paused
+    assert [string_keyed, nil_interrupt, missing_fields] = payload.paused
     assert string_keyed.issue_id == "issue-paused"
     assert string_keyed.issue_identifier == "MT-PAUSED"
     assert string_keyed.state == "In Progress"
     assert string_keyed.session_id == "session-paused"
+    assert nil_interrupt.issue_id == "issue-nil-interrupt"
+    assert nil_interrupt.issue_identifier == "MT-NIL-INTERRUPT"
+    assert payload.counts.needs_guidance == 2
     assert missing_fields.issue_id == nil
     assert missing_fields.issue_identifier == nil
     assert missing_fields.state == nil

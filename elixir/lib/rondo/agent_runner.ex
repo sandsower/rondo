@@ -176,7 +176,7 @@ defmodule Rondo.AgentRunner do
         run_dir: Keyword.get(opts, :run_dir)
       }
 
-      do_run_agent_turns(context, issue, 1, nil)
+      do_run_agent_turns(context, issue, 1, Keyword.get(opts, :initial_run_ref))
     end
   end
 
@@ -495,7 +495,12 @@ defmodule Rondo.AgentRunner do
 
   defp blocking_probe?(%{checks: checks}), do: map_size(Map.get(checks, :blocking, %{})) > 0
 
-  defp build_turn_prompt(provider, issue, opts, 1, _max_turns), do: ProcessProvider.prompt(provider, issue, opts)
+  defp build_turn_prompt(provider, issue, opts, 1, _max_turns) do
+    case opts |> Keyword.get(:operator_guidance) |> normalize_operator_guidance() do
+      nil -> ProcessProvider.prompt(provider, issue, opts)
+      guidance -> operator_guidance_prompt(guidance)
+    end
+  end
 
   defp build_turn_prompt(_provider, _issue, _opts, turn_number, max_turns) do
     """
@@ -527,6 +532,26 @@ defmodule Rondo.AgentRunner do
   end
 
   defp continue_with_issue?(issue, _issue_state_fetcher), do: {:done, issue}
+
+  defp normalize_operator_guidance(guidance) when is_binary(guidance) do
+    case String.trim(guidance) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize_operator_guidance(_guidance), do: nil
+
+  defp operator_guidance_prompt(guidance) do
+    """
+    Operator guidance for paused run:
+
+    #{guidance}
+
+    Resume from the current workspace state and existing agent session. Do not restart the task from scratch.
+    Focus only on the work needed to unblock and complete the current ticket.
+    """
+  end
 
   defp active_issue_state?(state_name) when is_binary(state_name) do
     normalized_state = normalize_issue_state(state_name)

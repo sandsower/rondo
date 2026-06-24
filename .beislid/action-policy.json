@@ -5,6 +5,8 @@
       "actions": {
         "dependency.install": "allow",
         "git.push": "allow",
+        "gh.pr.create": "allow",
+        "gh.pr.ready": "allow",
         "gh.pr.merge": "allow",
         "pr.review.reply": "allow",
         "ticket.comment": "allow"
@@ -15,6 +17,8 @@
       "actions": {
         "dependency.install": "allow",
         "git.push": "allow",
+        "gh.pr.create": "allow",
+        "gh.pr.ready": "allow",
         "gh.pr.merge": "allow",
         "pr.review.reply": "allow",
         "ticket.comment": "allow"
