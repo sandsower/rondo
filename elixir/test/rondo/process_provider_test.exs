@@ -165,6 +165,44 @@ defmodule Rondo.ProcessProviderTest do
     assert %{status: :ok, checks: %{model_routing_hints: :deferred}} = Beislid.probe([])
   end
 
+  test "beislid provider preserves nested initial model routing hints" do
+    temp_dir = Path.join(System.tmp_dir!(), "rondo-beislid-provider-routing-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(temp_dir)
+    on_exit(fn -> File.rm_rf(temp_dir) end)
+
+    artifact_path =
+      write_json!(temp_dir, "initial-routing.json", %{
+        "schema" => "beislid-process-artifact-v1",
+        "id" => "initial-routing",
+        "status" => "approved",
+        "gates" => [],
+        "model_routing_hints" => %{
+          "tier" => "standard",
+          "initial" => %{
+            "skill" => "kickoff",
+            "phase" => "context_discovery",
+            "tier" => "heavy",
+            "mode" => "prefer"
+          }
+        }
+      })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      process_provider_kind: "beislid",
+      process_provider_artifact_path: artifact_path
+    )
+
+    assert %{
+             "tier" => "standard",
+             "initial" => %{
+               "skill" => "kickoff",
+               "phase" => "context_discovery",
+               "tier" => "heavy",
+               "mode" => "prefer"
+             }
+           } = Beislid.model_routing_hints()
+  end
+
   test "beislid provider handles optional callbacks, source path fallback, and malformed artifacts" do
     approved_path = fixture_path("approved.json")
     temp_dir = Path.join(System.tmp_dir!(), "rondo-beislid-provider-#{System.unique_integer([:positive])}")
