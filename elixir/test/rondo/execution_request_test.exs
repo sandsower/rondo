@@ -19,7 +19,8 @@ defmodule Rondo.ExecutionRequestTest do
         process_provider: %{name: "pi"},
         memory_provider: %{name: "memento"},
         output_expectations: %{final_report: true},
-        runner_extensions: %{action_policy: %{policy_file: "policy.json"}}
+        runner_extensions: %{action_policy: %{policy_file: "policy.json"}},
+        model_routing_hints: %{initial: %{skill: "kickoff", tier: "heavy"}}
       })
 
     assert {:ok, request} = ExecutionRequest.load(path)
@@ -43,6 +44,7 @@ defmodule Rondo.ExecutionRequestTest do
     assert request.source_contract.memory_provider == %{"name" => "memento"}
     assert request.source_contract.output_expectations == %{"final_report" => true}
     assert request.source_contract.runner_extensions == %{"action_policy" => %{"policy_file" => "policy.json"}}
+    assert request.source_contract.model_routing_hints == %{"initial" => %{"skill" => "kickoff", "tier" => "heavy"}}
   end
 
   test "loads approved-slice-v1 with body alias" do
