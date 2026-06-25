@@ -186,7 +186,9 @@ defmodule Rondo.AgentRunner do
     routing = resolve_model_routing(provider, opts)
 
     if routing.status == :blocked do
-      {:error, {:model_routing_blocked, routing}}
+      with {:ok, _opts} <- maybe_record_model_routing(Keyword.put(opts, :model_routing, routing), routing) do
+        {:error, {:model_routing_blocked, routing}}
+      end
     else
       {:ok, apply_model_routing_opts(opts, routing)}
     end
@@ -239,6 +241,7 @@ defmodule Rondo.AgentRunner do
 
   defp resolve_model_routing(provider, opts) do
     ModelRouting.resolve(
+      routing_context: Keyword.get(opts, :model_routing_context, %{stage: :initial_spawn}),
       source_contract: Keyword.get(opts, :source_contract, %{}),
       model_routing_hints: provider.model_routing_hints(opts),
       repo_model_routing: Config.model_routing()

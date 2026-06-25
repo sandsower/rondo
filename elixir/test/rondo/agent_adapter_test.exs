@@ -176,6 +176,165 @@ defmodule Rondo.AgentAdapterTest do
     def evaluate_action_policy(_action, _classes, _opts \\ []), do: {:error, :not_used}
   end
 
+  defmodule InitialContextModelHintProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "initial_context_model_hint_process"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test, prompt: :test, model_routing_hints: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :ok, checks: %{available: :ok}}
+
+    @impl true
+    def select_gates(_opts \\ []), do: {:ok, Rondo.ProcessProvider.gate_selection_result([])}
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Initial context model hint prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []) do
+      %{
+        "tier" => "standard",
+        "initial" => %{
+          "skill" => "kickoff",
+          "phase" => "context_discovery",
+          "tier" => "heavy",
+          "mode" => "prefer"
+        }
+      }
+    end
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(_action, _classes, _opts \\ []), do: {:error, :not_used}
+  end
+
+  defmodule InitialStageLessStepModelHintProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "initial_stage_less_step_model_hint_process"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test, prompt: :test, model_routing_hints: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :ok, checks: %{available: :ok}}
+
+    @impl true
+    def select_gates(_opts \\ []), do: {:ok, Rondo.ProcessProvider.gate_selection_result([])}
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Initial stage-less step model hint prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []) do
+      %{
+        "tier" => "standard",
+        "steps" => [
+          %{"skill" => "kickoff", "phase" => "context_discovery", "tier" => "heavy", "mode" => "prefer"}
+        ]
+      }
+    end
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(_action, _classes, _opts \\ []), do: {:error, :not_used}
+  end
+
+  defmodule InitialRequiredUnresolvedModelHintProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "initial_required_unresolved_model_hint_process"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test, prompt: :test, model_routing_hints: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :ok, checks: %{available: :ok}}
+
+    @impl true
+    def select_gates(_opts \\ []), do: {:ok, Rondo.ProcessProvider.gate_selection_result([])}
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Initial unresolved required context prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []) do
+      %{
+        "initial" => %{
+          "skill" => "kickoff",
+          "phase" => "context_discovery",
+          "tier" => "unknown-tier",
+          "mode" => "require"
+        }
+      }
+    end
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(_action, _classes, _opts \\ []), do: {:error, :not_used}
+  end
+
+  defmodule InitialRequiredContextModelHintProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "initial_required_context_model_hint_process"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test, prompt: :test, model_routing_hints: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :ok, checks: %{available: :ok}}
+
+    @impl true
+    def select_gates(_opts \\ []), do: {:ok, Rondo.ProcessProvider.gate_selection_result([])}
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Initial required context prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []) do
+      %{
+        "initial" => %{
+          "skill" => "kickoff",
+          "phase" => "context_discovery",
+          "tier" => "heavy",
+          "mode" => "require"
+        }
+      }
+    end
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(_action, _classes, _opts \\ []), do: {:error, :not_used}
+  end
+
   defmodule RequiredModelHintProcessProvider do
     @behaviour Rondo.ProcessProvider
 
@@ -548,6 +707,67 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  test "agent runner uses initial step-aware routing hints at spawn" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-initial-model-routing-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{
+            standard: [%{model: "standard-model"}],
+            heavy: [%{model: "heavy-model"}]
+          }
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-initial-model-routing",
+        identifier: "MT-INITIAL-MODEL",
+        title: "Initial model routing",
+        description: "Route kickoff context discovery to heavy",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: InitialContextModelHintProcessProvider,
+                 run_ledger: ledger,
+                 test_pid: parent,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+               )
+
+      assert_receive {:fake_adapter_opts, opts}, 500
+      assert Keyword.get(opts, :model) == "heavy-model"
+
+      assert %{
+               status: :honored,
+               requested_tier: "heavy",
+               context: %{stage: "initial_spawn", skill: "kickoff", phase: "context_discovery"},
+               resolved: %{adapter: nil, model: "heavy-model"}
+             } = Keyword.fetch!(opts, :model_routing)
+
+      manifest = opts |> Keyword.fetch!(:run_ledger) |> then(&File.read!(&1.manifest_path)) |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "honored"
+      assert manifest["agent"]["model_routing"]["requested_tier"] == "heavy"
+      assert manifest["agent"]["model_routing"]["context"]["stage"] == "initial_spawn"
+      assert manifest["agent"]["model_routing"]["context"]["skill"] == "kickoff"
+      assert manifest["agent"]["model_routing"]["context"]["phase"] == "context_discovery"
+      assert manifest["agent"]["model_routing"]["resolved"]["model"] == "heavy-model"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner falls back when prefer model routing targets an adapter without model selection" do
     test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-model-routing-fallback-#{System.unique_integer([:positive])}")
 
@@ -586,6 +806,162 @@ defmodule Rondo.AgentAdapterTest do
       manifest = opts |> Keyword.fetch!(:run_ledger) |> then(&File.read!(&1.manifest_path)) |> Jason.decode!()
       assert manifest["agent"]["model_routing"]["status"] == "fallback"
       assert manifest["agent"]["model_routing"]["resolved"] == nil
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner uses stage-less initial step routing hints at spawn" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-initial-step-model-routing-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{
+            standard: [%{model: "standard-model"}],
+            heavy: [%{model: "heavy-model"}]
+          }
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-initial-step-model-routing",
+        identifier: "MT-INITIAL-STEP-MODEL",
+        title: "Initial step model routing",
+        description: "Route kickoff context discovery stage-less step to heavy",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: InitialStageLessStepModelHintProcessProvider,
+                 run_ledger: ledger,
+                 test_pid: parent,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+               )
+
+      assert_receive {:fake_adapter_opts, opts}, 500
+      assert Keyword.get(opts, :model) == "heavy-model"
+
+      assert %{
+               status: :honored,
+               requested_tier: "heavy",
+               context: %{skill: "kickoff", phase: "context_discovery"},
+               resolved: %{adapter: nil, model: "heavy-model"}
+             } = Keyword.fetch!(opts, :model_routing)
+
+      manifest = opts |> Keyword.fetch!(:run_ledger) |> then(&File.read!(&1.manifest_path)) |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "honored"
+      assert manifest["agent"]["model_routing"]["context"]["skill"] == "kickoff"
+      assert manifest["agent"]["model_routing"]["context"]["phase"] == "context_discovery"
+      assert manifest["agent"]["model_routing"]["resolved"]["model"] == "heavy-model"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner records unresolved required initial routing before blocking" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-initial-routing-unresolved-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{standard: [%{model: "standard-model"}]}
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-initial-routing-unresolved",
+        identifier: "MT-INITIAL-ROUTING-UNRESOLVED",
+        title: "Initial routing unresolved",
+        description: "Required contextual route cannot resolve a model",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+
+      assert_raise RuntimeError, ~r/model_routing_blocked/, fn ->
+        AgentRunner.run(issue, parent,
+          agent_adapter: FakeAdapter,
+          process_provider: InitialRequiredUnresolvedModelHintProcessProvider,
+          run_ledger: ledger,
+          test_pid: parent,
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+        )
+      end
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "blocked"
+      assert manifest["agent"]["model_routing"]["resolved"] == nil
+      assert manifest["agent"]["model_routing"]["context"]["stage"] == "initial_spawn"
+      assert manifest["agent"]["model_routing"]["context"]["skill"] == "kickoff"
+      assert manifest["agent"]["model_routing"]["context"]["phase"] == "context_discovery"
+      refute_receive {:fake_adapter_opts, _opts}, 100
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner blocks required initial step-aware routing when adapter lacks model selection" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-initial-model-routing-blocked-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        model_routing: %{
+          tiers: %{heavy: [%{model: "heavy-model"}]}
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-initial-model-routing-blocked",
+        identifier: "MT-INITIAL-MODEL-BLOCKED",
+        title: "Initial model routing blocked",
+        description: "Route required kickoff context discovery model",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+
+      assert_raise RuntimeError, ~r/model_routing_blocked/, fn ->
+        AgentRunner.run(issue, parent,
+          agent_adapter: UnsupportedModelSelectionAdapter,
+          process_provider: InitialRequiredContextModelHintProcessProvider,
+          run_ledger: ledger,
+          test_pid: parent,
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+        )
+      end
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "blocked"
+      assert manifest["agent"]["model_routing"]["resolved"] == nil
+      assert manifest["agent"]["model_routing"]["context"]["stage"] == "initial_spawn"
+      assert manifest["agent"]["model_routing"]["context"]["skill"] == "kickoff"
+      assert manifest["agent"]["model_routing"]["context"]["phase"] == "context_discovery"
+      refute_receive {:fake_adapter_opts, _opts}, 100
     after
       File.rm_rf(test_root)
     end
