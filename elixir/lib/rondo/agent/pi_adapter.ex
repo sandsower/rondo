@@ -184,10 +184,10 @@ defmodule Rondo.Agent.PiAdapter do
       else
         receive do
           {^port, {:data, {:eol, line}}} ->
-            help_probe_loop(port, deadline, output <> line <> "\n")
+            help_probe_loop(port, deadline, bounded_help_probe_output(output, line <> "\n"))
 
           {^port, {:data, {:noeol, chunk}}} ->
-            help_probe_loop(port, deadline, output <> chunk)
+            help_probe_loop(port, deadline, bounded_help_probe_output(output, chunk))
 
           {^port, {:exit_status, _status}} ->
             output
@@ -197,6 +197,17 @@ defmodule Rondo.Agent.PiAdapter do
             :timeout
         end
       end
+    end
+  end
+
+  defp bounded_help_probe_output(output, chunk) do
+    combined = output <> chunk
+    combined_size = byte_size(combined)
+
+    if combined_size <= @help_probe_line_bytes do
+      combined
+    else
+      binary_part(combined, combined_size - @help_probe_line_bytes, @help_probe_line_bytes)
     end
   end
 
@@ -212,15 +223,17 @@ defmodule Rondo.Agent.PiAdapter do
     os_pid = port_os_pid(port)
     descendant_pids = descendant_pids(os_pid)
 
-    Port.close(port)
-
-    terminate_pids(Enum.reverse(descendant_pids))
-    terminate_process_group(os_pid)
-    terminate_pid(os_pid)
-  rescue
-    ArgumentError -> :ok
-  catch
-    :error, :badarg -> :ok
+    try do
+      Port.close(port)
+    rescue
+      ArgumentError -> :ok
+    catch
+      :error, :badarg -> :ok
+    after
+      terminate_pids(Enum.reverse(descendant_pids))
+      terminate_process_group(os_pid)
+      terminate_pid(os_pid)
+    end
   end
 
   defp port_os_pid(port) do
