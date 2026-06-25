@@ -209,12 +209,77 @@ defmodule Rondo.Agent.PiAdapter do
   defp help_output_model_status(_output), do: :unsupported
 
   defp safe_port_close(port) do
+    os_pid = port_os_pid(port)
+    descendant_pids = descendant_pids(os_pid)
+
     Port.close(port)
+
+    terminate_pids(Enum.reverse(descendant_pids))
+    terminate_process_group(os_pid)
+    terminate_pid(os_pid)
   rescue
     ArgumentError -> :ok
   catch
     :error, :badarg -> :ok
   end
+
+  defp port_os_pid(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, pid} -> pid
+      _info -> nil
+    end
+  rescue
+    _error -> nil
+  catch
+    _kind, _reason -> nil
+  end
+
+  defp descendant_pids(pid) when is_integer(pid) and pid > 0 do
+    case System.cmd("pgrep", ["-P", Integer.to_string(pid)], stderr_to_stdout: true) do
+      {output, 0} ->
+        output
+        |> parse_pids()
+        |> Enum.flat_map(fn child_pid -> descendant_pids(child_pid) ++ [child_pid] end)
+
+      _result ->
+        []
+    end
+  rescue
+    _error -> []
+  end
+
+  defp descendant_pids(_pid), do: []
+
+  defp parse_pids(output) do
+    output
+    |> String.split(~r/\s+/, trim: true)
+    |> Enum.flat_map(fn pid ->
+      case Integer.parse(pid) do
+        {parsed, ""} when parsed > 0 -> [parsed]
+        _invalid -> []
+      end
+    end)
+  end
+
+  defp terminate_pids(pids), do: Enum.each(pids, &terminate_pid/1)
+
+  defp terminate_pid(pid) when is_integer(pid) and pid > 0 do
+    System.cmd("kill", ["-TERM", Integer.to_string(pid)], stderr_to_stdout: true)
+    :ok
+  rescue
+    _error -> :ok
+  end
+
+  defp terminate_pid(_pid), do: :ok
+
+  defp terminate_process_group(pid) when is_integer(pid) and pid > 0 do
+    System.cmd("kill", ["--", "-#{pid}"], stderr_to_stdout: true)
+    :ok
+  rescue
+    _error -> :ok
+  end
+
+  defp terminate_process_group(_pid), do: :ok
 
   defp aggregate_probe_status(statuses) do
     cond do
