@@ -548,6 +548,73 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  test "agent runner passes repo default model routing to pi after delayed help probe" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-pi-model-routing-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-PI-MODEL")
+      pi_binary = Path.join(test_root, "fake-pi")
+      trace_file = Path.join(test_root, "pi-router.trace")
+      File.mkdir_p!(workspace)
+
+      File.write!(pi_binary, """
+      #!/bin/sh
+      if [ "$1" = "--help" ]; then
+        echo '[mcp] noisy startup'
+        sleep 1
+        echo 'Usage: pi --model <pattern>'
+        exit 0
+      fi
+      printf 'ARGV:%s\n' "$*" >> "#{trace_file}"
+      echo '{"type":"session","version":3,"id":"routed-pi-session"}'
+      echo '{"type":"agent_end","result":"done","messages":[]}'
+      exit 0
+      """)
+
+      File.chmod!(pi_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        agent_adapter: "pi",
+        pi_command: pi_binary,
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{standard: [%{adapter: "pi", model: "openai-codex/gpt-5.4-mini"}]}
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-pi-model-routing",
+        identifier: "MT-PI-MODEL",
+        title: "Pi model routing",
+        description: "Route repo default model",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: PiAdapter,
+                 process_provider: FakeProcessProvider,
+                 run_ledger: ledger,
+                 gates: [],
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+               )
+
+      assert File.read!(trace_file) =~ "--model openai-codex/gpt-5.4-mini"
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "honored"
+      assert manifest["agent"]["model_routing"]["resolved"]["model"] == "openai-codex/gpt-5.4-mini"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner falls back when prefer model routing targets an adapter without model selection" do
     test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-model-routing-fallback-#{System.unique_integer([:positive])}")
 
@@ -1682,6 +1749,39 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  test "pi adapter probe accepts delayed noisy help output before timeout" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-pi-adapter-model-probe-slow-help-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      pi_binary = Path.join(test_root, "fake-pi")
+      File.mkdir_p!(workspace_root)
+
+      File.write!(pi_binary, """
+      #!/bin/sh
+      if [ "$1" = "--help" ]; then
+        echo '[mcp] initializing noisy helper'
+        sleep 3
+        echo 'Usage: pi --model <pattern>'
+        exit 0
+      fi
+      exit 0
+      """)
+
+      File.chmod!(pi_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        agent_adapter: "pi",
+        pi_command: pi_binary
+      )
+
+      assert %{checks: %{model_selection: :ok}} = PiAdapter.probe(help_probe_timeout_ms: 5_000)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "pi adapter probe treats hung model help as unsupported" do
     test_root = Path.join(System.tmp_dir!(), "rondo-pi-adapter-model-probe-timeout-#{System.unique_integer([:positive])}")
 
@@ -1707,7 +1807,7 @@ defmodule Rondo.AgentAdapterTest do
         pi_command: pi_binary
       )
 
-      assert %{checks: %{model_selection: :unsupported}} = PiAdapter.probe([])
+      assert %{checks: %{model_selection: :unsupported}} = PiAdapter.probe(help_probe_timeout_ms: 50)
     after
       File.rm_rf(test_root)
     end

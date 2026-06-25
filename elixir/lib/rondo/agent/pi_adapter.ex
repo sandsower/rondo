@@ -11,7 +11,8 @@ defmodule Rondo.Agent.PiAdapter do
   alias Rondo.Pi.{CLI, StreamParser}
 
   @id "pi"
-  @help_probe_timeout_ms 2_000
+  @help_probe_timeout_ms 10_000
+  @help_probe_line_bytes 8_192
 
   @impl true
   def id, do: @id
@@ -33,10 +34,11 @@ defmodule Rondo.Agent.PiAdapter do
 
   @impl true
   @spec probe(keyword()) :: Adapter.probe_result()
-  def probe(_opts \\ []) do
+  def probe(opts \\ []) do
     command = Config.pi_command()
     command_status = command_probe_status(command)
-    model_selection_status = model_selection_probe_status(command, command_status)
+    help_probe_timeout_ms = Keyword.get(opts, :help_probe_timeout_ms, @help_probe_timeout_ms)
+    model_selection_status = model_selection_probe_status(command, command_status, help_probe_timeout_ms)
 
     Adapter.probe_result(aggregate_probe_status([command_status, model_selection_status, :ok, :degraded]), %{
       command: command_status,
@@ -127,44 +129,92 @@ defmodule Rondo.Agent.PiAdapter do
     end
   end
 
-  defp model_selection_probe_status(_command, :missing), do: :unsupported
+  defp model_selection_probe_status(_command, :missing, _timeout_ms), do: :unsupported
 
-  defp model_selection_probe_status(command, :ok) do
+  defp model_selection_probe_status(command, :ok, timeout_ms) do
     command
     |> String.split(~r/\s+/, trim: true)
     |> case do
       [] -> :unsupported
-      [binary | args] -> command_help_model_status(binary, args)
+      [binary | args] -> command_help_model_status(binary, args, timeout_ms)
     end
   end
 
-  defp command_help_model_status(binary, args) do
+  defp command_help_model_status(binary, args, timeout_ms) do
     binary
     |> System.find_executable()
-    |> command_help_model_status_for_executable(args)
+    |> command_help_model_status_for_executable(args, timeout_ms)
   rescue
     _error -> :unsupported
   end
 
-  defp command_help_model_status_for_executable(nil, _args), do: :unsupported
+  defp command_help_model_status_for_executable(nil, _args, _timeout_ms), do: :unsupported
 
-  defp command_help_model_status_for_executable(executable, args) do
+  defp command_help_model_status_for_executable(executable, args, timeout_ms) do
     executable
-    |> system_cmd_with_timeout(args ++ ["--help"], @help_probe_timeout_ms)
+    |> stream_help_for_model_flag(args ++ ["--help"], timeout_ms)
     |> help_output_model_status()
   end
 
-  defp system_cmd_with_timeout(executable, args, timeout_ms) do
-    task = Task.async(fn -> System.cmd(executable, args, stderr_to_stdout: true) end)
-    Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) || :timeout
+  defp stream_help_for_model_flag(executable, args, timeout_ms) do
+    port =
+      Port.open(
+        {:spawn_executable, executable},
+        [:binary, :exit_status, :stderr_to_stdout, {:line, @help_probe_line_bytes}, {:args, args}]
+      )
+
+    deadline = System.monotonic_time(:millisecond) + max(timeout_ms, 0)
+
+    help_probe_loop(port, deadline, "")
+  rescue
+    _error -> :unsupported
   end
 
-  defp help_output_model_status({:ok, {output, 0}}) do
+  defp help_probe_loop(port, deadline, output) do
+    if String.contains?(output, "--model") do
+      safe_port_close(port)
+      :model_flag_seen
+    else
+      now = System.monotonic_time(:millisecond)
+      remaining_ms = max(deadline - now, 0)
+
+      if remaining_ms == 0 do
+        safe_port_close(port)
+        :timeout
+      else
+        receive do
+          {^port, {:data, {:eol, line}}} ->
+            help_probe_loop(port, deadline, output <> line <> "\n")
+
+          {^port, {:data, {:noeol, chunk}}} ->
+            help_probe_loop(port, deadline, output <> chunk)
+
+          {^port, {:exit_status, _status}} ->
+            output
+        after
+          remaining_ms ->
+            safe_port_close(port)
+            :timeout
+        end
+      end
+    end
+  end
+
+  defp help_output_model_status(:model_flag_seen), do: :ok
+
+  defp help_output_model_status(output) when is_binary(output) do
     if String.contains?(output, "--model"), do: :ok, else: :unsupported
   end
 
-  defp help_output_model_status({:ok, {_output, _status}}), do: :unsupported
-  defp help_output_model_status(:timeout), do: :unsupported
+  defp help_output_model_status(_output), do: :unsupported
+
+  defp safe_port_close(port) do
+    Port.close(port)
+  rescue
+    ArgumentError -> :ok
+  catch
+    :error, :badarg -> :ok
+  end
 
   defp aggregate_probe_status(statuses) do
     cond do
