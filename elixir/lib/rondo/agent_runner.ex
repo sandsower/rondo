@@ -164,7 +164,8 @@ defmodule Rondo.AgentRunner do
     with {:ok, provider} <- process_provider_module(opts),
          :ok <- preflight_process_provider(provider, opts),
          {:ok, opts} <- model_routing_opts(provider, opts),
-         {:ok, adapter} <- adapter_module(opts) do
+         {:ok, adapter} <- adapter_module(opts),
+         {:ok, opts} <- ensure_model_selection_supported(adapter, opts) do
       context = %{
         workspace: workspace,
         claude_update_recipient: claude_update_recipient,
@@ -187,10 +188,50 @@ defmodule Rondo.AgentRunner do
     if routing.status == :blocked do
       {:error, {:model_routing_blocked, routing}}
     else
-      opts = apply_model_routing_opts(opts, routing)
+      {:ok, apply_model_routing_opts(opts, routing)}
+    end
+  end
+
+  defp ensure_model_selection_supported(adapter, opts) do
+    routing = Keyword.get(opts, :model_routing)
+
+    if Keyword.has_key?(opts, :model) and model_selection_unsupported?(adapter, opts) do
+      handle_unsupported_model_selection(opts, routing, adapter)
+    else
       maybe_record_model_routing(opts, routing)
       {:ok, opts}
     end
+  end
+
+  defp model_selection_unsupported?(adapter, opts) do
+    adapter
+    |> safe_adapter_probe(opts)
+    |> get_in([:checks, :model_selection])
+    |> Kernel.==(:unsupported)
+  end
+
+  defp safe_adapter_probe(adapter, opts) do
+    adapter.probe(opts)
+  rescue
+    _error -> %{}
+  end
+
+  defp handle_unsupported_model_selection(_opts, %{mode: :require} = routing, adapter) do
+    routing = unsupported_model_selection_routing(routing, adapter, :blocked)
+    {:error, {:model_routing_blocked, routing}}
+  end
+
+  defp handle_unsupported_model_selection(opts, routing, adapter) when is_map(routing) do
+    routing = unsupported_model_selection_routing(routing, adapter, :fallback)
+    opts = opts |> Keyword.delete(:model) |> Keyword.put(:model_routing, routing)
+    maybe_record_model_routing(opts, routing)
+    {:ok, opts}
+  end
+
+  defp handle_unsupported_model_selection(opts, _routing, _adapter), do: {:ok, opts}
+
+  defp unsupported_model_selection_routing(routing, adapter, status) do
+    %{routing | status: status, resolved: nil, reason: "adapter #{adapter.id()} does not support per-run model selection"}
   end
 
   defp resolve_model_routing(provider, opts) do

@@ -112,6 +112,22 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  defmodule UnsupportedModelSelectionAdapter do
+    @behaviour Rondo.Agent.Adapter
+
+    @impl true
+    def id, do: "unsupported_model_selection"
+
+    @impl true
+    def capabilities, do: FakeAdapter.capabilities()
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :degraded, checks: %{model_selection: :unsupported}}
+
+    @impl true
+    def invoke(request), do: FakeAdapter.invoke(request)
+  end
+
   defmodule ModelHintProcessProvider do
     @behaviour Rondo.ProcessProvider
 
@@ -135,6 +151,37 @@ defmodule Rondo.AgentAdapterTest do
 
     @impl true
     def model_routing_hints(_opts \\ []), do: %{"model" => "routed-model"}
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(_action, _classes, _opts \\ []), do: {:error, :not_used}
+  end
+
+  defmodule RequiredModelHintProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "required_model_hint_process"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test, prompt: :test, model_routing_hints: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :ok, checks: %{available: :ok}}
+
+    @impl true
+    def select_gates(_opts \\ []), do: {:ok, Rondo.ProcessProvider.gate_selection_result([])}
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Required model hint prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []), do: %{"model" => "routed-model", "mode" => "require"}
 
     @impl true
     def proof_requirements(_opts \\ []), do: {:ok, []}
@@ -473,6 +520,78 @@ defmodule Rondo.AgentAdapterTest do
       assert_receive {:fake_adapter_opts, opts}, 500
       assert Keyword.get(opts, :model) == "routed-model"
       assert %{status: :honored, resolved: %{model: "routed-model"}} = Keyword.fetch!(opts, :model_routing)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner falls back when prefer model routing targets an adapter without model selection" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-model-routing-fallback-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-model-routing-fallback",
+        identifier: "MT-MODEL-FALLBACK",
+        title: "Model routing fallback",
+        description: "Route model with fallback",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: UnsupportedModelSelectionAdapter,
+                 process_provider: ModelHintProcessProvider,
+                 test_pid: parent,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+               )
+
+      assert_receive {:fake_adapter_opts, opts}, 500
+      refute Keyword.has_key?(opts, :model)
+      assert %{status: :fallback, resolved: nil, reason: reason} = Keyword.fetch!(opts, :model_routing)
+      assert reason =~ "does not support per-run model selection"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner blocks required model routing when adapter lacks model selection" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-model-routing-blocked-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-model-routing-blocked",
+        identifier: "MT-MODEL-BLOCKED",
+        title: "Model routing blocked",
+        description: "Route required model",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+
+      assert_raise RuntimeError, ~r/model_routing_blocked/, fn ->
+        AgentRunner.run(issue, parent,
+          agent_adapter: UnsupportedModelSelectionAdapter,
+          process_provider: RequiredModelHintProcessProvider,
+          test_pid: parent,
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+        )
+      end
+
+      refute_receive {:fake_adapter_opts, _opts}, 100
     after
       File.rm_rf(test_root)
     end
