@@ -11,6 +11,7 @@ defmodule Rondo.Agent.PiAdapter do
   alias Rondo.Pi.{CLI, StreamParser}
 
   @id "pi"
+  @help_probe_timeout_ms 2_000
 
   @impl true
   def id, do: @id
@@ -31,10 +32,13 @@ defmodule Rondo.Agent.PiAdapter do
   end
 
   @impl true
+  @spec probe(keyword()) :: Adapter.probe_result()
   def probe(_opts \\ []) do
-    command_status = command_probe_status(Config.pi_command())
+    command = Config.pi_command()
+    command_status = command_probe_status(command)
+    model_selection_status = model_selection_probe_status(command, command_status)
 
-    Adapter.probe_result(aggregate_probe_status([command_status, :ok, :degraded]), %{
+    Adapter.probe_result(aggregate_probe_status([command_status, model_selection_status, :ok, :degraded]), %{
       command: command_status,
       launch: :subprocess,
       stream_parser: :ok,
@@ -44,6 +48,7 @@ defmodule Rondo.Agent.PiAdapter do
       sandbox: :degraded,
       usage: :best_effort,
       rate_limits: :unsupported,
+      model_selection: model_selection_status,
       diff: :fallback_git_diff,
       final_report: :explicit_result_or_last_assistant_message
     })
@@ -121,6 +126,45 @@ defmodule Rondo.Agent.PiAdapter do
       _path -> :ok
     end
   end
+
+  defp model_selection_probe_status(_command, :missing), do: :unsupported
+
+  defp model_selection_probe_status(command, :ok) do
+    command
+    |> String.split(~r/\s+/, trim: true)
+    |> case do
+      [] -> :unsupported
+      [binary | args] -> command_help_model_status(binary, args)
+    end
+  end
+
+  defp command_help_model_status(binary, args) do
+    binary
+    |> System.find_executable()
+    |> command_help_model_status_for_executable(args)
+  rescue
+    _error -> :unsupported
+  end
+
+  defp command_help_model_status_for_executable(nil, _args), do: :unsupported
+
+  defp command_help_model_status_for_executable(executable, args) do
+    executable
+    |> system_cmd_with_timeout(args ++ ["--help"], @help_probe_timeout_ms)
+    |> help_output_model_status()
+  end
+
+  defp system_cmd_with_timeout(executable, args, timeout_ms) do
+    task = Task.async(fn -> System.cmd(executable, args, stderr_to_stdout: true) end)
+    Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) || :timeout
+  end
+
+  defp help_output_model_status({:ok, {output, 0}}) do
+    if String.contains?(output, "--model"), do: :ok, else: :unsupported
+  end
+
+  defp help_output_model_status({:ok, {_output, _status}}), do: :unsupported
+  defp help_output_model_status(:timeout), do: :unsupported
 
   defp aggregate_probe_status(statuses) do
     cond do

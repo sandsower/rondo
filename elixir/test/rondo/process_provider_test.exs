@@ -138,7 +138,7 @@ defmodule Rondo.ProcessProviderTest do
             }} = Beislid.evaluate_action_policy("gate.run", ["read"])
   end
 
-  test "beislid provider reports missing, unapproved, and unsupported required model artifacts" do
+  test "beislid provider reports missing and unapproved artifacts without blanket-blocking required model hints" do
     missing_path = Path.join(System.tmp_dir!(), "rondo-missing-beislid-#{System.unique_integer([:positive])}.json")
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -162,8 +162,7 @@ defmodule Rondo.ProcessProviderTest do
       process_provider_artifact_path: fixture_path("required_model.json")
     )
 
-    assert %{status: :unsupported, checks: %{blocking: %{model_routing_hints: :unsupported_required_capability}}} =
-             Beislid.probe([])
+    assert %{status: :ok, checks: %{model_routing_hints: :deferred}} = Beislid.probe([])
   end
 
   test "beislid provider handles optional callbacks, source path fallback, and malformed artifacts" do
@@ -334,7 +333,7 @@ defmodule Rondo.ProcessProviderTest do
       process_provider_artifact_path: fixture_path("required_model.json")
     )
 
-    assert {:error, {:unsupported_required_capability, :model_routing_hints}} = Beislid.select_gates()
+    assert {:ok, %{gates: [], metadata: %{provider: "beislid"}}} = Beislid.select_gates()
   end
 
   test "beislid provider prefers source_contract process provider artifact path" do

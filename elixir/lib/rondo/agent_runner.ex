@@ -7,7 +7,7 @@ defmodule Rondo.AgentRunner do
   alias Rondo.Agent.Adapter
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.PiAdapter
-  alias Rondo.{Config, FinalReport, Gates, Linear.Issue, ProcessProvider, Tracker, Workspace}
+  alias Rondo.{Config, FinalReport, Gates, Linear.Issue, ModelRouting, ProcessProvider, RunLedger, Tracker, Workspace}
   alias Rondo.ProcessProvider.{Beislid, Native}
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
@@ -161,9 +161,11 @@ defmodule Rondo.AgentRunner do
   defp send_phase_update(_recipient, _issue, _phase), do: :ok
 
   defp run_agent_turns(workspace, issue, claude_update_recipient, opts) do
-    with {:ok, adapter} <- adapter_module(opts),
-         {:ok, provider} <- process_provider_module(opts),
-         :ok <- preflight_process_provider(provider, opts) do
+    with {:ok, provider} <- process_provider_module(opts),
+         :ok <- preflight_process_provider(provider, opts),
+         {:ok, opts} <- model_routing_opts(provider, opts),
+         {:ok, adapter} <- adapter_module(opts),
+         {:ok, opts} <- ensure_model_selection_supported(adapter, opts) do
       context = %{
         workspace: workspace,
         claude_update_recipient: claude_update_recipient,
@@ -177,6 +179,94 @@ defmodule Rondo.AgentRunner do
       }
 
       do_run_agent_turns(context, issue, 1, Keyword.get(opts, :initial_run_ref))
+    end
+  end
+
+  defp model_routing_opts(provider, opts) do
+    routing = resolve_model_routing(provider, opts)
+
+    if routing.status == :blocked do
+      {:error, {:model_routing_blocked, routing}}
+    else
+      {:ok, apply_model_routing_opts(opts, routing)}
+    end
+  end
+
+  defp ensure_model_selection_supported(adapter, opts) do
+    routing = Keyword.get(opts, :model_routing)
+
+    if Keyword.has_key?(opts, :model) and model_selection_unsupported?(adapter, opts) do
+      handle_unsupported_model_selection(opts, routing, adapter)
+    else
+      maybe_record_model_routing(opts, routing)
+    end
+  end
+
+  defp model_selection_unsupported?(adapter, opts) do
+    case safe_adapter_probe(adapter, opts) do
+      {:ok, %{checks: %{model_selection: :unsupported}}} -> true
+      {:ok, %{checks: %{model_selection: :ok}}} -> false
+      {:error, _reason} -> true
+      _probe -> false
+    end
+  end
+
+  defp safe_adapter_probe(adapter, opts) do
+    {:ok, adapter.probe(opts)}
+  rescue
+    error -> {:error, error}
+  end
+
+  defp handle_unsupported_model_selection(opts, %{mode: :require} = routing, adapter) do
+    routing = unsupported_model_selection_routing(routing, adapter, :blocked)
+
+    with {:ok, _opts} <- maybe_record_model_routing(Keyword.put(opts, :model_routing, routing), routing) do
+      {:error, {:model_routing_blocked, routing}}
+    end
+  end
+
+  defp handle_unsupported_model_selection(opts, routing, adapter) when is_map(routing) do
+    routing = unsupported_model_selection_routing(routing, adapter, :fallback)
+    opts = opts |> Keyword.delete(:model) |> Keyword.put(:model_routing, routing)
+    maybe_record_model_routing(opts, routing)
+  end
+
+  defp handle_unsupported_model_selection(opts, _routing, _adapter), do: {:ok, opts}
+
+  defp unsupported_model_selection_routing(routing, adapter, status) do
+    %{routing | status: status, resolved: nil, reason: "adapter #{adapter.id()} does not support per-run model selection"}
+  end
+
+  defp resolve_model_routing(provider, opts) do
+    ModelRouting.resolve(
+      source_contract: Keyword.get(opts, :source_contract, %{}),
+      model_routing_hints: provider.model_routing_hints(opts),
+      repo_model_routing: Config.model_routing()
+    )
+  end
+
+  defp apply_model_routing_opts(opts, routing) do
+    opts
+    |> Keyword.put(:model_routing, routing)
+    |> maybe_put_routed_model(routing)
+    |> maybe_put_routed_adapter(routing)
+  end
+
+  defp maybe_put_routed_model(opts, %{resolved: %{model: model}}) when is_binary(model), do: Keyword.put(opts, :model, model)
+  defp maybe_put_routed_model(opts, _routing), do: opts
+
+  defp maybe_put_routed_adapter(opts, %{resolved: %{adapter: adapter}}) when is_binary(adapter), do: Keyword.put(opts, :agent_adapter, adapter)
+  defp maybe_put_routed_adapter(opts, _routing), do: opts
+
+  defp maybe_record_model_routing(opts, routing) do
+    case Keyword.get(opts, :run_ledger) do
+      %RunLedger{} = ledger ->
+        with {:ok, ledger} <- RunLedger.update_agent_metadata(ledger, %{"model_routing" => routing}) do
+          {:ok, Keyword.put(opts, :run_ledger, ledger)}
+        end
+
+      _ledger ->
+        {:ok, opts}
     end
   end
 

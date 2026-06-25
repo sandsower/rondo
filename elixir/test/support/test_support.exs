@@ -128,6 +128,7 @@ defmodule Rondo.TestSupport do
           process_provider_kind: "native",
           process_provider_required: false,
           process_provider_artifact_path: nil,
+          model_routing: nil,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -182,6 +183,7 @@ defmodule Rondo.TestSupport do
     process_provider_kind = Keyword.get(config, :process_provider_kind)
     process_provider_required = Keyword.get(config, :process_provider_required)
     process_provider_artifact_path = Keyword.get(config, :process_provider_artifact_path)
+    model_routing = Keyword.get(config, :model_routing)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -244,6 +246,7 @@ defmodule Rondo.TestSupport do
         "  kind: #{yaml_value(process_provider_kind)}",
         "  required: #{yaml_value(process_provider_required)}",
         "  artifact_path: #{yaml_value(process_provider_artifact_path)}",
+        model_routing_yaml(model_routing),
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         gates_yaml(gates),
         clean_eval_yaml(clean_eval_enabled, clean_eval_base_ref, clean_eval_gates),
@@ -303,6 +306,38 @@ defmodule Rondo.TestSupport do
   end
 
   defp yaml_value(value), do: yaml_value(to_string(value))
+
+  defp model_routing_yaml(nil), do: nil
+
+  defp model_routing_yaml(model_routing) when is_map(model_routing) do
+    ["model_routing:" | yaml_block(model_routing, 2)]
+    |> Enum.join("\n")
+  end
+
+  defp model_routing_yaml(model_routing), do: "model_routing: #{yaml_value(model_routing)}"
+
+  defp yaml_block(map, indent) when is_map(map) do
+    Enum.flat_map(map, fn {key, value} -> yaml_block_entry(to_string(key), value, indent) end)
+  end
+
+  defp yaml_block(list, indent) when is_list(list) do
+    Enum.flat_map(list, fn
+      value when is_map(value) ->
+        case yaml_block(value, indent + 2) do
+          [first | rest] -> [String.duplicate(" ", indent) <> "- " <> String.trim_leading(first) | rest]
+          [] -> [String.duplicate(" ", indent) <> "- {}"]
+        end
+
+      value ->
+        [String.duplicate(" ", indent) <> "- #{yaml_value(value)}"]
+    end)
+  end
+
+  defp yaml_block_entry(key, value, indent) when is_map(value) or is_list(value) do
+    [String.duplicate(" ", indent) <> "#{key}:" | yaml_block(value, indent + 2)]
+  end
+
+  defp yaml_block_entry(key, value, indent), do: [String.duplicate(" ", indent) <> "#{key}: #{yaml_value(value)}"]
 
   defp gates_yaml(nil), do: nil
 

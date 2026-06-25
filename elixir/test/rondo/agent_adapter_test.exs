@@ -5,6 +5,7 @@ defmodule Rondo.AgentAdapterTest do
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.PiAdapter
   alias Rondo.ProcessProvider.Beislid
+  alias Rondo.RunLedger
 
   defmodule FakeAdapter do
     @behaviour Rondo.Agent.Adapter
@@ -39,6 +40,7 @@ defmodule Rondo.AgentAdapterTest do
       Process.put(:fake_adapter_invocation, invocation)
 
       send(test_pid, {:fake_adapter_invoked, invocation, prompt, workspace, previous_run_ref})
+      send(test_pid, {:fake_adapter_opts, opts})
 
       run_ref = Adapter.run_ref(id(), "fake-run-#{invocation}", "fake_run_id", true)
 
@@ -109,6 +111,100 @@ defmodule Rondo.AgentAdapterTest do
          "provider" => "fake_process"
        }}
     end
+  end
+
+  defmodule UnsupportedModelSelectionAdapter do
+    @behaviour Rondo.Agent.Adapter
+
+    @impl true
+    def id, do: "unsupported_model_selection"
+
+    @impl true
+    def capabilities, do: FakeAdapter.capabilities()
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :degraded, checks: %{model_selection: :unsupported}}
+
+    @impl true
+    def invoke(request), do: FakeAdapter.invoke(request)
+  end
+
+  defmodule RaisingProbeAdapter do
+    @behaviour Rondo.Agent.Adapter
+
+    @impl true
+    def id, do: "raising_probe"
+
+    @impl true
+    def capabilities, do: FakeAdapter.capabilities()
+
+    @impl true
+    def probe(_opts \\ []), do: raise("probe failed")
+
+    @impl true
+    def invoke(request), do: FakeAdapter.invoke(request)
+  end
+
+  defmodule ModelHintProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "model_hint_process"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test, prompt: :test, model_routing_hints: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :ok, checks: %{available: :ok}}
+
+    @impl true
+    def select_gates(_opts \\ []), do: {:ok, Rondo.ProcessProvider.gate_selection_result([])}
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Model hint prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []), do: %{"model" => "routed-model"}
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(_action, _classes, _opts \\ []), do: {:error, :not_used}
+  end
+
+  defmodule RequiredModelHintProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "required_model_hint_process"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test, prompt: :test, model_routing_hints: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :ok, checks: %{available: :ok}}
+
+    @impl true
+    def select_gates(_opts \\ []), do: {:ok, Rondo.ProcessProvider.gate_selection_result([])}
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Required model hint prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []), do: %{"model" => "routed-model", "mode" => "require"}
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(_action, _classes, _opts \\ []), do: {:error, :not_used}
   end
 
   defmodule FailingGateSelectionProvider do
@@ -364,6 +460,212 @@ defmodule Rondo.AgentAdapterTest do
                      500
 
       refute_receive {:adapter_event, %{event_type: :invocation_completed}}, 100
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "claude code adapter passes per-run model through to Claude CLI" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-claude-code-adapter-model-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "S-MODEL")
+      claude_binary = Path.join(test_root, "fake-claude")
+      trace_file = Path.join(test_root, "claude-adapter-model.trace")
+
+      File.mkdir_p!(workspace)
+
+      File.write!(claude_binary, """
+      #!/bin/sh
+      printf 'ARGV:%s\n' "$*" > "#{trace_file}"
+      echo '{"type":"system","subtype":"init","session_id":"adapter-model-session"}'
+      echo '{"type":"result","session_id":"adapter-model-session","result":"final","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}'
+      exit 0
+      """)
+
+      File.chmod!(claude_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        claude_command: claude_binary
+      )
+
+      assert {:ok, _result} =
+               ClaudeCodeAdapter.invoke(%{
+                 prompt: "do work",
+                 workspace: workspace,
+                 previous_run_ref: nil,
+                 on_event: fn _event -> :ok end,
+                 opts: [model: "routed-model"]
+               })
+
+      assert File.read!(trace_file) =~ "--model routed-model"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner passes resolved provider model routing into adapter opts" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-model-routing-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-model-routing",
+        identifier: "MT-MODEL-ROUTING",
+        title: "Model routing",
+        description: "Route model",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: ModelHintProcessProvider,
+                 run_ledger: ledger,
+                 test_pid: parent,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+               )
+
+      assert_receive {:fake_adapter_opts, opts}, 500
+      assert Keyword.get(opts, :model) == "routed-model"
+      assert %{status: :honored, resolved: %{model: "routed-model"}} = Keyword.fetch!(opts, :model_routing)
+
+      manifest = opts |> Keyword.fetch!(:run_ledger) |> then(&File.read!(&1.manifest_path)) |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "honored"
+      assert manifest["agent"]["model_routing"]["resolved"]["model"] == "routed-model"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner falls back when prefer model routing targets an adapter without model selection" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-model-routing-fallback-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-model-routing-fallback",
+        identifier: "MT-MODEL-FALLBACK",
+        title: "Model routing fallback",
+        description: "Route model with fallback",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: UnsupportedModelSelectionAdapter,
+                 process_provider: ModelHintProcessProvider,
+                 run_ledger: ledger,
+                 test_pid: parent,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+               )
+
+      assert_receive {:fake_adapter_opts, opts}, 500
+      refute Keyword.has_key?(opts, :model)
+      assert %{status: :fallback, resolved: nil, reason: reason} = Keyword.fetch!(opts, :model_routing)
+      assert reason =~ "does not support per-run model selection"
+
+      manifest = opts |> Keyword.fetch!(:run_ledger) |> then(&File.read!(&1.manifest_path)) |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "fallback"
+      assert manifest["agent"]["model_routing"]["resolved"] == nil
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner blocks required model routing when adapter lacks model selection" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-model-routing-blocked-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-model-routing-blocked",
+        identifier: "MT-MODEL-BLOCKED",
+        title: "Model routing blocked",
+        description: "Route required model",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+
+      assert_raise RuntimeError, ~r/model_routing_blocked/, fn ->
+        AgentRunner.run(issue, parent,
+          agent_adapter: UnsupportedModelSelectionAdapter,
+          process_provider: RequiredModelHintProcessProvider,
+          run_ledger: ledger,
+          test_pid: parent,
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+        )
+      end
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "blocked"
+      assert manifest["agent"]["model_routing"]["resolved"] == nil
+      refute_receive {:fake_adapter_opts, _opts}, 100
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner treats adapter model-selection probe errors as unsupported for required routes" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-model-routing-probe-error-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-model-routing-probe-error",
+        identifier: "MT-MODEL-PROBE-ERROR",
+        title: "Model routing probe error",
+        description: "Route required model",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+
+      assert_raise RuntimeError, ~r/model_routing_blocked/, fn ->
+        AgentRunner.run(issue, parent,
+          agent_adapter: RaisingProbeAdapter,
+          process_provider: RequiredModelHintProcessProvider,
+          run_ledger: ledger,
+          test_pid: parent,
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+        )
+      end
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "blocked"
+      assert manifest["agent"]["model_routing"]["resolved"] == nil
+      refute_receive {:fake_adapter_opts, _opts}, 100
     after
       File.rm_rf(test_root)
     end
@@ -1347,6 +1649,68 @@ defmodule Rondo.AgentAdapterTest do
 
     File.chmod!(path, 0o755)
     path
+  end
+
+  test "pi adapter probe reports model selection when pi help exposes --model" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-pi-adapter-model-probe-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      pi_binary = Path.join(test_root, "fake-pi")
+      File.mkdir_p!(workspace_root)
+
+      File.write!(pi_binary, """
+      #!/bin/sh
+      if [ "$1" = "--help" ]; then
+        echo 'Usage: pi --model <pattern>'
+        exit 0
+      fi
+      exit 0
+      """)
+
+      File.chmod!(pi_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        agent_adapter: "pi",
+        pi_command: pi_binary
+      )
+
+      assert %{checks: %{model_selection: :ok}} = PiAdapter.probe([])
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "pi adapter probe treats hung model help as unsupported" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-pi-adapter-model-probe-timeout-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      pi_binary = Path.join(test_root, "fake-pi")
+      File.mkdir_p!(workspace_root)
+
+      File.write!(pi_binary, """
+      #!/bin/sh
+      if [ "$1" = "--help" ]; then
+        sleep 5
+        exit 0
+      fi
+      exit 0
+      """)
+
+      File.chmod!(pi_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        agent_adapter: "pi",
+        pi_command: pi_binary
+      )
+
+      assert %{checks: %{model_selection: :unsupported}} = PiAdapter.probe([])
+    after
+      File.rm_rf(test_root)
+    end
   end
 
   test "pi adapter wraps pi CLI and returns normalized events" do

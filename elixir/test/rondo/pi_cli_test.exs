@@ -109,6 +109,44 @@ defmodule Rondo.Pi.CLITest do
     end
   end
 
+  test "PiCLI.run passes per-run model flag" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-elixir-pi-cli-model-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-205")
+      pi_binary = Path.join(test_root, "fake-pi")
+      trace_file = Path.join(test_root, "pi-model.trace")
+      File.mkdir_p!(workspace)
+
+      File.write!(pi_binary, """
+      #!/bin/sh
+      printf 'ARGV:%s\n' "$*" > "#{trace_file}"
+      echo '{"type":"session","version":3,"id":"model-pi-session"}'
+      echo '{"type":"agent_end","messages":[]}'
+      exit 0
+      """)
+
+      File.chmod!(pi_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        agent_adapter: "pi",
+        pi_command: pi_binary
+      )
+
+      assert {:ok, result} = PiCLI.run("Use routed model", workspace, model: "openai/gpt-4o")
+      assert result.session_id == "model-pi-session"
+
+      trace = File.read!(trace_file)
+      assert trace =~ "--mode json"
+      assert trace =~ "--model openai/gpt-4o"
+      assert trace =~ "Use routed model"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "PiCLI.resume passes --session flag with session_id" do
     test_root = Path.join(System.tmp_dir!(), "rondo-elixir-pi-cli-resume-#{System.unique_integer([:positive])}")
 

@@ -303,7 +303,8 @@ defmodule Rondo.RunLedger do
       "usage" => Map.get(update, :usage, Map.get(update, "usage")),
       "capabilities" => agent_update_value(update, :capabilities),
       "final_report" => agent_update_value(update, :final_report),
-      "diff_source" => agent_update_value(update, :diff_source)
+      "diff_source" => agent_update_value(update, :diff_source),
+      "model_routing" => agent_update_value(update, :model_routing)
     }
     |> drop_nil_values()
   end
@@ -441,7 +442,8 @@ defmodule Rondo.RunLedger do
         "run_ref" => Keyword.get(opts, :agent_run_ref),
         "capabilities" => Keyword.get(opts, :agent_capabilities),
         "final_report" => Keyword.get(opts, :agent_final_report),
-        "diff_source" => Keyword.get(opts, :agent_diff_source)
+        "diff_source" => Keyword.get(opts, :agent_diff_source),
+        "model_routing" => Keyword.get(opts, :model_routing)
       },
       "process_provider" => process_provider_snapshot(opts),
       "mode" => mode_snapshot(opts),
