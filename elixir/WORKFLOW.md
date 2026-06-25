@@ -61,7 +61,7 @@ model_routing:
         model: openrouter/moonshotai/kimi-k2.7-code
     heavy:
       - adapter: pi
-        model: openrouter/moonshotai/kimi-k2.7-code
+        model: openrouter/z-ai/glm-5.2
       - adapter: pi
         model: openrouter/deepseek/deepseek-v4-pro
     frontier:
@@ -117,7 +117,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 This workflow intentionally dogfoods the `pi` adapter and provider-prefixed model routing instead of
 Claude model aliases. Keep unattended runs on real non-Claude routes unless a ticket explicitly
 requires otherwise: default work uses GPT through the pi subscription (`openai-codex/...`), while
-Kimi and DeepSeek coverage runs through OpenRouter (`openrouter/...`). Do not replace these with
+Kimi, GLM, and DeepSeek coverage runs through OpenRouter (`openrouter/...`). Do not replace these with
 `opus`/`sonnet`/`haiku` aliases when tuning this workflow.
 
 - Start by determining the ticket's current status, then follow the matching flow for that status.
