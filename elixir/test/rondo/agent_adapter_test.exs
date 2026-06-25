@@ -650,16 +650,21 @@ defmodule Rondo.AgentAdapterTest do
       }
 
       parent = self()
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
 
       assert_raise RuntimeError, ~r/model_routing_blocked/, fn ->
         AgentRunner.run(issue, parent,
           agent_adapter: RaisingProbeAdapter,
           process_provider: RequiredModelHintProcessProvider,
+          run_ledger: ledger,
           test_pid: parent,
           issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
         )
       end
 
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "blocked"
+      assert manifest["agent"]["model_routing"]["resolved"] == nil
       refute_receive {:fake_adapter_opts, _opts}, 100
     after
       File.rm_rf(test_root)
