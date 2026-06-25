@@ -5,6 +5,7 @@ defmodule Rondo.AgentAdapterTest do
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.PiAdapter
   alias Rondo.ProcessProvider.Beislid
+  alias Rondo.RunLedger
 
   defmodule FakeAdapter do
     @behaviour Rondo.Agent.Adapter
@@ -123,6 +124,22 @@ defmodule Rondo.AgentAdapterTest do
 
     @impl true
     def probe(_opts \\ []), do: %{status: :degraded, checks: %{model_selection: :unsupported}}
+
+    @impl true
+    def invoke(request), do: FakeAdapter.invoke(request)
+  end
+
+  defmodule RaisingProbeAdapter do
+    @behaviour Rondo.Agent.Adapter
+
+    @impl true
+    def id, do: "raising_probe"
+
+    @impl true
+    def capabilities, do: FakeAdapter.capabilities()
+
+    @impl true
+    def probe(_opts \\ []), do: raise("probe failed")
 
     @impl true
     def invoke(request), do: FakeAdapter.invoke(request)
@@ -508,11 +525,13 @@ defmodule Rondo.AgentAdapterTest do
       }
 
       parent = self()
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
 
       assert :ok =
                AgentRunner.run(issue, parent,
                  agent_adapter: FakeAdapter,
                  process_provider: ModelHintProcessProvider,
+                 run_ledger: ledger,
                  test_pid: parent,
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
                )
@@ -520,6 +539,10 @@ defmodule Rondo.AgentAdapterTest do
       assert_receive {:fake_adapter_opts, opts}, 500
       assert Keyword.get(opts, :model) == "routed-model"
       assert %{status: :honored, resolved: %{model: "routed-model"}} = Keyword.fetch!(opts, :model_routing)
+
+      manifest = opts |> Keyword.fetch!(:run_ledger) |> then(&File.read!(&1.manifest_path)) |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "honored"
+      assert manifest["agent"]["model_routing"]["resolved"]["model"] == "routed-model"
     after
       File.rm_rf(test_root)
     end
@@ -544,11 +567,13 @@ defmodule Rondo.AgentAdapterTest do
       }
 
       parent = self()
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
 
       assert :ok =
                AgentRunner.run(issue, parent,
                  agent_adapter: UnsupportedModelSelectionAdapter,
                  process_provider: ModelHintProcessProvider,
+                 run_ledger: ledger,
                  test_pid: parent,
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
                )
@@ -557,6 +582,10 @@ defmodule Rondo.AgentAdapterTest do
       refute Keyword.has_key?(opts, :model)
       assert %{status: :fallback, resolved: nil, reason: reason} = Keyword.fetch!(opts, :model_routing)
       assert reason =~ "does not support per-run model selection"
+
+      manifest = opts |> Keyword.fetch!(:run_ledger) |> then(&File.read!(&1.manifest_path)) |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "fallback"
+      assert manifest["agent"]["model_routing"]["resolved"] == nil
     after
       File.rm_rf(test_root)
     end
@@ -581,10 +610,50 @@ defmodule Rondo.AgentAdapterTest do
       }
 
       parent = self()
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
 
       assert_raise RuntimeError, ~r/model_routing_blocked/, fn ->
         AgentRunner.run(issue, parent,
           agent_adapter: UnsupportedModelSelectionAdapter,
+          process_provider: RequiredModelHintProcessProvider,
+          run_ledger: ledger,
+          test_pid: parent,
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+        )
+      end
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "blocked"
+      assert manifest["agent"]["model_routing"]["resolved"] == nil
+      refute_receive {:fake_adapter_opts, _opts}, 100
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner treats adapter model-selection probe errors as unsupported for required routes" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-model-routing-probe-error-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+      issue = %Issue{
+        id: "issue-model-routing-probe-error",
+        identifier: "MT-MODEL-PROBE-ERROR",
+        title: "Model routing probe error",
+        description: "Route required model",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+
+      assert_raise RuntimeError, ~r/model_routing_blocked/, fn ->
+        AgentRunner.run(issue, parent,
+          agent_adapter: RaisingProbeAdapter,
           process_provider: RequiredModelHintProcessProvider,
           test_pid: parent,
           issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
@@ -1603,6 +1672,37 @@ defmodule Rondo.AgentAdapterTest do
       )
 
       assert %{checks: %{model_selection: :ok}} = PiAdapter.probe([])
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "pi adapter probe treats hung model help as unsupported" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-pi-adapter-model-probe-timeout-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      pi_binary = Path.join(test_root, "fake-pi")
+      File.mkdir_p!(workspace_root)
+
+      File.write!(pi_binary, """
+      #!/bin/sh
+      if [ "$1" = "--help" ]; then
+        sleep 5
+        exit 0
+      fi
+      exit 0
+      """)
+
+      File.chmod!(pi_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        agent_adapter: "pi",
+        pi_command: pi_binary
+      )
+
+      assert %{checks: %{model_selection: :unsupported}} = PiAdapter.probe([])
     after
       File.rm_rf(test_root)
     end

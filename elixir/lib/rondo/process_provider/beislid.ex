@@ -34,9 +34,7 @@ defmodule Rondo.ProcessProvider.Beislid do
   def probe(opts \\ []) do
     case load_artifact(opts) do
       {:ok, artifact} ->
-        checks = probe_checks(artifact)
-        status = if blocking_checks?(checks), do: :unsupported, else: :ok
-        ProcessProvider.probe_result(status, checks)
+        ProcessProvider.probe_result(:ok, probe_checks(artifact))
 
       {:error, reason} ->
         ProcessProvider.probe_result(:missing, %{artifact: {:error, reason}})
@@ -328,8 +326,6 @@ defmodule Rondo.ProcessProvider.Beislid do
 
   defp artifact_action_policy_decision(%{action_policy: %{"decision" => decision}}) when decision in ["allow", "ask", "deny"], do: {:ok, decision}
   defp artifact_action_policy_decision(_artifact), do: {:error, :action_policy_unavailable}
-
-  defp blocking_checks?(checks), do: map_size(Map.get(checks, :blocking, %{})) > 0
 
   defp source_contract_process_provider_path(source_contract) when is_map(source_contract) do
     source_contract

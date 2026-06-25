@@ -169,7 +169,7 @@ defmodule Rondo.Claude.CLI do
 
     base
     |> maybe_add_flag(Config.claude_dangerously_skip_permissions?(), "--dangerously-skip-permissions")
-    |> maybe_add_option(Keyword.get(opts, :model, Config.claude_model()), "--model")
+    |> maybe_add_model_option(opts)
     |> maybe_add_allowed_tools(Config.claude_allowed_tools())
   end
 
@@ -190,15 +190,19 @@ defmodule Rondo.Claude.CLI do
 
     base
     |> maybe_add_flag(Config.claude_dangerously_skip_permissions?(), "--dangerously-skip-permissions")
-    |> maybe_add_option(Keyword.get(opts, :model, Config.claude_model()), "--model")
+    |> maybe_add_model_option(opts)
     |> maybe_add_allowed_tools(Config.claude_allowed_tools())
   end
 
   defp maybe_add_flag(args, true, flag), do: args ++ [flag]
   defp maybe_add_flag(args, _, _flag), do: args
 
-  defp maybe_add_option(args, nil, _opt), do: args
-  defp maybe_add_option(args, value, opt), do: args ++ [opt, value]
+  defp maybe_add_model_option(args, opts) do
+    case Keyword.get(opts, :model, Config.claude_model()) do
+      model when is_binary(model) and model != "" -> args ++ ["--model", model]
+      _model -> args
+    end
+  end
 
   defp maybe_add_allowed_tools(args, nil), do: args
   defp maybe_add_allowed_tools(args, []), do: args

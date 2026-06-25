@@ -3,16 +3,34 @@ defmodule Rondo.ModelRoutingTest do
 
   alias Rondo.ModelRouting
 
-  test "source-contract hints outrank provider hints and use repo tier overrides" do
+  test "source-contract hints override provider hints by key and complementary hints merge" do
     assert %{
              status: :honored,
+             requested_tier: "light",
+             resolved: %{adapter: "pi", model: "provider-model"},
+             reason: reason
+           } =
+             ModelRouting.resolve(
+               source_contract: %{model_routing: %{"tier" => "light", "adapter" => "pi"}},
+               model_routing_hints: %{"model" => "provider-model", "adapter" => "claude_code"},
+               repo_model_routing: %{tiers: %{light: [%{adapter: "pi", model: "openai/gpt-4o-mini"}]}}
+             )
+
+    assert reason =~ "resolved tier light"
+  end
+
+  test "repo defaults supply routing when no hint is present" do
+    assert %{
+             status: :honored,
+             mode: :require,
              requested_tier: "light",
              resolved: %{adapter: "pi", model: "openai/gpt-4o-mini"}
            } =
              ModelRouting.resolve(
-               source_contract: %{model_routing: %{"tier" => "light"}},
-               model_routing_hints: %{"model" => "provider-model"},
-               repo_model_routing: %{tiers: %{light: [%{adapter: "pi", model: "openai/gpt-4o-mini"}]}}
+               repo_model_routing: %{
+                 defaults: %{tier: "light", mode: "require"},
+                 tiers: %{light: [%{adapter: "pi", model: "openai/gpt-4o-mini"}]}
+               }
              )
   end
 
@@ -50,7 +68,8 @@ defmodule Rondo.ModelRoutingTest do
              mode: :prefer,
              requested_tier: nil,
              candidates: [%{adapter: nil, model: "routed-model"}],
-             resolved: %{adapter: nil, model: "routed-model"}
+             resolved: %{adapter: nil, model: "routed-model"},
+             reason: "resolved explicit model to routed-model"
            } = ModelRouting.resolve(model_routing_hints: %{"model" => "routed-model"})
   end
 

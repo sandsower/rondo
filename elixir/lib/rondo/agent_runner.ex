@@ -199,33 +199,36 @@ defmodule Rondo.AgentRunner do
       handle_unsupported_model_selection(opts, routing, adapter)
     else
       maybe_record_model_routing(opts, routing)
-      {:ok, opts}
     end
   end
 
   defp model_selection_unsupported?(adapter, opts) do
-    adapter
-    |> safe_adapter_probe(opts)
-    |> get_in([:checks, :model_selection])
-    |> Kernel.==(:unsupported)
+    case safe_adapter_probe(adapter, opts) do
+      {:ok, %{checks: %{model_selection: :unsupported}}} -> true
+      {:ok, %{checks: %{model_selection: :ok}}} -> false
+      {:error, _reason} -> true
+      _probe -> false
+    end
   end
 
   defp safe_adapter_probe(adapter, opts) do
-    adapter.probe(opts)
+    {:ok, adapter.probe(opts)}
   rescue
-    _error -> %{}
+    error -> {:error, error}
   end
 
-  defp handle_unsupported_model_selection(_opts, %{mode: :require} = routing, adapter) do
+  defp handle_unsupported_model_selection(opts, %{mode: :require} = routing, adapter) do
     routing = unsupported_model_selection_routing(routing, adapter, :blocked)
-    {:error, {:model_routing_blocked, routing}}
+
+    with {:ok, _opts} <- maybe_record_model_routing(Keyword.put(opts, :model_routing, routing), routing) do
+      {:error, {:model_routing_blocked, routing}}
+    end
   end
 
   defp handle_unsupported_model_selection(opts, routing, adapter) when is_map(routing) do
     routing = unsupported_model_selection_routing(routing, adapter, :fallback)
     opts = opts |> Keyword.delete(:model) |> Keyword.put(:model_routing, routing)
     maybe_record_model_routing(opts, routing)
-    {:ok, opts}
   end
 
   defp handle_unsupported_model_selection(opts, _routing, _adapter), do: {:ok, opts}
@@ -257,8 +260,13 @@ defmodule Rondo.AgentRunner do
 
   defp maybe_record_model_routing(opts, routing) do
     case Keyword.get(opts, :run_ledger) do
-      %RunLedger{} = ledger -> RunLedger.update_agent_metadata(ledger, %{"model_routing" => routing})
-      _ledger -> :ok
+      %RunLedger{} = ledger ->
+        with {:ok, ledger} <- RunLedger.update_agent_metadata(ledger, %{"model_routing" => routing}) do
+          {:ok, Keyword.put(opts, :run_ledger, ledger)}
+        end
+
+      _ledger ->
+        {:ok, opts}
     end
   end
 

@@ -11,6 +11,7 @@ defmodule Rondo.Agent.PiAdapter do
   alias Rondo.Pi.{CLI, StreamParser}
 
   @id "pi"
+  @help_probe_timeout_ms 2_000
 
   @impl true
   def id, do: @id
@@ -31,6 +32,7 @@ defmodule Rondo.Agent.PiAdapter do
   end
 
   @impl true
+  @spec probe(keyword()) :: Adapter.probe_result()
   def probe(_opts \\ []) do
     command = Config.pi_command()
     command_status = command_probe_status(command)
@@ -148,15 +150,21 @@ defmodule Rondo.Agent.PiAdapter do
 
   defp command_help_model_status_for_executable(executable, args) do
     executable
-    |> System.cmd(args ++ ["--help"], stderr_to_stdout: true)
+    |> system_cmd_with_timeout(args ++ ["--help"], @help_probe_timeout_ms)
     |> help_output_model_status()
   end
 
-  defp help_output_model_status({output, 0}) do
+  defp system_cmd_with_timeout(executable, args, timeout_ms) do
+    task = Task.async(fn -> System.cmd(executable, args, stderr_to_stdout: true) end)
+    Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) || :timeout
+  end
+
+  defp help_output_model_status({:ok, {output, 0}}) do
     if String.contains?(output, "--model"), do: :ok, else: :unsupported
   end
 
-  defp help_output_model_status({_output, _status}), do: :unsupported
+  defp help_output_model_status({:ok, {_output, _status}}), do: :unsupported
+  defp help_output_model_status(:timeout), do: :unsupported
 
   defp aggregate_probe_status(statuses) do
     cond do

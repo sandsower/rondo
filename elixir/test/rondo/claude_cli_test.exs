@@ -632,6 +632,44 @@ defmodule Rondo.Claude.CLITest do
     end
   end
 
+  test "ClaudeCLI.run ignores invalid per-run model values" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-claude-cli-invalid-model-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-INVALID-MODEL")
+      claude_binary = Path.join(test_root, "fake-claude")
+      trace_file = Path.join(test_root, "claude-invalid-model.trace")
+      File.mkdir_p!(workspace)
+
+      File.write!(claude_binary, """
+      #!/bin/sh
+      printf 'ARGV:%s\n' "$*" > "#{trace_file}"
+      echo '{"type":"system","subtype":"init","session_id":"invalid-model-session","tools":[]}'
+      echo '{"type":"result","subtype":"success","session_id":"invalid-model-session","usage":{"input_tokens":20,"output_tokens":10}}'
+      exit 0
+      """)
+
+      File.chmod!(claude_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        claude_command: claude_binary,
+        claude_model: "configured-model"
+      )
+
+      assert {:ok, result} = ClaudeCLI.run("Use configured model", workspace, model: 123)
+      assert result.session_id == "invalid-model-session"
+      refute File.read!(trace_file) =~ "--model"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "ClaudeCLI.resume includes configured model and allowed tools" do
     test_root =
       Path.join(

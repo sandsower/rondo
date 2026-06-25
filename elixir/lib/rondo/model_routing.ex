@@ -28,7 +28,7 @@ defmodule Rondo.ModelRouting do
   @spec resolve(keyword()) :: routing_status()
   def resolve(opts \\ []) when is_list(opts) do
     repo_routing = Keyword.get_lazy(opts, :repo_model_routing, &Config.model_routing/0)
-    hints = effective_hints(opts)
+    hints = effective_hints(opts, repo_routing)
     requested_tier = normalize_tier(map_value(hints, :tier))
     floor_tier = repo_floor_tier(repo_routing)
     effective_tier = effective_tier(requested_tier, floor_tier)
@@ -49,11 +49,20 @@ defmodule Rondo.ModelRouting do
     }
   end
 
-  defp effective_hints(opts) do
-    opts
-    |> source_contract_hints()
-    |> first_non_empty(Keyword.get(opts, :model_routing_hints, %{}) || %{})
+  defp effective_hints(opts, repo_routing) do
+    repo_routing
+    |> repo_default_hints()
+    |> Map.merge(normalize_hint_map(Keyword.get(opts, :model_routing_hints, %{}) || %{}))
+    |> Map.merge(normalize_hint_map(source_contract_hints(opts)))
   end
+
+  defp repo_default_hints(repo_routing) when is_map(repo_routing) do
+    repo_routing
+    |> map_value(:defaults)
+    |> normalize_hint_map()
+  end
+
+  defp repo_default_hints(_repo_routing), do: %{}
 
   defp source_contract_hints(opts) do
     opts
@@ -65,9 +74,21 @@ defmodule Rondo.ModelRouting do
     end
   end
 
-  defp first_non_empty(hints, _fallback) when is_map(hints) and map_size(hints) > 0, do: hints
-  defp first_non_empty(_hints, fallback) when is_map(fallback), do: fallback
-  defp first_non_empty(_hints, _fallback), do: %{}
+  defp normalize_hint_map(hints) when is_map(hints) do
+    %{}
+    |> put_normalized_hint(:adapter, normalize_adapter(map_value(hints, :adapter)))
+    |> put_normalized_hint(:agent_adapter, normalize_adapter(map_value(hints, :agent_adapter)))
+    |> put_normalized_hint(:claude_model, normalize_model(map_value(hints, :claude_model)))
+    |> put_normalized_hint(:model, normalize_model(map_value(hints, :model)))
+    |> put_normalized_hint(:mode, normalize_mode_value(map_value(hints, :mode)))
+    |> put_normalized_hint(:required, normalize_required(map_value(hints, :required)))
+    |> put_normalized_hint(:tier, normalize_tier(map_value(hints, :tier)))
+  end
+
+  defp normalize_hint_map(_hints), do: %{}
+
+  defp put_normalized_hint(hints, _key, nil), do: hints
+  defp put_normalized_hint(hints, key, value), do: Map.put(hints, key, value)
 
   defp candidates_for_hint(_tier, model, adapter, _repo_routing) when is_binary(model), do: [%{adapter: adapter, model: model}]
 
@@ -159,6 +180,15 @@ defmodule Rondo.ModelRouting do
   defp normalize_mode(_mode, true), do: :require
   defp normalize_mode(_mode, _required), do: :prefer
 
+  defp normalize_mode_value("require"), do: "require"
+  defp normalize_mode_value(:require), do: :require
+  defp normalize_mode_value("prefer"), do: "prefer"
+  defp normalize_mode_value(:prefer), do: :prefer
+  defp normalize_mode_value(_mode), do: nil
+
+  defp normalize_required(value) when is_boolean(value), do: value
+  defp normalize_required(_value), do: nil
+
   defp map_value(map, key) when is_map(map) and is_atom(key), do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
   defp map_value(_map, _key), do: nil
 
@@ -171,8 +201,14 @@ defmodule Rondo.ModelRouting do
     do: "repo require floor #{effective_tier} raised routing to #{resolved.adapter}/#{resolved.model}"
 
   defp reason(tier, _effective_tier, resolved, _mode, _floor_fallback?) when is_binary(tier) and is_map(resolved),
-    do: "resolved tier #{tier} to #{resolved.adapter}/#{resolved.model}"
+    do: "resolved tier #{tier} to #{candidate_label(resolved)}"
+
+  defp reason(_tier, _effective_tier, resolved, _mode, _floor_fallback?) when is_map(resolved),
+    do: "resolved explicit model to #{candidate_label(resolved)}"
 
   defp reason(_tier, _effective_tier, _resolved, :require, _floor_fallback?), do: "required model routing hint could not be honored"
   defp reason(_tier, _effective_tier, _resolved, _mode, _floor_fallback?), do: "no model routing hint resolved"
+
+  defp candidate_label(%{adapter: adapter, model: model}) when is_binary(adapter), do: "#{adapter}/#{model}"
+  defp candidate_label(%{model: model}), do: model
 end
