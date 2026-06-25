@@ -707,6 +707,73 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  test "agent runner passes repo default model routing to pi after delayed help probe" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-pi-model-routing-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-PI-MODEL")
+      pi_binary = Path.join(test_root, "fake-pi")
+      trace_file = Path.join(test_root, "pi-router.trace")
+      File.mkdir_p!(workspace)
+
+      File.write!(pi_binary, """
+      #!/bin/sh
+      if [ "$1" = "--help" ]; then
+        echo '[mcp] noisy startup'
+        sleep 1
+        echo 'Usage: pi --model <pattern>'
+        exit 0
+      fi
+      printf 'ARGV:%s\n' "$*" >> "#{trace_file}"
+      echo '{"type":"session","version":3,"id":"routed-pi-session"}'
+      echo '{"type":"agent_end","result":"done","messages":[]}'
+      exit 0
+      """)
+
+      File.chmod!(pi_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        agent_adapter: "pi",
+        pi_command: pi_binary,
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{standard: [%{adapter: "pi", model: "openai-codex/gpt-5.4-mini"}]}
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-pi-model-routing",
+        identifier: "MT-PI-MODEL",
+        title: "Pi model routing",
+        description: "Route repo default model",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: PiAdapter,
+                 process_provider: FakeProcessProvider,
+                 run_ledger: ledger,
+                 gates: [],
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+               )
+
+      assert File.read!(trace_file) =~ "--model openai-codex/gpt-5.4-mini"
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "honored"
+      assert manifest["agent"]["model_routing"]["resolved"]["model"] == "openai-codex/gpt-5.4-mini"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner uses initial step-aware routing hints at spawn" do
     test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-initial-model-routing-#{System.unique_integer([:positive])}")
 
@@ -2058,6 +2125,82 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  test "pi adapter probe accepts delayed noisy help output before timeout" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-pi-adapter-model-probe-slow-help-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      pi_binary = Path.join(test_root, "fake-pi")
+      File.mkdir_p!(workspace_root)
+
+      File.write!(pi_binary, """
+      #!/bin/sh
+      if [ "$1" = "--help" ]; then
+        echo '[mcp] initializing noisy helper'
+        sleep 3
+        echo 'Usage: pi --model <pattern>'
+        exit 0
+      fi
+      exit 0
+      """)
+
+      File.chmod!(pi_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        agent_adapter: "pi",
+        pi_command: pi_binary
+      )
+
+      assert %{checks: %{model_selection: :ok}} = PiAdapter.probe(help_probe_timeout_ms: 5_000)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "pi adapter probe terminates help subprocess tree after early model detection" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-pi-adapter-model-probe-cleanup-#{System.unique_integer([:positive])}")
+    child_pid_file = Path.join(test_root, "help-child.pid")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      pi_binary = Path.join(test_root, "fake-pi")
+      File.mkdir_p!(workspace_root)
+
+      File.write!(pi_binary, """
+      #!/bin/sh
+      if [ "$1" = "--help" ]; then
+        sleep 30 &
+        child=$!
+        echo "$child" > "#{child_pid_file}"
+        echo 'Usage: pi --model <pattern>'
+        wait "$child"
+        exit 0
+      fi
+      exit 0
+      """)
+
+      File.chmod!(pi_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        agent_adapter: "pi",
+        pi_command: pi_binary
+      )
+
+      assert %{checks: %{model_selection: :ok}} = PiAdapter.probe(help_probe_timeout_ms: 5_000)
+
+      child_pid = child_pid_file |> File.read!() |> String.trim()
+      assert_process_exits(child_pid)
+    after
+      if File.exists?(child_pid_file) do
+        child_pid_file |> File.read!() |> String.trim() |> terminate_test_pid()
+      end
+
+      File.rm_rf(test_root)
+    end
+  end
+
   test "pi adapter probe treats hung model help as unsupported" do
     test_root = Path.join(System.tmp_dir!(), "rondo-pi-adapter-model-probe-timeout-#{System.unique_integer([:positive])}")
 
@@ -2083,7 +2226,7 @@ defmodule Rondo.AgentAdapterTest do
         pi_command: pi_binary
       )
 
-      assert %{checks: %{model_selection: :unsupported}} = PiAdapter.probe([])
+      assert %{checks: %{model_selection: :unsupported}} = PiAdapter.probe(help_probe_timeout_ms: 50)
     after
       File.rm_rf(test_root)
     end
@@ -2227,6 +2370,39 @@ defmodule Rondo.AgentAdapterTest do
   defp fixture_path(filename) do
     Path.expand(Path.join([__DIR__, "..", "fixtures", "beislid_process_provider", filename]))
   end
+
+  defp assert_process_exits(pid, attempts \\ 20)
+
+  defp assert_process_exits(pid, attempts) when attempts > 0 do
+    if process_alive?(pid) do
+      Process.sleep(50)
+      assert_process_exits(pid, attempts - 1)
+    else
+      :ok
+    end
+  end
+
+  defp assert_process_exits(pid, 0), do: refute(process_alive?(pid))
+
+  defp process_alive?(pid) when is_binary(pid) and pid != "" do
+    case System.cmd("kill", ["-0", pid], stderr_to_stdout: true) do
+      {_output, 0} -> true
+      _result -> false
+    end
+  rescue
+    _error -> false
+  end
+
+  defp process_alive?(_pid), do: false
+
+  defp terminate_test_pid(pid) when is_binary(pid) and pid != "" do
+    System.cmd("kill", ["-TERM", pid], stderr_to_stdout: true)
+    :ok
+  rescue
+    _error -> :ok
+  end
+
+  defp terminate_test_pid(_pid), do: :ok
 
   test "agent runner fails explicitly when a non-resumable adapter is asked to continue" do
     test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-nonresumable-adapter-#{System.unique_integer([:positive])}")
