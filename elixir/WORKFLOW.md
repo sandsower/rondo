@@ -33,7 +33,7 @@ gates:
     command: cd elixir && make all
     timeout_ms: 600000
 agent:
-  adapter: claude_code
+  adapter: pi
   max_concurrent_agents: 10
   max_turns: 20
 claude:
@@ -46,6 +46,29 @@ pi:
   command: pi
   turn_timeout_ms: 3600000
   stall_timeout_ms: 300000
+model_routing:
+  defaults:
+    tier: standard
+    mode: prefer
+  tiers:
+    light:
+      - adapter: pi
+        model: openrouter/deepseek/deepseek-chat
+    standard:
+      - adapter: pi
+        model: openai-codex/gpt-5.4-mini
+      - adapter: pi
+        model: openrouter/moonshotai/kimi-k2.7-code
+    heavy:
+      - adapter: pi
+        model: openrouter/z-ai/glm-5.2
+      - adapter: pi
+        model: openrouter/deepseek/deepseek-v4-pro
+    frontier:
+      - adapter: pi
+        model: openai-codex/gpt-5.5
+      - adapter: pi
+        model: openrouter/deepseek/deepseek-v4-pro
 process_provider:
   kind: native
   required: false
@@ -90,6 +113,12 @@ Work only in the provided repository copy. Do not touch any other path.
 The agent should be able to talk to Linear, either via a configured Linear MCP server or injected `linear_graphql` tool. If none are present, stop and ask the user to configure Linear.
 
 ## Default posture
+
+This workflow intentionally dogfoods the `pi` adapter and provider-prefixed model routing instead of
+Claude model aliases. Keep unattended runs on real non-Claude routes unless a ticket explicitly
+requires otherwise: default work uses GPT through the pi subscription (`openai-codex/...`), while
+Kimi, GLM, and DeepSeek coverage runs through OpenRouter (`openrouter/...`). Do not replace these with
+`opus`/`sonnet`/`haiku` aliases when tuning this workflow.
 
 - Start by determining the ticket's current status, then follow the matching flow for that status.
 - Start every task by opening the tracking workpad comment and bringing it up to date before doing new implementation work.
