@@ -7,6 +7,9 @@
         "workspace-write": "allow",
         "read": "allow"
       },
+      "unknown_action": "allow",
+      "unclassified_action": "allow",
+      "sandbox": { "minimum": "none", "on_uncommitted_changes": "allow" },
       "actions": {
         "dependency.install": "allow",
         "git.push": "allow",
@@ -28,6 +31,9 @@
         "workspace-write": "allow",
         "read": "allow"
       },
+      "unknown_action": "allow",
+      "unclassified_action": "allow",
+      "sandbox": { "minimum": "none", "on_uncommitted_changes": "allow" },
       "actions": {
         "dependency.install": "allow",
         "git.push": "allow",
