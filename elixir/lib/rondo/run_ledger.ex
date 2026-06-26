@@ -157,7 +157,8 @@ defmodule Rondo.RunLedger do
       timestamp = DateTime.utc_now() |> datetime_to_iso()
 
       manifest =
-        ledger.manifest
+        ledger
+        |> latest_manifest()
         |> update_in(["agent"], fn
           agent when is_map(agent) -> Map.merge(agent, agent_metadata)
           _other -> agent_metadata
@@ -548,6 +549,16 @@ defmodule Rondo.RunLedger do
     case Jason.decode(json) do
       {:ok, decoded} -> {:ok, decoded}
       {:error, %Jason.DecodeError{} = error} -> {:error, error}
+    end
+  end
+
+  defp latest_manifest(%__MODULE__{} = ledger) do
+    with {:ok, json} <- File.read(ledger.manifest_path),
+         {:ok, manifest} <- decode_json(json),
+         :ok <- validate_manifest(manifest) do
+      manifest
+    else
+      _reason -> ledger.manifest
     end
   end
 

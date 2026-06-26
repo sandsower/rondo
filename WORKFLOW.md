@@ -27,21 +27,23 @@ workspace:
 hooks:
   after_create: |
     git clone --depth 1 git@github.com:sandsower/rondo.git .
+    git checkout -B rondo/{{ issue.identifier }}
     if command -v mise >/dev/null 2>&1; then
       cd elixir && mise trust && mise exec -- mix deps.get
     fi
+  before_run: git checkout -B rondo/{{ issue.identifier }}
   timeout_ms: 300000
 gates:
   - name: format
-    command: cd elixir && mix format --check-formatted
+    command: cd elixir && mise exec -- mix format --check-formatted
   - name: credo
-    command: cd elixir && mix credo --strict
+    command: cd elixir && mise exec -- mix credo --strict
   - name: elixir-ci
-    command: cd elixir && make all
+    command: cd elixir && mise exec -- make all
     timeout_ms: 900000
 agent:
   adapter: pi
-  max_concurrent_agents: 2
+  max_concurrent_agents: 1
   max_turns: 20
 claude:
   command: claude
@@ -52,6 +54,29 @@ pi:
   command: pi
   turn_timeout_ms: 3600000
   stall_timeout_ms: 300000
+model_routing:
+  defaults:
+    tier: standard
+    mode: prefer
+  tiers:
+    light:
+      - adapter: pi
+        model: openrouter/deepseek/deepseek-chat
+    standard:
+      - adapter: pi
+        model: openai-codex/gpt-5.4-mini
+      - adapter: pi
+        model: openrouter/moonshotai/kimi-k2.7-code
+    heavy:
+      - adapter: pi
+        model: openrouter/z-ai/glm-5.2
+      - adapter: pi
+        model: openrouter/deepseek/deepseek-v4-pro
+    frontier:
+      - adapter: pi
+        model: openai-codex/gpt-5.5
+      - adapter: pi
+        model: openrouter/deepseek/deepseek-v4-pro
 action_policy:
   command: beislid
   run_mode: unattended-auto

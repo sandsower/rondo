@@ -480,10 +480,62 @@ defmodule Rondo.RunLedgerTest do
     assert manifest["agent"]["diff_source"] == "fallback_git_diff"
 
     bad_agent_ledger = %{ledger | manifest: Map.put(ledger.manifest, "agent", "not-a-map")}
+    File.write!(bad_agent_ledger.manifest_path, Jason.encode!(bad_agent_ledger.manifest))
     assert {:ok, bad_agent_ledger} = RunLedger.update_agent_metadata(bad_agent_ledger, %{"adapter" => "fake"})
     assert bad_agent_ledger.manifest["agent"] == %{"adapter" => "fake"}
 
     assert RunLedger.agent_metadata_for_agent_update(%{raw: "not-a-map"}) == %{}
+  end
+
+  test "update_agent_metadata preserves model routing written by another ledger copy" do
+    workspace_root = tmp_dir("ledger-agent-metadata-stale")
+    issue = issue_fixture()
+
+    assert {:ok, stale_ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "57a1e000"
+             )
+
+    assert {:ok, _current_ledger} =
+             RunLedger.update_agent_metadata(stale_ledger, %{
+               "model_routing" => %{status: :honored, resolved: %{adapter: :pi, model: "openai-codex/gpt-5.4-mini"}}
+             })
+
+    assert {:ok, updated_from_stale} =
+             RunLedger.update_agent_metadata(stale_ledger, %{
+               "session_id" => "session-after-routing",
+               "run_ref" => %{adapter: "pi", provider_ref: "session-after-routing", provider_ref_kind: "session_id", resumable?: true}
+             })
+
+    manifest = decode_json!(updated_from_stale.manifest_path)
+    assert manifest["agent"]["session_id"] == "session-after-routing"
+
+    assert manifest["agent"]["model_routing"] == %{
+             "status" => "honored",
+             "resolved" => %{"adapter" => "pi", "model" => "openai-codex/gpt-5.4-mini"}
+           }
+  end
+
+  test "update_agent_metadata falls back to in-memory manifest when on-disk manifest is unreadable" do
+    workspace_root = tmp_dir("ledger-agent-metadata-unreadable")
+    issue = issue_fixture()
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "57a1e001"
+             )
+
+    File.write!(ledger.manifest_path, "not json")
+
+    assert {:ok, updated_ledger} = RunLedger.update_agent_metadata(ledger, %{"adapter" => "pi"})
+    assert updated_ledger.manifest["agent"]["adapter"] == "pi"
+
+    manifest = decode_json!(updated_ledger.manifest_path)
+    assert manifest["agent"]["adapter"] == "pi"
   end
 
   test "load_manifest accepts either run directory or manifest path" do
