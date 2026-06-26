@@ -459,7 +459,11 @@ defmodule Rondo.Orchestrator do
 
     _ledger = ledger
 
-    Logger.info("Released stale paused claim issue_id=#{issue_id} issue_identifier=#{Map.get(paused_entry, :identifier)} reason=#{reason}")
+    Logger.info(
+      "Released stale paused claim issue_id=#{issue_id} " <>
+        "issue_identifier=#{Map.get(paused_entry, :identifier)} " <>
+        "session_id=#{Map.get(paused_entry, :session_id) || "n/a"} reason=#{reason}"
+    )
 
     %{
       state
@@ -1749,11 +1753,8 @@ defmodule Rondo.Orchestrator do
 
   defp paused_interrupt_lookup(_state, _issue_ref), do: nil
 
-  defp paused_blocked_dispatch_reason(metadata) when is_map(metadata) do
-    case Map.get(metadata, :stale_reason) do
-      nil -> "paused_claim"
-      reason -> "paused_claim:#{reason}"
-    end
+  defp paused_blocked_dispatch_reason(_metadata) do
+    "paused_claim"
   end
 
   @spec submit_guidance(String.t(), String.t()) :: {:ok, map()} | {:error, term()} | :unavailable
