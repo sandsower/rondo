@@ -1,7 +1,12 @@
 {
   "modes": {
     "supervised-auto": {
-      "rules": { "dependency-install": "allow", "git-remote": "allow" },
+      "rules": {
+        "dependency-install": "allow",
+        "git-remote": "allow",
+        "workspace-write": "allow",
+        "read": "allow"
+      },
       "actions": {
         "dependency.install": "allow",
         "git.push": "allow",
@@ -9,11 +14,20 @@
         "gh.pr.ready": "allow",
         "gh.pr.merge": "allow",
         "pr.review.reply": "allow",
-        "ticket.comment": "allow"
+        "ticket.comment": "allow",
+        "tracker.issue.transition": "allow",
+        "workspace.lifecycle.create": "allow",
+        "workspace.lifecycle.remove_stale_path": "allow",
+        "workspace.lifecycle.remove": "allow"
       }
     },
     "unattended-auto": {
-      "rules": { "dependency-install": "allow", "git-remote": "allow" },
+      "rules": {
+        "dependency-install": "allow",
+        "git-remote": "allow",
+        "workspace-write": "allow",
+        "read": "allow"
+      },
       "actions": {
         "dependency.install": "allow",
         "git.push": "allow",
@@ -21,7 +35,11 @@
         "gh.pr.ready": "allow",
         "gh.pr.merge": "allow",
         "pr.review.reply": "allow",
-        "ticket.comment": "allow"
+        "ticket.comment": "allow",
+        "tracker.issue.transition": "allow",
+        "workspace.lifecycle.create": "allow",
+        "workspace.lifecycle.remove_stale_path": "allow",
+        "workspace.lifecycle.remove": "allow"
       }
     }
   }

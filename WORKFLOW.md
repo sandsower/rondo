@@ -43,7 +43,7 @@ gates:
     timeout_ms: 900000
 agent:
   adapter: pi
-  max_concurrent_agents: 1
+  max_concurrent_agents: 5
   max_turns: 20
 claude:
   command: claude
