@@ -287,6 +287,9 @@ defmodule RondoWeb.DashboardLive do
                       <div class="detail-stack">
                         <span class="event-text"><%= guidance_waiting_label(entry) %></span>
                         <span class="muted event-meta"><%= guidance_waiting_meta(entry) %></span>
+                        <%= if paused_claim_status(entry) do %>
+                          <span class="muted event-meta"><%= paused_claim_status(entry) %></span>
+                        <% end %>
                       </div>
                     </td>
                     <td class="mono"><%= entry.paused_at || "n/a" %></td>
@@ -576,6 +579,11 @@ defmodule RondoWeb.DashboardLive do
               <p class="muted" style="font-size: 12px; margin-bottom: 12px;">
                 <%= get_in(@selected_issue_data, [:interrupt, :question]) || get_in(@selected_issue_data, [:interrupt, :recommendation]) || "Provide operator guidance to resume this paused run." %>
               </p>
+              <%= if paused_claim_status(@selected_issue_data) do %>
+                <p class="muted" style="font-size: 12px; margin-bottom: 12px;">
+                  <%= paused_claim_status(@selected_issue_data) %>
+                </p>
+              <% end %>
               <form phx-submit="submit_guidance">
                 <input type="hidden" name="issue-id" value={@selected_issue_data[:issue_id]} />
                 <textarea
@@ -772,6 +780,18 @@ defmodule RondoWeb.DashboardLive do
       get_in(entry, [:interrupt, :recommendation]) ||
       "operator guidance"
   end
+
+  defp paused_claim_status(%{blocks_dispatch: true} = entry) do
+    reason = Map.get(entry, :blocked_dispatch_reason) || "paused_claim"
+    stale = Map.get(entry, :stale_reason)
+    revalidated = Map.get(entry, :revalidated_at)
+
+    ["Blocks dispatch: #{reason}", stale && "stale: #{stale}", revalidated && "revalidated: #{revalidated}"]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" · ")
+  end
+
+  defp paused_claim_status(_entry), do: nil
 
   defp humanize_interrupt_reason("repeated_gate_failure"), do: "Gate failure"
   defp humanize_interrupt_reason("action_policy_guidance_required"), do: "Action policy"

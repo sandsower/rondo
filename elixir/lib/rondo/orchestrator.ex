@@ -401,7 +401,8 @@ defmodule Rondo.Orchestrator do
         mark_paused_entry_revalidated(state, issue_id, paused_entry, %{
           issue: issue,
           state: issue.state,
-          tracker_visibility: "known"
+          tracker_visibility: "known",
+          stale_reason: nil
         })
     end
   end
@@ -417,7 +418,8 @@ defmodule Rondo.Orchestrator do
         mark_paused_entry_revalidated(state, issue_id, paused_entry, %{
           issue: issue,
           state: issue.state,
-          tracker_visibility: "known"
+          tracker_visibility: "known",
+          stale_reason: nil
         })
 
       {:error, reason} ->
@@ -431,8 +433,7 @@ defmodule Rondo.Orchestrator do
   end
 
   defp action_policy_guidance_interrupt?(paused_entry) do
-    get_in(paused_entry, [:interrupt, "reason"]) == "action_policy_guidance_required" and
-      is_map(get_in(paused_entry, [:interrupt, "blocked_side_effect"]))
+    get_in(paused_entry, [:interrupt, "reason"]) == "action_policy_guidance_required"
   end
 
   defp revalidate_paused_side_effect(paused_entry) do
