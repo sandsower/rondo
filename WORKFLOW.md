@@ -91,7 +91,11 @@ You are working on Linear ticket `{{ issue.identifier }}` in the rondo repo
 
 Tracker duality: Linear is canonical for state; GitHub (sandsower/rondo) is
 canonical for issue body and discussion — fetch the GH body via `gh issue view`
-when the Linear description says "see Source link". Close both sides on completion.
+when the Linear description says "see Source link". Close both sides only after a
+reviewable PR/diff has landed and the ticket is truly complete. Never move a
+Linear issue to In Review/Human Review/Done unless a PR/diff URL or configured
+review artifact is attached; if implementation finishes without that evidence,
+leave the issue In Progress and record the missing handoff in the workpad.
 
 Issue context:
 Identifier: {{ issue.identifier }}

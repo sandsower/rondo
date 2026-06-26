@@ -179,6 +179,10 @@ defmodule RondoWeb.Presenter do
       paused_at: timestamp_payload(Map.get(entry, :paused_at)),
       retry_attempt: Map.get(entry, :retry_attempt),
       tracker_visibility: Map.get(entry, :tracker_visibility),
+      blocks_dispatch: Map.get(entry, :blocks_dispatch, true),
+      blocked_dispatch_reason: Map.get(entry, :blocked_dispatch_reason),
+      stale_reason: Map.get(entry, :stale_reason),
+      revalidated_at: timestamp_payload(Map.get(entry, :revalidated_at)),
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       interrupt: interrupt_payload(Map.get(entry, :interrupt)),
       tokens: %{
@@ -206,6 +210,10 @@ defmodule RondoWeb.Presenter do
       :paused_at,
       :retry_attempt,
       :tracker_visibility,
+      :blocks_dispatch,
+      :blocked_dispatch_reason,
+      :stale_reason,
+      :revalidated_at,
       :tokens,
       :event_log
     ])

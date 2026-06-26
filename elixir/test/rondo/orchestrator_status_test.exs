@@ -34,6 +34,302 @@ defmodule Rondo.OrchestratorStatusTest do
     assert {:error, :guidance_interrupt_not_found} = Orchestrator.submit_guidance(pid, "missing", "approve_once")
   end
 
+  test "guidance can address paused claims by issue identifier" do
+    issue = %Issue{
+      id: "issue-guidance-identifier",
+      identifier: "MT-GUIDE-ID",
+      title: "Identifier guidance",
+      description: "Abort by identifier",
+      state: "Todo",
+      url: "https://example.org/issues/MT-GUIDE-ID"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :IdentifierGuidanceOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    paused_entry = %{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      issue: issue,
+      state: issue.state,
+      session_id: nil,
+      run_id: "run-guidance-identifier",
+      run_dir: nil,
+      workspace: nil,
+      paused_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      retry_attempt: 0,
+      latest_gate: nil,
+      interrupt: %{"reason" => "action_policy_guidance_required"},
+      tracker_visibility: "known",
+      ledger: nil
+    }
+
+    :sys.replace_state(pid, fn state ->
+      %{state | paused_interrupts: %{issue.id => paused_entry}, claimed: MapSet.new([issue.id])}
+    end)
+
+    assert {:ok, %{status: :aborted, issue_id: "issue-guidance-identifier"}} =
+             Orchestrator.submit_guidance(orchestrator_name, "MT-GUIDE-ID", "abort_run")
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert snapshot.paused == []
+    refute MapSet.member?(:sys.get_state(pid).claimed, issue.id)
+  end
+
+  test "refresh releases stale action-policy paused claims when policy now allows" do
+    workspace_root = tmp_dir("orchestrator-stale-paused-policy-allow")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: fake_claude_script(workspace_root, "stale-paused-session", 1),
+      action_policy_command: fake_action_policy_script(workspace_root, "allow")
+    )
+
+    issue = %Issue{
+      id: "issue-stale-paused-policy",
+      identifier: "MT-STALE-PAUSED",
+      title: "Stale paused policy",
+      description: "Should redispatch after policy allows",
+      state: "Todo",
+      url: "https://example.org/issues/MT-STALE-PAUSED"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+    Application.put_env(:rondo, :memory_tracker_recipient, self())
+
+    orchestrator_name = Module.concat(__MODULE__, :StalePausedPolicyOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_recipient)
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    paused_entry = %{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      issue: issue,
+      state: issue.state,
+      session_id: nil,
+      run_id: "run-stale-paused-policy",
+      run_dir: nil,
+      workspace: Path.join(workspace_root, issue.identifier),
+      paused_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      retry_attempt: 0,
+      latest_gate: nil,
+      interrupt: %{
+        "reason" => "action_policy_guidance_required",
+        "blocked_side_effect" => %{
+          "action" => "workspace.lifecycle.create",
+          "classes" => ["workspace-write"],
+          "operation" => "Create workspace for MT-STALE-PAUSED"
+        },
+        "policy" => %{"decision" => "ask"}
+      },
+      tracker_visibility: "known",
+      ledger: nil
+    }
+
+    state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _state ->
+      %{
+        state
+        | max_concurrent_agents: 1,
+          poll_interval_ms: 60_000,
+          paused_interrupts: %{issue.id => paused_entry},
+          claimed: MapSet.new([issue.id])
+      }
+    end)
+
+    send(pid, {:tick, state.tick_token})
+
+    assert_receive {:memory_tracker_state_update, "issue-stale-paused-policy", "In Progress"}, 10_000
+
+    running_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).running do
+          [entry | _] -> entry
+          _ -> nil
+        end
+      end)
+
+    assert running_entry.issue_id == issue.id
+    assert GenServer.call(pid, :snapshot).paused == []
+  end
+
+  test "refresh marks malformed action-policy paused claims stale" do
+    workspace_root = tmp_dir("orchestrator-malformed-paused-policy")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: fake_claude_script(workspace_root, "malformed-paused-session", 0),
+      action_policy_command: fake_action_policy_script(workspace_root, "allow")
+    )
+
+    issue = %Issue{
+      id: "issue-malformed-paused-policy",
+      identifier: "MT-MALFORMED-PAUSED",
+      title: "Malformed paused policy",
+      description: "Should mark malformed policy pause stale",
+      state: "Todo",
+      url: "https://example.org/issues/MT-MALFORMED-PAUSED"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :MalformedPausedPolicyOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    paused_entry = %{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      issue: issue,
+      state: issue.state,
+      session_id: nil,
+      run_id: "run-malformed-paused-policy",
+      run_dir: nil,
+      workspace: Path.join(workspace_root, issue.identifier),
+      paused_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      retry_attempt: 0,
+      latest_gate: nil,
+      interrupt: %{"reason" => "action_policy_guidance_required"},
+      tracker_visibility: "known",
+      ledger: nil
+    }
+
+    state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _state ->
+      %{
+        state
+        | max_concurrent_agents: 1,
+          poll_interval_ms: 60_000,
+          paused_interrupts: %{issue.id => paused_entry},
+          claimed: MapSet.new([issue.id])
+      }
+    end)
+
+    send(pid, {:tick, state.tick_token})
+
+    paused_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).paused do
+          [%{issue_id: "issue-malformed-paused-policy", stale_reason: stale_reason} = entry]
+          when is_binary(stale_reason) ->
+            entry
+
+          _ ->
+            nil
+        end
+      end)
+
+    assert paused_entry.stale_reason =~ "invalid_paused_side_effect"
+    assert paused_entry.tracker_visibility == "known"
+    assert paused_entry.blocks_dispatch == true
+  end
+
+  test "refresh clears stale reason after successful paused policy revalidation" do
+    workspace_root = tmp_dir("orchestrator-paused-policy-clear-stale")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: fake_claude_script(workspace_root, "clear-stale-session", 0),
+      action_policy_command: fake_action_policy_script(workspace_root, "ask")
+    )
+
+    issue = %Issue{
+      id: "issue-clear-paused-stale",
+      identifier: "MT-CLEAR-STALE",
+      title: "Clear stale paused policy",
+      description: "Should clear stale marker after revalidation",
+      state: "Todo",
+      url: "https://example.org/issues/MT-CLEAR-STALE"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :ClearPausedStaleOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    paused_entry = %{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      issue: issue,
+      state: issue.state,
+      session_id: nil,
+      run_id: "run-clear-paused-stale",
+      run_dir: nil,
+      workspace: Path.join(workspace_root, issue.identifier),
+      paused_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      retry_attempt: 0,
+      latest_gate: nil,
+      interrupt: %{
+        "reason" => "action_policy_guidance_required",
+        "blocked_side_effect" => %{
+          "action" => "workspace.lifecycle.create",
+          "classes" => ["workspace-write"],
+          "operation" => "Create workspace for MT-CLEAR-STALE"
+        },
+        "policy" => %{"decision" => "ask"}
+      },
+      tracker_visibility: "missing",
+      stale_reason: "issue_not_visible",
+      ledger: nil
+    }
+
+    state = :sys.get_state(pid)
+
+    :sys.replace_state(pid, fn _state ->
+      %{
+        state
+        | max_concurrent_agents: 1,
+          poll_interval_ms: 60_000,
+          paused_interrupts: %{issue.id => paused_entry},
+          claimed: MapSet.new([issue.id])
+      }
+    end)
+
+    send(pid, {:tick, state.tick_token})
+
+    paused_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).paused do
+          [%{issue_id: "issue-clear-paused-stale", stale_reason: nil, revalidated_at: revalidated_at} = entry]
+          when is_binary(revalidated_at) ->
+            entry
+
+          _ ->
+            nil
+        end
+      end)
+
+    assert paused_entry.stale_reason == nil
+    assert paused_entry.tracker_visibility == "known"
+    assert get_in(paused_entry.interrupt, ["policy", "decision"]) == "ask"
+  end
+
   test "guidance and refresh helpers return unavailable when calls exit" do
     parent = self()
     refresh_server = Module.concat(__MODULE__, :CrashingRefreshServer)

@@ -389,10 +389,33 @@ defmodule Rondo.ExtensionsTest do
       started_at: DateTime.utc_now()
     }
 
+    paused_entry = %{
+      identifier: "MT-PAUSED",
+      issue: %Issue{id: "issue-paused", identifier: "MT-PAUSED", state: "Todo"},
+      state: "Todo",
+      session_id: nil,
+      run_id: "run-paused",
+      run_dir: nil,
+      workspace: nil,
+      paused_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      retry_attempt: 0,
+      latest_gate: nil,
+      tracker_visibility: "known",
+      stale_reason: "policy_revalidation_failed: :invalid_paused_side_effect",
+      revalidated_at: "2026-06-26T14:00:00Z",
+      interrupt: %{
+        "reason" => "action_policy_guidance_required",
+        "question" => "Need guidance",
+        "blocked_side_effect" => %{"label" => "Workspace create", "action" => "workspace.lifecycle.create"}
+      }
+    }
+
     :sys.replace_state(orchestrator_pid, fn state ->
       %{
         state
         | running: %{"issue-http" => running_entry},
+          paused_interrupts: %{"issue-paused" => paused_entry},
+          claimed: MapSet.put(state.claimed, "issue-paused"),
           retry_attempts: %{
             "issue-retry" => %{
               attempt: 2,
@@ -411,6 +434,8 @@ defmodule Rondo.ExtensionsTest do
     assert status == 200
     assert Map.fetch!(headers, "content-type") =~ "text/html"
     assert body =~ "Rondo Observability"
+    assert body =~ "Blocks dispatch: paused_claim"
+    assert body =~ "stale: policy_revalidation_failed"
 
     {status, headers, body} = http_request(port, "GET", "/api/v1/state")
     assert status == 200

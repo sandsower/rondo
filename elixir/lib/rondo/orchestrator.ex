@@ -272,7 +272,10 @@ defmodule Rondo.Orchestrator do
   end
 
   defp maybe_dispatch(%State{} = state) do
-    state = reconcile_running_issues(state)
+    state =
+      state
+      |> reconcile_running_issues()
+      |> reconcile_paused_interrupts()
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
@@ -349,6 +352,133 @@ defmodule Rondo.Orchestrator do
           state
       end
     end
+  end
+
+  defp reconcile_paused_interrupts(%State{paused_interrupts: paused_interrupts} = state)
+       when map_size(paused_interrupts) == 0,
+       do: state
+
+  defp reconcile_paused_interrupts(%State{} = state) do
+    paused_ids = Map.keys(state.paused_interrupts)
+
+    case Tracker.fetch_issue_states_by_ids(paused_ids) do
+      {:ok, issues} ->
+        issues_by_id = Map.new(issues, &{&1.id, &1})
+
+        Enum.reduce(state.paused_interrupts, state, fn {issue_id, paused_entry}, state_acc ->
+          issue = Map.get(issues_by_id, issue_id)
+          reconcile_paused_interrupt(state_acc, issue_id, paused_entry, issue)
+        end)
+
+      {:error, reason} ->
+        Logger.debug("Failed to refresh paused issue states: #{inspect(reason)}; keeping paused claims")
+        state
+    end
+  end
+
+  defp reconcile_paused_interrupt(state, issue_id, paused_entry, nil) do
+    mark_paused_entry_revalidated(state, issue_id, paused_entry, %{
+      tracker_visibility: "missing",
+      stale_reason: "issue_not_visible"
+    })
+  end
+
+  defp reconcile_paused_interrupt(%State{} = state, issue_id, paused_entry, %Issue{} = issue) do
+    terminal_states = terminal_state_set()
+    active_states = active_state_set()
+
+    cond do
+      terminal_issue_state?(issue.state, terminal_states) ->
+        release_stale_paused_interrupt(state, issue_id, paused_entry, "issue_terminal")
+
+      !active_issue_state?(issue.state, active_states) ->
+        release_stale_paused_interrupt(state, issue_id, paused_entry, "issue_not_active")
+
+      action_policy_guidance_interrupt?(paused_entry) ->
+        reconcile_action_policy_paused_interrupt(state, issue_id, paused_entry, issue)
+
+      true ->
+        mark_paused_entry_revalidated(state, issue_id, paused_entry, %{
+          issue: issue,
+          state: issue.state,
+          tracker_visibility: "known",
+          stale_reason: nil
+        })
+    end
+  end
+
+  defp reconcile_action_policy_paused_interrupt(state, issue_id, paused_entry, issue) do
+    case revalidate_paused_side_effect(paused_entry) do
+      {:ok, %{"decision" => "allow"}} ->
+        release_stale_paused_interrupt(state, issue_id, paused_entry, "action_policy_now_allows")
+
+      {:ok, envelope} ->
+        paused_entry = put_in(paused_entry, [:interrupt, "policy"], envelope)
+
+        mark_paused_entry_revalidated(state, issue_id, paused_entry, %{
+          issue: issue,
+          state: issue.state,
+          tracker_visibility: "known",
+          stale_reason: nil
+        })
+
+      {:error, reason} ->
+        mark_paused_entry_revalidated(state, issue_id, paused_entry, %{
+          issue: issue,
+          state: issue.state,
+          tracker_visibility: "known",
+          stale_reason: "policy_revalidation_failed: #{inspect(reason)}"
+        })
+    end
+  end
+
+  defp action_policy_guidance_interrupt?(paused_entry) do
+    get_in(paused_entry, [:interrupt, "reason"]) == "action_policy_guidance_required"
+  end
+
+  defp revalidate_paused_side_effect(paused_entry) do
+    side_effect = get_in(paused_entry, [:interrupt, "blocked_side_effect"])
+    action = map_value(side_effect, :action)
+    classes = map_value(side_effect, :classes) || []
+
+    if is_binary(action) and is_list(classes) do
+      Rondo.ActionPolicy.evaluate(action, classes, workspace: Map.get(paused_entry, :workspace))
+    else
+      {:error, :invalid_paused_side_effect}
+    end
+  end
+
+  defp release_stale_paused_interrupt(%State{} = state, issue_id, paused_entry, reason) do
+    ledger = Map.get(paused_entry, :ledger)
+
+    ledger =
+      complete_run_ledger(ledger, :aborted, %{
+        reason: "stale paused claim released: #{reason}",
+        stale_reason: reason
+      })
+
+    _ledger = ledger
+
+    Logger.info(
+      "Released stale paused claim issue_id=#{issue_id} " <>
+        "issue_identifier=#{Map.get(paused_entry, :identifier)} " <>
+        "session_id=#{Map.get(paused_entry, :session_id) || "n/a"} reason=#{reason}"
+    )
+
+    %{
+      state
+      | paused_interrupts: Map.delete(state.paused_interrupts, issue_id),
+        claimed: MapSet.delete(state.claimed, issue_id)
+    }
+  end
+
+  defp mark_paused_entry_revalidated(%State{} = state, issue_id, paused_entry, updates) do
+    paused_entry =
+      paused_entry
+      |> Map.merge(updates)
+      |> Map.put(:revalidated_at, DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601())
+
+    %{state | paused_interrupts: Map.put(state.paused_interrupts, issue_id, paused_entry)}
   end
 
   @doc false
@@ -1608,6 +1738,25 @@ defmodule Rondo.Orchestrator do
     )
   end
 
+  defp paused_interrupt_lookup(%State{paused_interrupts: paused_interrupts}, issue_ref) when is_binary(issue_ref) do
+    Map.get(paused_interrupts, issue_ref)
+    |> case do
+      nil ->
+        Enum.find(paused_interrupts, fn
+          {_issue_id, paused_entry} -> Map.get(paused_entry, :identifier) == issue_ref
+        end)
+
+      paused_entry ->
+        {issue_ref, paused_entry}
+    end
+  end
+
+  defp paused_interrupt_lookup(_state, _issue_ref), do: nil
+
+  defp paused_blocked_dispatch_reason(_metadata) do
+    "paused_claim"
+  end
+
   @spec submit_guidance(String.t(), String.t()) :: {:ok, map()} | {:error, term()} | :unavailable
   def submit_guidance(issue_id, guidance) do
     submit_guidance(__MODULE__, issue_id, guidance)
@@ -1668,12 +1817,12 @@ defmodule Rondo.Orchestrator do
   end
 
   @impl true
-  def handle_call({:submit_guidance, issue_id, guidance}, _from, state) do
-    case Map.get(state.paused_interrupts, issue_id) do
+  def handle_call({:submit_guidance, issue_ref, guidance}, _from, state) do
+    case paused_interrupt_lookup(state, issue_ref) do
       nil ->
         {:reply, {:error, :guidance_interrupt_not_found}, state}
 
-      paused_entry ->
+      {issue_id, paused_entry} ->
         {reply, state} = apply_guidance_response(state, issue_id, paused_entry, String.trim(guidance))
         notify_dashboard()
         {:reply, reply, state}
@@ -1737,6 +1886,10 @@ defmodule Rondo.Orchestrator do
           latest_gate: Map.get(metadata, :latest_gate),
           interrupt: Map.get(metadata, :interrupt, %{}),
           tracker_visibility: Map.get(metadata, :tracker_visibility, "unknown"),
+          blocks_dispatch: MapSet.member?(state.claimed, issue_id),
+          blocked_dispatch_reason: paused_blocked_dispatch_reason(metadata),
+          stale_reason: Map.get(metadata, :stale_reason),
+          revalidated_at: Map.get(metadata, :revalidated_at),
           event_log: Map.get(metadata, :event_log, [])
         }
       end)
