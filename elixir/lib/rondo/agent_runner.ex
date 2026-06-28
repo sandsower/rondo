@@ -26,6 +26,7 @@ defmodule Rondo.AgentRunner do
           try do
             case run_agent_turns(workspace, issue, claude_update_recipient, opts) do
               :ok -> :ok
+              {:pause, interrupt} -> exit({:final_report_invalid, interrupt})
               {:error, reason} -> handle_agent_run_error(issue, reason)
             end
           after
@@ -528,9 +529,17 @@ defmodule Rondo.AgentRunner do
            final_report,
            effective_run_ref
          ) do
-      {:continue, refreshed_issue, current_final_report_fingerprint, next_context} when turn_number < context.max_turns ->
+      {:continue, refreshed_issue, current_final_report_fingerprint, next_context}
+      when turn_number < context.max_turns ->
         Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} turn=#{turn_number}/#{context.max_turns}")
-        do_run_agent_turns(next_context, refreshed_issue, turn_number + 1, effective_run_ref, current_final_report_fingerprint)
+
+        do_run_agent_turns(
+          next_context,
+          refreshed_issue,
+          turn_number + 1,
+          effective_run_ref,
+          current_final_report_fingerprint
+        )
 
       {:continue, refreshed_issue, _current_final_report_fingerprint, _next_context} ->
         Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with delivery still incomplete")
@@ -591,10 +600,28 @@ defmodule Rondo.AgentRunner do
   defp final_report_unparsed_pause(context, issue, analysis, turn_number, final_report, effective_run_ref) do
     case final_report_state_classification(analysis.next_state_hint) do
       :blocked when analysis.status != :valid ->
-        {:pause, final_report_interrupt(context, issue, effective_run_ref, analysis, final_report, turn_number, "blocked_state_unparsed"), clear_live_update_prompt(context)}
+        {:pause,
+         final_report_interrupt(
+           context,
+           issue,
+           effective_run_ref,
+           analysis,
+           final_report,
+           turn_number,
+           "blocked_state_unparsed"
+         ), clear_live_update_prompt(context)}
 
       :terminal when analysis.status != :valid ->
-        {:pause, final_report_interrupt(context, issue, effective_run_ref, analysis, final_report, turn_number, "terminal_state_unparsed"), clear_live_update_prompt(context)}
+        {:pause,
+         final_report_interrupt(
+           context,
+           issue,
+           effective_run_ref,
+           analysis,
+           final_report,
+           turn_number,
+           "terminal_state_unparsed"
+         ), clear_live_update_prompt(context)}
 
       _other ->
         nil
@@ -612,7 +639,16 @@ defmodule Rondo.AgentRunner do
        ) do
     if analysis.status != :valid && previous_final_report_fingerprint && final_report_loop_guardable?(final_report) &&
          final_report_loop_guard?(analysis.fingerprint, previous_final_report_fingerprint) do
-      {:pause, final_report_interrupt(context, issue, effective_run_ref, analysis, final_report, turn_number, "repeated_final_report"), clear_live_update_prompt(context)}
+      {:pause,
+       final_report_interrupt(
+         context,
+         issue,
+         effective_run_ref,
+         analysis,
+         final_report,
+         turn_number,
+         "repeated_final_report"
+       ), clear_live_update_prompt(context)}
     else
       nil
     end

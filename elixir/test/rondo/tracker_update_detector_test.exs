@@ -5,11 +5,11 @@ defmodule Rondo.Tracker.UpdateDetectorTest do
   alias Rondo.Tracker.UpdateDetector
 
   test "ignores self-authored workpad comments" do
-    previous = snapshot(%Issue{id: "1", identifier: "RON-1", title: "Ticket", state: "In Progress"})
+    previous = snapshot(%Issue{id: "1", identifier: "RON-1", title: "Ticket", state: "In Progress", updated_at: ~U[2026-06-28 10:00:00Z]})
 
     current =
       snapshot(
-        %Issue{id: "1", identifier: "RON-1", title: "Ticket", state: "In Progress"},
+        %Issue{id: "1", identifier: "RON-1", title: "Ticket", state: "In Progress", updated_at: ~U[2026-06-28 10:05:00Z]},
         %{comments: [workpad_comment("c-1", "<!-- rondo-workpad --> progress update")]}
       )
 

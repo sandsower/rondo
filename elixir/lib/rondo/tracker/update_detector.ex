@@ -42,6 +42,7 @@ defmodule Rondo.Tracker.UpdateDetector do
 
     changes = diff_snapshots(previous_snapshot, current_snapshot, opts)
     workpad_comments = comment_changes(current_snapshot, previous_snapshot) |> Map.get(:ignored_workpad_comments, [])
+    changes = normalize_changes(changes, workpad_comments)
 
     {action, classification, reason, guidance_severity} = classify_update(changes, workpad_comments, previous_snapshot, current_snapshot)
 
@@ -195,23 +196,25 @@ defmodule Rondo.Tracker.UpdateDetector do
   defp maybe_comment_snapshot(comment) when is_map(comment), do: comment
 
   defp classify_update(changes, workpad_comments, previous_snapshot, current_snapshot) do
+    substantive_changes = Enum.reject(changes, &(&1.field == "updated_at"))
+
     cond do
-      changes == [] and workpad_comments != [] ->
+      substantive_changes == [] and workpad_comments != [] ->
         {:ignore, :self_authored_workpad_comment, "self-authored workpad comment ignored", "info"}
 
-      changes == [] ->
+      substantive_changes == [] ->
         {:ignore, :no_op, "updated_at changed without substantive tracker diffs", "info"}
 
-      blocker_or_relation_change?(changes) ->
+      blocker_or_relation_change?(substantive_changes) ->
         {:pause, :relation_or_blocker_change, "blocker or relation change detected", "critical"}
 
-      policy_or_risk_change?(changes) ->
+      policy_or_risk_change?(substantive_changes) ->
         {:pause, :policy_or_risk_change, "policy or risk change detected", "critical"}
 
-      conflicting_change?(changes, previous_snapshot, current_snapshot) ->
+      conflicting_change?(substantive_changes, previous_snapshot, current_snapshot) ->
         {:pause, :conflicting_or_ambiguous_update, "conflicting or ambiguous update detected", "critical"}
 
-      reviewer_feedback_change?(changes) ->
+      reviewer_feedback_change?(substantive_changes) ->
         {:inject, :reviewer_operator_feedback, "reviewer or operator feedback detected", "info"}
 
       true ->
@@ -285,6 +288,14 @@ defmodule Rondo.Tracker.UpdateDetector do
 
   defp maybe_put_workpad_lines(lines, workpad_comments) do
     lines ++ Enum.map(workpad_comments, fn comment -> "- ignored workpad: #{comment_summary(comment)}" end)
+  end
+
+  defp normalize_changes(changes, workpad_comments) do
+    if workpad_comments != [] and Enum.all?(changes, &(&1.field == "updated_at")) do
+      []
+    else
+      changes
+    end
   end
 
   defp issue_line(snapshot) do
