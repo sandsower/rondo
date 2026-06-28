@@ -40,9 +40,10 @@ defmodule Rondo.Gates do
   def run(gates, workspace, opts \\ []) when is_list(gates) and is_binary(workspace) do
     run_dir = Keyword.fetch!(opts, :run_dir)
     execution_id = Keyword.get(opts, :execution_id)
-    relative_gates_dir = relative_gates_dir(Keyword.get(opts, :gates_dir), execution_id)
+    gates_dir = Keyword.get(opts, :gates_dir) || "artifacts/gates"
+    relative_gates_dir = relative_gates_dir(gates_dir, execution_id)
     results_path = Path.join(relative_gates_dir, @results_filename)
-    state_path = "artifacts/gates/#{@state_filename}"
+    state_path = Path.join(gates_dir, @state_filename)
     gate_selection = Keyword.get(opts, :gate_selection)
 
     with {:ok, workspace} <- validate_workspace(workspace),
@@ -400,8 +401,7 @@ defmodule Rondo.Gates do
     workspace
     |> workspace_tree_entries(workspace)
     |> Enum.sort()
-    |> then(fn entries -> hash_string(Enum.join(entries, "
-")) end)
+    |> then(fn entries -> hash_string(Enum.join(entries, "\n")) end)
   end
 
   defp workspace_tree_entries(path, root) do
@@ -416,8 +416,8 @@ defmodule Rondo.Gates do
 
   defp workspace_tree_entries_for_path(path, rel, root) do
     case File.lstat(path) do
-      {:ok, %File.Stat{type: :directory}} ->
-        workspace_directory_entries(path, rel, root)
+      {:ok, %File.Stat{type: :directory, mode: mode}} ->
+        workspace_directory_entries(path, rel, root, mode)
 
       {:ok, %File.Stat{type: :regular, mode: mode}} ->
         [tree_entry(rel, "regular", Integer.to_string(mode), file_hash(path))]
@@ -430,15 +430,20 @@ defmodule Rondo.Gates do
     end
   end
 
-  defp workspace_directory_entries(path, rel, root) do
+  defp workspace_directory_entries(path, rel, root, mode) do
+    directory_entry = tree_entry(rel, "directory", Integer.to_string(mode), nil)
+
     case File.ls(path) do
       {:ok, entries} ->
-        entries
-        |> Enum.sort()
-        |> Enum.flat_map(&workspace_tree_entries(Path.join(path, &1), root))
+        [
+          directory_entry
+          | entries
+            |> Enum.sort()
+            |> Enum.flat_map(&workspace_tree_entries(Path.join(path, &1), root))
+        ]
 
       {:error, reason} ->
-        [tree_entry(rel, "directory-error", inspect(reason), nil)]
+        [directory_entry, tree_entry(rel, "directory-error", inspect(reason), nil)]
     end
   end
 
@@ -580,7 +585,6 @@ defmodule Rondo.Gates do
     Map.reject(map, fn {_key, value} -> is_nil(value) end)
   end
 
-  defp relative_gates_dir(nil, execution_id), do: relative_gates_dir("artifacts/gates", execution_id)
   defp relative_gates_dir(gates_dir, nil) when is_binary(gates_dir), do: gates_dir
 
   defp relative_gates_dir(gates_dir, execution_id) when is_binary(gates_dir) and is_binary(execution_id) do

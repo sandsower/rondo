@@ -1113,7 +1113,8 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  defp link_run_ledger_gate_artifacts(%RunLedger{} = ledger, %{event: :gates_completed, raw: raw}) when is_map(raw) do
+  defp link_run_ledger_gate_artifacts(%RunLedger{} = ledger, %{event: event, raw: raw})
+       when event in [:gates_completed, :gates_reused] and is_map(raw) do
     artifacts = gate_artifacts(raw)
 
     case RunLedger.link_artifacts(ledger, artifacts) do

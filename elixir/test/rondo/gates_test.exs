@@ -121,6 +121,7 @@ run
     workspace_root = Path.join(test_root, "workspaces")
     workspace = Path.join(workspace_root, "MT-REUSE-MISSING-IDENTITY")
     run_dir = Path.join(workspace_root, ".rondo_runs/MT-REUSE-MISSING-IDENTITY/run-1")
+    trace_file = Path.join(test_root, "gate.trace")
 
     File.mkdir_p!(workspace)
     File.write!(Path.join(workspace, "README.md"), "base\n")
@@ -131,18 +132,21 @@ run
     System.cmd("git", ["-C", workspace, "commit", "-m", "initial", "--quiet"])
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, gate_reuse_enabled: true)
 
+    gates = [%{name: "unit", command: "printf 'run\n' >> #{inspect(trace_file)} && true", timeout_ms: 1_000}]
+
+    assert {:ok, first_summary} = Gates.run(gates, workspace, run_dir: run_dir)
+    assert first_summary.status == :pass
+
     state_path = Path.join(run_dir, "artifacts/gates/state.json")
-    File.mkdir_p!(Path.dirname(state_path))
-    File.write!(state_path, ~s({"status":"pass","gate_signature":"abc","results_path":"artifacts/gates/results.json"}))
+    state = state_path |> File.read!() |> Jason.decode!()
+    state = Map.delete(state, "workspace_identity")
+    File.write!(state_path, Jason.encode!(state))
 
-    assert {:ok, summary} =
-             Gates.run(
-               [%{name: "unit", command: "true", timeout_ms: 1_000}],
-               workspace,
-               run_dir: run_dir
-             )
+    assert {:ok, second_summary} = Gates.run(gates, workspace, run_dir: run_dir)
 
-    assert summary.status == :pass
+    assert second_summary.status == :pass
+    assert second_summary.results != []
+    assert File.read!(trace_file) == "run\nrun\n"
   end
 
   test "hashes special workspace entries when building workspace identity" do
@@ -151,6 +155,7 @@ run
     workspace_root = Path.join(test_root, "workspaces")
     workspace = Path.join(workspace_root, "MT-WORKSPACE-IDENTITY")
     run_dir = Path.join(workspace_root, ".rondo_runs/MT-WORKSPACE-IDENTITY/run-1")
+    trace_file = Path.join(test_root, "gate.trace")
 
     File.mkdir_p!(workspace)
     File.write!(Path.join(workspace, "regular.txt"), "regular\n")
@@ -160,16 +165,20 @@ run
     File.chmod!(Path.join(workspace, "unreadable_dir"), 0)
     System.cmd("mkfifo", [Path.join(workspace, "pipe")])
     File.ln_s!(Path.join(workspace, "regular.txt"), Path.join(workspace, "link.txt"))
-    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, gate_reuse_enabled: true)
 
-    assert {:ok, summary} =
-             Gates.run(
-               [%{name: "unit", command: "true", timeout_ms: 1_000}],
-               workspace,
-               run_dir: run_dir
-             )
+    gates = [%{name: "unit", command: "printf 'run\n' >> #{inspect(trace_file)} && true", timeout_ms: 1_000}]
 
-    assert summary.status == :pass
+    assert {:ok, first_summary} = Gates.run(gates, workspace, run_dir: run_dir)
+    File.rm!(Path.join(workspace, "link.txt"))
+    File.ln_s!(Path.join(workspace, "alt.txt"), Path.join(workspace, "link.txt"))
+    assert {:ok, second_summary} = Gates.run(gates, workspace, run_dir: run_dir)
+
+    assert first_summary.status == :pass
+    assert second_summary.status == :pass
+    assert first_summary.workspace_identity != second_summary.workspace_identity
+    assert second_summary.results != []
+    assert File.read!(trace_file) == "run\nrun\n"
   end
 
   test "treats a non-map prior state as non-reusable" do

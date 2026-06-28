@@ -1668,6 +1668,7 @@ defmodule Rondo.OrchestratorStatusTest do
       )
 
     assert row =~ "gates: reused"
+    assert row =~ IO.ANSI.light_black()
   end
 
   test "status dashboard labels pi runs as pi in the phase column" do
@@ -2739,8 +2740,39 @@ defmodule Rondo.OrchestratorStatusTest do
     assert Enum.any?(manifest["artifacts"], &(&1["kind"] == "gate_results"))
     assert Enum.any?(manifest["artifacts"], &(&1["kind"] == "gate_stdout" and &1["name"] == "unit"))
 
+    send(
+      pid,
+      {:claude_worker_update, issue_id,
+       %{
+         event: :gates_reused,
+         timestamp: DateTime.utc_now(),
+         raw: %{
+           status: :reused,
+           results_path: "artifacts/gates/turn-0002/results.json",
+           state_path: "artifacts/gates/state.json",
+           workspace_identity: %{head: "abc123", tree_hash: "def456"},
+           gate_signature: "gate-sig",
+           reused_from: %{status: :pass, results_path: "artifacts/gates/results.json"},
+           results: []
+         }
+       }}
+    )
+
+    reused_manifest =
+      wait_until(fn ->
+        manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+
+        if Enum.any?(manifest["checkpoints"], &(&1["kind"] == "gates_reused")) and
+             Enum.any?(manifest["artifacts"], &(&1["kind"] == "gate_state")) do
+          manifest
+        end
+      end)
+
+    assert Enum.any?(reused_manifest["artifacts"], &(&1["kind"] == "gate_results" and &1["path"] == "artifacts/gates/turn-0002/results.json"))
+    assert Enum.any?(reused_manifest["artifacts"], &(&1["kind"] == "gate_state" and &1["path"] == "artifacts/gates/state.json"))
+
     [snapshot_entry] = GenServer.call(pid, :snapshot).running
-    assert snapshot_entry.latest_gate.status == :fail
+    assert snapshot_entry.latest_gate.status == :reused
   end
 
   test "orchestrator shutdown marks active run ledgers terminated" do
