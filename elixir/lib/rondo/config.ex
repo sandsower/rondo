@@ -189,6 +189,13 @@ defmodule Rondo.Config do
                                type: {:list, :map},
                                default: []
                              ],
+                             gate_reuse: [
+                               type: :map,
+                               default: %{enabled: true},
+                               keys: [
+                                 enabled: [type: :boolean, default: true]
+                               ]
+                             ],
                              clean_eval: [
                                type: :map,
                                default: %{},
@@ -248,6 +255,9 @@ defmodule Rondo.Config do
           command: String.t(),
           run_mode: String.t(),
           policy_file: String.t() | nil
+        }
+  @type gate_reuse :: %{
+          enabled: boolean()
         }
   @type process_provider :: %{
           kind: String.t(),
@@ -358,6 +368,12 @@ defmodule Rondo.Config do
     validated_workflow_options()
     |> Map.get(:gates, [])
     |> Enum.map(&normalize_gate/1)
+  end
+
+  @spec gate_reuse_enabled?() :: boolean()
+  def gate_reuse_enabled? do
+    validated_workflow_options()
+    |> get_in([:gate_reuse, :enabled])
   end
 
   defp normalize_gate(gate) do
@@ -851,6 +867,7 @@ defmodule Rondo.Config do
       model_routing: extract_model_routing_options(section_map(config, "model_routing")),
       hooks: extract_hooks_options(section_map(config, "hooks")),
       gates: extract_gates_options(Map.get(config, "gates")),
+      gate_reuse: extract_gate_reuse_options(section_map(config, "gate_reuse")),
       clean_eval: extract_clean_eval_options(section_map(config, "clean_eval")),
       observability: extract_observability_options(section_map(config, "observability")),
       server: extract_server_options(section_map(config, "server"))
@@ -1016,6 +1033,11 @@ defmodule Rondo.Config do
 
   defp extract_gates_options(_gates), do: []
 
+  defp extract_gate_reuse_options(section) do
+    %{}
+    |> put_if_present(:enabled, boolean_value(Map.get(section, "enabled")))
+  end
+
   defp extract_clean_eval_options(section) do
     %{}
     |> put_if_present(:enabled, boolean_value(Map.get(section, "enabled")))
@@ -1050,6 +1072,7 @@ defmodule Rondo.Config do
     process_provider = section_map(config, "process_provider")
     hooks = section_map(config, "hooks")
     gates = Map.get(config, "gates")
+    gate_reuse = section_map(config, "gate_reuse")
     clean_eval = section_map(config, "clean_eval")
     observability = section_map(config, "observability")
     server = section_map(config, "server")
@@ -1066,6 +1089,8 @@ defmodule Rondo.Config do
       validate_section_map(config, "model_routing"),
       validate_section_map(config, "hooks"),
       validate_gates_field(gates),
+      validate_section_map(config, "gate_reuse"),
+      validate_boolean_field(gate_reuse, "gate_reuse.enabled"),
       validate_section_map(config, "clean_eval"),
       validate_boolean_field(clean_eval, "clean_eval.enabled"),
       validate_string_field(clean_eval, "clean_eval.base_ref"),

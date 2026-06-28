@@ -1114,6 +1114,14 @@ defmodule Rondo.OrchestratorStatusTest do
 
     now_ms = System.monotonic_time(:millisecond)
 
+    _idle_snapshot =
+      wait_until(fn ->
+        case Orchestrator.snapshot(pid, 100) do
+          %{polling: %{checking?: false}} = snapshot -> snapshot
+          _other -> false
+        end
+      end)
+
     :sys.replace_state(pid, fn state ->
       %{
         state
@@ -1640,6 +1648,26 @@ defmodule Rondo.OrchestratorStatusTest do
       )
 
     assert row =~ "gates: fail unit"
+  end
+
+  test "status dashboard renders reused gate status distinctly" do
+    row =
+      StatusDashboard.format_running_summary_for_test(
+        %{
+          identifier: "MT-GATE-REUSED",
+          state: "In Progress",
+          session_id: "session-gate-reused",
+          last_claude_event: :gates_reused,
+          last_claude_message: %{event: :gates_reused},
+          latest_gate: %{status: :reused, results_path: "artifacts/gates/turn-0002/results.json"},
+          runtime_seconds: 12,
+          turn_count: 2,
+          claude_total_tokens: 84
+        },
+        140
+      )
+
+    assert row =~ "gates: reused"
   end
 
   test "status dashboard labels pi runs as pi in the phase column" do

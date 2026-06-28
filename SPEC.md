@@ -418,10 +418,13 @@ Each entry contains:
 
 Gate stdout/stderr and a structured `results.json` are persisted under the run ledger. `results.json`
 also includes the ProcessProvider gate-selection envelope for the turn when available, including
-selected/skipped explanations, warnings, and provider metadata. Any gate failure, error, or timeout
-makes the current run attempt fail/retry; gate evidence must not rely on agent transcript self-report.
-This flat shape is intentionally compatible with simple external workflow gate definitions while
-keeping `WORKFLOW.md` as Rondo's runtime source of truth.
+selected/skipped explanations, warnings, and provider metadata. When `gate_reuse.enabled` is on,
+Rondo also records a workspace identity plus gate signature in `state.json` and may reuse a prior
+passing result on an unchanged continuation turn, emitting a distinct reused gate status instead of
+rerunning the same command set. Any gate failure, error, or timeout makes the current run attempt
+fail/retry; gate evidence must not rely on agent transcript self-report. This flat shape is
+intentionally compatible with simple external workflow gate definitions while keeping `WORKFLOW.md`
+as Rondo's runtime source of truth.
 
 #### 5.3.6 `process_provider` (object)
 

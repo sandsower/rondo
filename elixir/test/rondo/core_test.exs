@@ -16,6 +16,10 @@ defmodule Rondo.CoreTest do
     assert Config.linear_terminal_states() == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert Config.linear_assignee() == nil
     assert Config.agent_max_turns() == 20
+    assert Config.gate_reuse_enabled?() == true
+
+    write_workflow_file!(Workflow.workflow_file_path(), gate_reuse_enabled: false)
+    assert Config.gate_reuse_enabled?() == false
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
     assert {:error, {:invalid_workflow_config, _, [%{path: "polling.interval_ms"}]}} = Config.validate!()

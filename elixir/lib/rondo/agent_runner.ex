@@ -477,7 +477,7 @@ defmodule Rondo.AgentRunner do
       recipient,
       {:claude_worker_update, issue_id,
        %{
-         event: :gates_completed,
+         event: gate_update_event(summary),
          timestamp: DateTime.utc_now(),
          session_id: nil,
          usage: nil,
@@ -489,6 +489,10 @@ defmodule Rondo.AgentRunner do
   end
 
   defp send_gate_update(_recipient, _issue, _summary), do: :ok
+
+  defp gate_update_event(%{status: :reused}), do: :gates_reused
+  defp gate_update_event(%{"status" => "reused"}), do: :gates_reused
+  defp gate_update_event(_summary), do: :gates_completed
 
   defp gate_error_summary(summary) do
     %{

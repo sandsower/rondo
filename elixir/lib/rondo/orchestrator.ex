@@ -1130,6 +1130,7 @@ defmodule Rondo.Orchestrator do
 
   defp gate_artifacts(raw) when is_map(raw) do
     results_artifact = artifact_from_path("gate_results", map_value(raw, :results_path))
+    state_artifact = artifact_from_path("gate_state", map_value(raw, :state_path))
 
     result_artifacts =
       raw
@@ -1139,7 +1140,7 @@ defmodule Rondo.Orchestrator do
         _ -> []
       end
 
-    [results_artifact | result_artifacts]
+    [results_artifact, state_artifact | result_artifacts]
     |> Enum.reject(&is_nil/1)
   end
 
@@ -2038,10 +2039,15 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  defp latest_gate_for_update(_running_entry, %{event: :gates_completed, raw: raw}) when is_map(raw) do
+  defp latest_gate_for_update(_running_entry, %{event: event, raw: raw})
+       when event in [:gates_completed, :gates_reused] and is_map(raw) do
     %{
       status: map_value(raw, :status),
       results_path: map_value(raw, :results_path),
+      state_path: map_value(raw, :state_path),
+      workspace_identity: map_value(raw, :workspace_identity),
+      gate_signature: map_value(raw, :gate_signature),
+      reused_from: map_value(raw, :reused_from),
       failed: gate_failed_results(map_value(raw, :results))
     }
   end

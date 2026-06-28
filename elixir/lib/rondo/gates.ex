@@ -6,11 +6,13 @@ defmodule Rondo.Gates do
   alias Rondo.{ActionPolicy, Config, PathSafety}
 
   @results_filename "results.json"
+  @state_filename "state.json"
   @shell_timeout_exit_status 124
   @command_not_found_exit_status 127
+  @reused_status :reused
 
   @type gate :: Config.gate()
-  @type gate_status :: :pass | :fail | :error | :timeout
+  @type gate_status :: :pass | :reused | :fail | :error | :timeout
   @type gate_result :: %{
           name: String.t(),
           command: String.t(),
@@ -27,7 +29,11 @@ defmodule Rondo.Gates do
           required(:status) => gate_status(),
           required(:results_path) => Path.t(),
           required(:results) => [gate_result()],
-          optional(:gate_selection) => map()
+          optional(:gate_selection) => map(),
+          optional(:workspace_identity) => map(),
+          optional(:gate_signature) => String.t(),
+          optional(:state_path) => Path.t(),
+          optional(:reused_from) => map()
         }
 
   @spec run([gate()], Path.t(), keyword()) :: {:ok, summary()} | {:error, summary() | term()}
@@ -36,23 +42,66 @@ defmodule Rondo.Gates do
     execution_id = Keyword.get(opts, :execution_id)
     relative_gates_dir = relative_gates_dir(Keyword.get(opts, :gates_dir), execution_id)
     results_path = Path.join(relative_gates_dir, @results_filename)
+    state_path = "artifacts/gates/#{@state_filename}"
     gate_selection = Keyword.get(opts, :gate_selection)
 
     with {:ok, workspace} <- validate_workspace(workspace),
          :ok <- File.mkdir_p(Path.join(run_dir, relative_gates_dir)) do
-      policy_opts = action_policy_opts(opts, workspace)
+      execute_gate_flow(
+        gates,
+        workspace,
+        run_dir,
+        relative_gates_dir,
+        results_path,
+        state_path,
+        gate_selection,
+        opts
+      )
+    end
+  end
 
-      results =
-        gates
-        |> Enum.with_index(1)
-        |> Enum.map(fn {gate, index} -> run_gate(gate, index, workspace, run_dir, relative_gates_dir, policy_opts) end)
+  defp execute_gate_flow(
+         gates,
+         workspace,
+         run_dir,
+         relative_gates_dir,
+         results_path,
+         state_path,
+         gate_selection,
+         opts
+       ) do
+    policy_opts = action_policy_opts(opts, workspace)
+    reuse_enabled = Keyword.get(opts, :gate_reuse_enabled, Config.gate_reuse_enabled?())
+    workspace_identity = workspace_identity(workspace)
+    gate_signature = gate_signature(gates, policy_opts)
 
-      summary = build_summary(results, results_path, gate_selection)
+    summary =
+      case maybe_reused_summary(
+             run_dir,
+             workspace_identity,
+             gate_signature,
+             results_path,
+             state_path,
+             gate_selection,
+             reuse_enabled
+           ) do
+        {:ok, reused_summary} ->
+          reused_summary
 
-      case write_results(run_dir, summary) do
-        :ok -> result_tuple(summary)
-        {:error, reason} -> {:error, reason}
+        :run ->
+          results =
+            gates
+            |> Enum.with_index(1)
+            |> Enum.map(fn {gate, index} ->
+              run_gate(gate, index, workspace, run_dir, relative_gates_dir, policy_opts)
+            end)
+
+          build_summary(results, results_path, state_path, gate_selection, workspace_identity, gate_signature)
       end
+
+    with :ok <- write_results(run_dir, summary),
+         :ok <- write_gate_state(run_dir, summary) do
+      result_tuple(summary)
     end
   end
 
@@ -61,8 +110,12 @@ defmodule Rondo.Gates do
     %{
       status: summary.status,
       results_path: summary.results_path,
+      state_path: Map.get(summary, :state_path),
+      workspace_identity: Map.get(summary, :workspace_identity),
+      gate_signature: Map.get(summary, :gate_signature),
       results: Enum.map(summary.results, &gate_result_to_json/1),
-      gate_selection: Map.get(summary, :gate_selection)
+      gate_selection: Map.get(summary, :gate_selection),
+      reused_from: Map.get(summary, :reused_from)
     }
     |> drop_nil_values()
   end
@@ -195,10 +248,94 @@ defmodule Rondo.Gates do
     Map.get(policy_decision, :side_effect_status) == :blocked or Map.get(policy_decision, "side_effect_status") == "blocked"
   end
 
-  defp build_summary(results, results_path, gate_selection) do
-    %{status: overall_status(results), results_path: results_path, results: results, gate_selection: gate_selection}
+  defp build_summary(results, results_path, state_path, gate_selection, workspace_identity, gate_signature) do
+    %{
+      status: overall_status(results),
+      results_path: results_path,
+      state_path: state_path,
+      workspace_identity: workspace_identity,
+      gate_signature: gate_signature,
+      results: results,
+      gate_selection: gate_selection
+    }
     |> drop_nil_values()
   end
+
+  defp build_reused_summary(
+         previous_state,
+         results_path,
+         state_path,
+         gate_selection,
+         workspace_identity,
+         gate_signature
+       ) do
+    reused_from =
+      %{
+        status: state_value(previous_state, :status),
+        results_path: state_value(previous_state, :results_path),
+        workspace_identity: normalize_workspace_identity(state_value(previous_state, :workspace_identity)),
+        gate_signature: state_value(previous_state, :gate_signature)
+      }
+      |> drop_nil_values()
+
+    %{
+      status: @reused_status,
+      results_path: results_path,
+      state_path: state_path,
+      workspace_identity: workspace_identity,
+      gate_signature: gate_signature,
+      results: [],
+      gate_selection: gate_selection,
+      reused_from: reused_from
+    }
+    |> drop_nil_values()
+  end
+
+  defp maybe_reused_summary(run_dir, workspace_identity, gate_signature, results_path, state_path, gate_selection, true) do
+    gate_state_path = Path.join(run_dir, state_path)
+
+    case load_gate_state(gate_state_path) do
+      {:ok, previous_state} ->
+        if reusable_gate_state?(previous_state, workspace_identity, gate_signature) do
+          {:ok,
+           build_reused_summary(
+             previous_state,
+             results_path,
+             state_path,
+             gate_selection,
+             workspace_identity,
+             gate_signature
+           )}
+        else
+          :run
+        end
+
+      _ ->
+        :run
+    end
+  end
+
+  defp maybe_reused_summary(_run_dir, _workspace_identity, _gate_signature, _results_path, _state_path, _gate_selection, false), do: :run
+
+  defp load_gate_state(path) do
+    with true <- File.exists?(path),
+         {:ok, json} <- File.read(path),
+         {:ok, state} <- Jason.decode(json) do
+      {:ok, state}
+    else
+      _ -> :error
+    end
+  end
+
+  defp reusable_gate_state?(state, workspace_identity, gate_signature) when is_map(state) do
+    status = state_value(state, :status)
+
+    status in [:pass, "pass", @reused_status, "reused"] and
+      normalize_workspace_identity(state_value(state, :workspace_identity)) == workspace_identity and
+      state_value(state, :gate_signature) == gate_signature
+  end
+
+  defp reusable_gate_state?(_state, _workspace_identity, _gate_signature), do: false
 
   defp overall_status(results) do
     cond do
@@ -218,8 +355,156 @@ defmodule Rondo.Gates do
     end
   end
 
-  defp result_tuple(%{status: :pass} = summary), do: {:ok, summary}
+  defp write_gate_state(run_dir, summary) do
+    path = Path.join(run_dir, summary.state_path)
+
+    with :ok <- File.mkdir_p(Path.dirname(path)),
+         {:ok, json} <- Jason.encode(summary_to_json(summary)) do
+      File.write(path, json)
+    end
+  end
+
+  defp result_tuple(%{status: status} = summary) when status in [:pass, @reused_status], do: {:ok, summary}
   defp result_tuple(summary), do: {:error, summary}
+
+  defp state_value(map, key) when is_map(map) and is_atom(key) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  end
+
+  defp normalize_workspace_identity(nil), do: nil
+
+  defp normalize_workspace_identity(identity) when is_map(identity) do
+    %{
+      head: state_value(identity, :head),
+      tree_hash: state_value(identity, :tree_hash)
+    }
+    |> drop_nil_values()
+  end
+
+  defp workspace_identity(workspace) do
+    %{
+      head: git_head(workspace),
+      tree_hash: workspace_tree_hash(workspace)
+    }
+    |> drop_nil_values()
+  end
+
+  defp git_head(workspace) do
+    case System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true) do
+      {output, 0} -> String.trim(output)
+      _ -> nil
+    end
+  end
+
+  defp workspace_tree_hash(workspace) do
+    workspace
+    |> workspace_tree_entries(workspace)
+    |> Enum.sort()
+    |> then(fn entries -> hash_string(Enum.join(entries, "
+")) end)
+  end
+
+  defp workspace_tree_entries(path, root) do
+    rel = Path.relative_to(path, root)
+
+    if ignored_workspace_path?(rel) do
+      []
+    else
+      workspace_tree_entries_for_path(path, rel, root)
+    end
+  end
+
+  defp workspace_tree_entries_for_path(path, rel, root) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory}} ->
+        workspace_directory_entries(path, rel, root)
+
+      {:ok, %File.Stat{type: :regular, mode: mode}} ->
+        [tree_entry(rel, "regular", Integer.to_string(mode), file_hash(path))]
+
+      {:ok, %File.Stat{type: :symlink, mode: mode}} ->
+        [tree_entry(rel, "symlink", Integer.to_string(mode), symlink_hash(path))]
+
+      {:ok, %File.Stat{type: type, mode: mode}} ->
+        [tree_entry(rel, Atom.to_string(type), Integer.to_string(mode), nil)]
+    end
+  end
+
+  defp workspace_directory_entries(path, rel, root) do
+    case File.ls(path) do
+      {:ok, entries} ->
+        entries
+        |> Enum.sort()
+        |> Enum.flat_map(&workspace_tree_entries(Path.join(path, &1), root))
+
+      {:error, reason} ->
+        [tree_entry(rel, "directory-error", inspect(reason), nil)]
+    end
+  end
+
+  defp ignored_workspace_path?(rel) do
+    case Path.split(rel) do
+      [".git" | _] -> true
+      [".rondo_runs" | _] -> true
+      _ -> false
+    end
+  end
+
+  defp tree_entry(rel, type, meta, hash) do
+    [rel, type, normalize_tree_value(meta), normalize_tree_value(hash)]
+    |> Enum.join("\0")
+  end
+
+  defp normalize_tree_value(nil), do: ""
+  defp normalize_tree_value(value), do: value
+
+  defp file_hash(path) do
+    case File.read(path) do
+      {:ok, contents} -> hash_string(contents)
+      _ -> "unreadable"
+    end
+  end
+
+  defp symlink_hash(path) do
+    {:ok, target} = File.read_link(path)
+    hash_string(target)
+  end
+
+  defp hash_string(contents) when is_binary(contents) do
+    :crypto.hash(:sha256, contents) |> Base.encode16(case: :lower)
+  end
+
+  defp gate_signature(gates, policy_opts) do
+    [
+      {:gates, Enum.map(gates, &canonical_gate/1)},
+      {:policy, canonical_policy_signature(policy_opts)}
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> :erlang.term_to_binary()
+    |> hash_string()
+  end
+
+  defp canonical_gate(gate) when is_map(gate) do
+    [
+      {:name, Map.get(gate, :name)},
+      {:command, Map.get(gate, :command)},
+      {:timeout_ms, Map.get(gate, :timeout_ms)},
+      {:action_id, Map.get(gate, :action_id)},
+      {:action_classes, Map.get(gate, :action_classes, [])}
+    ]
+  end
+
+  defp canonical_policy_signature(false), do: nil
+
+  defp canonical_policy_signature(policy_opts) when is_list(policy_opts) do
+    [
+      {:enabled, true},
+      {:command, Keyword.get(policy_opts, :command)},
+      {:mode, Keyword.get(policy_opts, :mode)},
+      {:sandbox_status, Keyword.get(policy_opts, :sandbox_status)}
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+  end
 
   defp gate_result_to_json(result) do
     %{
