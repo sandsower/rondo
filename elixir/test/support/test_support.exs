@@ -135,6 +135,7 @@ defmodule Rondo.TestSupport do
           hook_before_remove: nil,
           hook_timeout_ms: 60_000,
           gates: nil,
+          gate_reuse_enabled: nil,
           clean_eval_enabled: nil,
           clean_eval_base_ref: nil,
           clean_eval_gates: nil,
@@ -190,6 +191,7 @@ defmodule Rondo.TestSupport do
     hook_before_remove = Keyword.get(config, :hook_before_remove)
     hook_timeout_ms = Keyword.get(config, :hook_timeout_ms)
     gates = Keyword.get(config, :gates)
+    gate_reuse_enabled = Keyword.get(config, :gate_reuse_enabled)
     clean_eval_enabled = Keyword.get(config, :clean_eval_enabled)
     clean_eval_base_ref = Keyword.get(config, :clean_eval_base_ref)
     clean_eval_gates = Keyword.get(config, :clean_eval_gates)
@@ -249,6 +251,7 @@ defmodule Rondo.TestSupport do
         model_routing_yaml(model_routing),
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         gates_yaml(gates),
+        gate_reuse_yaml(gate_reuse_enabled),
         clean_eval_yaml(clean_eval_enabled, clean_eval_base_ref, clean_eval_gates),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
@@ -347,6 +350,9 @@ defmodule Rondo.TestSupport do
   end
 
   defp gates_yaml(gates), do: "gates: #{yaml_value(gates)}"
+
+  defp gate_reuse_yaml(nil), do: nil
+  defp gate_reuse_yaml(enabled), do: "gate_reuse:\n  enabled: #{yaml_value(enabled)}"
 
   defp gate_yaml(gate) when is_map(gate) or is_list(gate) do
     map = Map.new(gate)

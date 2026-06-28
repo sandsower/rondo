@@ -39,6 +39,8 @@ defmodule Rondo.AgentAdapterTest do
       invocation = Process.get(:fake_adapter_invocation, 0) + 1
       Process.put(:fake_adapter_invocation, invocation)
 
+      maybe_touch_workspace(workspace, invocation, opts)
+
       send(test_pid, {:fake_adapter_invoked, invocation, prompt, workspace, previous_run_ref})
       send(test_pid, {:fake_adapter_opts, opts})
 
@@ -61,6 +63,18 @@ defmodule Rondo.AgentAdapterTest do
          capabilities: capabilities(),
          raw: %{invocation: invocation}
        )}
+    end
+
+    defp maybe_touch_workspace(workspace, invocation, opts) do
+      case Keyword.get(opts, :touch_workspace_on_invocation) do
+        ^invocation ->
+          path = Keyword.get(opts, :touch_workspace_path, "fake-adapter-change.txt")
+          contents = Keyword.get(opts, :touch_workspace_contents, "changed #{invocation}\n")
+          File.write!(Path.join(workspace, path), contents)
+
+        _ ->
+          :ok
+      end
     end
   end
 
@@ -1990,6 +2004,7 @@ defmodule Rondo.AgentAdapterTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         max_turns: 2,
+        gate_reuse_enabled: false,
         gates: [%{name: "proof", command: "echo gate", timeout_ms: 1_000}]
       )
 
@@ -2027,6 +2042,157 @@ defmodule Rondo.AgentAdapterTest do
       assert second_raw.results_path == "artifacts/gates/turn-0002/results.json"
       assert File.read!(Path.join(run_dir, first_raw.results_path)) =~ "turn-0001"
       assert File.read!(Path.join(run_dir, second_raw.results_path)) =~ "turn-0002"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner reuses gates on an unchanged no-op continuation turn" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-gate-reuse-#{System.unique_integer([:positive])}")
+    trace_file = Path.join(test_root, "gate.trace")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-GATE-REUSE/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 2,
+        gate_reuse_enabled: true,
+        hook_after_create:
+          "git init -b main && git config user.email test@example.org && git config user.name Rondo Test && printf 'base\n' > README.md && git add README.md && git commit -m initial --quiet",
+        gates: [%{name: "proof", command: "printf 'gate\\n' >> #{inspect(trace_file)}", timeout_ms: 1_000}]
+      )
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-gate-reuse",
+        identifier: "MT-GATE-REUSE",
+        title: "Gate reuse proof",
+        description: "Exercise unchanged-worktree gate reuse after a no-op continuation",
+        state: "In Progress",
+        labels: []
+      }
+
+      # The fake adapter never emits a valid final report, so the second turn
+      # continues via tracker state alone (our no-op continuation path).
+      fetcher = fn [_issue_id] ->
+        fetch_count = Process.get(:gate_reuse_fetch_count, 0) + 1
+        Process.put(:gate_reuse_fetch_count, fetch_count)
+
+        state = if fetch_count == 1, do: "In Progress", else: "Done"
+        {:ok, [%{issue | state: state}]}
+      end
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 issue_state_fetcher: fetcher,
+                 run_dir: run_dir,
+                 test_pid: parent
+               )
+
+      completed_results_path = "artifacts/gates/turn-0001/results.json"
+      reused_results_path = "artifacts/gates/turn-0002/results.json"
+
+      assert_receive {:fake_adapter_invoked, 1, _, _, nil}, 500
+
+      assert_receive {:claude_worker_update, "issue-gate-reuse", %{event: :gates_completed, raw: raw_completed}},
+                     500
+
+      assert raw_completed.status == :pass
+      assert raw_completed.results_path == completed_results_path
+
+      assert_receive {:fake_adapter_invoked, 2, _, _, _}, 500
+
+      assert_receive {:claude_worker_update, "issue-gate-reuse", %{event: :gates_reused, raw: raw_reused}},
+                     500
+
+      assert raw_reused.status == :reused
+      assert raw_reused.results_path == reused_results_path
+
+      assert File.read!(trace_file) == "gate
+"
+      assert String.contains?(File.read!(Path.join(run_dir, "artifacts/gates/state.json")), ~s("status":"reused"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner reruns gates when the continuation changes the worktree" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-gate-rerun-#{System.unique_integer([:positive])}")
+    trace_file = Path.join(test_root, "gate.trace")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-GATE-RERUN/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 2,
+        gate_reuse_enabled: true,
+        hook_after_create:
+          "git init -b main && git config user.email test@example.org && git config user.name Rondo Test && printf 'base\n' > README.md && git add README.md && git commit -m initial --quiet",
+        gates: [%{name: "proof", command: "printf 'gate\\n' >> #{inspect(trace_file)}", timeout_ms: 1_000}]
+      )
+
+      parent = self()
+
+      issue = %Issue{
+        id: "issue-gate-rerun",
+        identifier: "MT-GATE-RERUN",
+        title: "Gate rerun proof",
+        description: "Exercise changed-worktree gate rerun",
+        state: "In Progress",
+        labels: []
+      }
+
+      fetcher = fn [_issue_id] ->
+        fetch_count = Process.get(:gate_rerun_fetch_count, 0) + 1
+        Process.put(:gate_rerun_fetch_count, fetch_count)
+
+        state = if fetch_count == 1, do: "In Progress", else: "Done"
+        {:ok, [%{issue | state: state}]}
+      end
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 issue_state_fetcher: fetcher,
+                 run_dir: run_dir,
+                 test_pid: parent,
+                 touch_workspace_on_invocation: 2,
+                 touch_workspace_path: "changed.txt",
+                 touch_workspace_contents: "changed
+"
+               )
+
+      completed_results_path = "artifacts/gates/turn-0001/results.json"
+      rerun_results_path = "artifacts/gates/turn-0002/results.json"
+
+      assert_receive {:fake_adapter_invoked, 1, _, _, nil}, 500
+
+      assert_receive {:claude_worker_update, "issue-gate-rerun", %{event: :gates_completed, raw: raw_completed}},
+                     500
+
+      assert raw_completed.status == :pass
+      assert raw_completed.results_path == completed_results_path
+
+      assert_receive {:fake_adapter_invoked, 2, _, _, _}, 500
+
+      assert_receive {:claude_worker_update, "issue-gate-rerun", %{event: :gates_completed, raw: raw_rerun}},
+                     500
+
+      assert raw_rerun.status == :pass
+      assert raw_rerun.results_path == rerun_results_path
+
+      assert File.read!(trace_file) == "gate
+gate
+"
+      assert String.contains?(File.read!(Path.join(run_dir, "artifacts/gates/state.json")), ~s("status":"pass"))
     after
       File.rm_rf(test_root)
     end

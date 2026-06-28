@@ -606,7 +606,7 @@ defmodule Rondo.StatusDashboard do
         :none -> @ansi_red
         "claude/event/token_count" -> @ansi_yellow
         "claude/event/task_started" -> @ansi_green
-        :gates_completed -> gate_status_color(running_entry)
+        event when event in [:gates_completed, :gates_reused] -> gate_status_color(running_entry)
         "turn_completed" -> @ansi_magenta
         _ -> @ansi_blue
       end
@@ -660,6 +660,7 @@ defmodule Rondo.StatusDashboard do
   defp gate_summary(%{status: status}), do: "gates: #{status}"
 
   defp gate_status_color(%{latest_gate: %{status: status}}) when status in [:pass, "pass"], do: @ansi_green
+  defp gate_status_color(%{latest_gate: %{status: status}}) when status in [:reused, "reused", :skipped, "skipped"], do: @ansi_gray
   defp gate_status_color(%{latest_gate: %{status: status}}) when status in [:fail, "fail"], do: @ansi_red
   defp gate_status_color(%{latest_gate: %{status: status}}) when status in [:error, "error", :timeout, "timeout"], do: @ansi_orange
   defp gate_status_color(_running_entry), do: @ansi_blue

@@ -284,7 +284,9 @@ Notes:
   agent turn. Gates run in the issue workspace and persist stdout/stderr plus `results.json` under
   the run ledger. The first gate failure, error, or timeout causes the run to fail/retry with gate
   evidence preserved; a repeated gate-failed retry pauses the run with a durable human interrupt
-  instead of continuing automatic retries.
+  instead of continuing automatic retries. When `gate_reuse.enabled: true` (default), Rondo also
+  records a workspace identity plus gate signature and can reuse the prior passing gate result on an
+  unchanged continuation turn, surfacing a distinct reused status in the run ledger/dashboard.
 - Gate entries use a flat Beislið-compatible shape: `name`, `command`, and optional `timeout_ms`
   (default: 60000). Legacy flat gates default to Beislið `read`/`file.read` policy; gates that
   mutate state should declare `action_id` and `action_classes` such as `dependency.install` with
