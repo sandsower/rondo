@@ -92,6 +92,39 @@ defmodule Rondo.Linear.PaginationTest do
     assert query =~ "labels: {name: {in: $labelNames}}"
   end
 
+  test "fetch issue contexts by ids includes comments, attachments, and relations" do
+    graphql_fun = fn query, variables ->
+      send(self(), {:graphql_query, query, variables})
+      {:ok, mock_context_response(variables.ids)}
+    end
+
+    assert {:ok, [context]} =
+             Client.fetch_issue_contexts_by_ids_for_test(["id-1"], graphql_fun,
+               project_slug: "project-a",
+               label_filter: ["rondo"]
+             )
+
+    assert context.issue.id == "id-1"
+    assert length(context.snapshot["comments"]) == 1
+    assert length(context.snapshot["attachments"]) == 1
+    assert length(context.snapshot["relations"]) == 1
+    assert length(context.snapshot["inverse_relations"]) == 1
+
+    assert_received {:graphql_query, query,
+                     %{
+                       ids: ["id-1"],
+                       projectSlug: "project-a",
+                       labelNames: ["rondo"],
+                       first: 1,
+                       relationFirst: 50,
+                       commentFirst: 50,
+                       attachmentFirst: 50
+                     }}
+
+    assert query =~ "comments(first: $commentFirst)"
+    assert query =~ "attachments(first: $attachmentFirst)"
+  end
+
   test "fetch by ids omits issues filtered out by tracker visibility" do
     graphql_fun = fn _query, _variables ->
       {:ok, mock_issues_response([])}
@@ -150,6 +183,79 @@ defmodule Rondo.Linear.PaginationTest do
           "assignee" => nil,
           "labels" => %{"nodes" => []},
           "inverseRelations" => %{"nodes" => []},
+          "createdAt" => nil,
+          "updatedAt" => nil
+        }
+      end)
+
+    %{"data" => %{"issues" => %{"nodes" => nodes}}}
+  end
+
+  defp mock_context_response(ids) do
+    nodes =
+      Enum.map(ids, fn id ->
+        %{
+          "id" => id,
+          "identifier" => "TEST-#{id}",
+          "title" => "Test issue #{id}",
+          "description" => "Body for #{id}",
+          "priority" => 1,
+          "state" => %{"name" => "In Progress"},
+          "branchName" => nil,
+          "url" => "https://linear.app/test/#{id}",
+          "assignee" => nil,
+          "labels" => %{"nodes" => [%{"name" => "rondo"}]},
+          "relations" => %{
+            "nodes" => [
+              %{
+                "type" => "blocks",
+                "issue" => %{
+                  "id" => "rel-#{id}",
+                  "identifier" => "REL-#{id}",
+                  "title" => "Related #{id}",
+                  "state" => %{"name" => "Todo"}
+                }
+              }
+            ]
+          },
+          "inverseRelations" => %{
+            "nodes" => [
+              %{
+                "type" => "blocks",
+                "issue" => %{
+                  "id" => "blocker-#{id}",
+                  "identifier" => "BLK-#{id}",
+                  "title" => "Blocker #{id}",
+                  "state" => %{"name" => "In Progress"}
+                }
+              }
+            ]
+          },
+          "comments" => %{
+            "nodes" => [
+              %{
+                "id" => "comment-#{id}",
+                "body" => "Update for #{id}",
+                "updatedAt" => nil,
+                "createdAt" => nil,
+                "user" => %{"id" => "user-1", "name" => "Taylor"}
+              }
+            ]
+          },
+          "attachments" => %{
+            "nodes" => [
+              %{
+                "id" => "attachment-#{id}",
+                "title" => "Screenshot",
+                "subtitle" => "png",
+                "url" => "https://linear.app/test/#{id}/attachment",
+                "sourceType" => "url",
+                "metadata" => %{},
+                "createdAt" => nil,
+                "updatedAt" => nil
+              }
+            ]
+          },
           "createdAt" => nil,
           "updatedAt" => nil
         }

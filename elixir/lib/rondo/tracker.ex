@@ -8,6 +8,7 @@ defmodule Rondo.Tracker do
   @callback fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
+  @callback fetch_issue_contexts_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
   @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
 
@@ -24,6 +25,11 @@ defmodule Rondo.Tracker do
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids) do
     adapter().fetch_issue_states_by_ids(issue_ids)
+  end
+
+  @spec fetch_issue_contexts_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
+  def fetch_issue_contexts_by_ids(issue_ids) do
+    adapter().fetch_issue_contexts_by_ids(issue_ids)
   end
 
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}

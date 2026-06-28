@@ -344,6 +344,8 @@ defmodule Rondo.RunLedger do
   defp checkpoint_kind_for_event("gates_completed"), do: "gates_completed"
   defp checkpoint_kind_for_event(:gates_reused), do: "gates_reused"
   defp checkpoint_kind_for_event("gates_reused"), do: "gates_reused"
+  defp checkpoint_kind_for_event(:tracker_update_detected), do: "tracker_update_detected"
+  defp checkpoint_kind_for_event("tracker_update_detected"), do: "tracker_update_detected"
   defp checkpoint_kind_for_event(_event), do: nil
 
   @doc "Returns the normalized agent event JSONL schema identifier."

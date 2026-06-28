@@ -1,27 +1,16 @@
 defmodule Rondo.AgentRunner do
   @moduledoc """
-  Executes a Linear issue in an isolated workspace.
+  Executes a single Linear issue in an isolated workspace with the configured agent adapter.
   """
 
   require Logger
   alias Rondo.Agent.Adapter
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.PiAdapter
-
-  alias Rondo.{
-    Config,
-    FinalReport,
-    Gates,
-    Interrupt,
-    Linear.Issue,
-    ModelRouting,
-    ProcessProvider,
-    RunLedger,
-    Tracker,
-    Workspace
-  }
-
+  alias Rondo.{Config, FinalReport, Gates, Interrupt, ModelRouting, ProcessProvider, RunLedger, Tracker, Workspace}
+  alias Rondo.Linear.Issue
   alias Rondo.ProcessProvider.{Beislid, Native}
+  alias Rondo.Tracker.UpdateDetector
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, claude_update_recipient \\ nil, opts \\ []) do
@@ -37,7 +26,6 @@ defmodule Rondo.AgentRunner do
           try do
             case run_agent_turns(workspace, issue, claude_update_recipient, opts) do
               :ok -> :ok
-              {:pause, interrupt} -> exit({:final_report_invalid, interrupt})
               {:error, reason} -> handle_agent_run_error(issue, reason)
             end
           after
@@ -180,11 +168,17 @@ defmodule Rondo.AgentRunner do
          {:ok, opts} <- model_routing_opts(provider, opts),
          {:ok, adapter} <- adapter_module(opts),
          {:ok, opts} <- ensure_model_selection_supported(adapter, opts) do
+      issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+      issue_context_fetcher = Keyword.get(opts, :issue_context_fetcher, &Tracker.fetch_issue_contexts_by_ids/1)
+      issue_context_snapshot = initial_issue_context_snapshot(issue, issue_context_fetcher)
+
       context = %{
         workspace: workspace,
         claude_update_recipient: claude_update_recipient,
         opts: opts,
-        issue_state_fetcher: Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1),
+        issue_state_fetcher: issue_state_fetcher,
+        issue_context_fetcher: issue_context_fetcher,
+        issue_context_snapshot: issue_context_snapshot,
         adapter: adapter,
         process_provider: provider,
         max_turns: Keyword.get(opts, :max_turns, Config.agent_max_turns()),
@@ -192,7 +186,7 @@ defmodule Rondo.AgentRunner do
         run_dir: Keyword.get(opts, :run_dir)
       }
 
-      do_run_agent_turns(context, issue, 1, Keyword.get(opts, :initial_run_ref), nil)
+      do_run_agent_turns(context, issue, 1, Keyword.get(opts, :initial_run_ref))
     end
   end
 
@@ -287,7 +281,7 @@ defmodule Rondo.AgentRunner do
     end
   end
 
-  defp do_run_agent_turns(context, issue, turn_number, run_ref, previous_final_report_fingerprint) do
+  defp do_run_agent_turns(context, issue, turn_number, run_ref, previous_final_report_fingerprint \\ nil) do
     prompt = build_turn_prompt(context.process_provider, issue, context.opts, turn_number, context.max_turns)
 
     completion_ref = make_ref()
@@ -324,7 +318,14 @@ defmodule Rondo.AgentRunner do
         )
 
         with :ok <- run_gates(context, issue, turn_number) do
-          continue_agent_turns(context, issue, turn_number, effective_run_ref, Map.get(invocation_result, :final_report), previous_final_report_fingerprint)
+          continue_agent_turns(
+            clear_live_update_prompt(context),
+            issue,
+            turn_number,
+            effective_run_ref,
+            Map.get(invocation_result, :final_report),
+            previous_final_report_fingerprint
+          )
         end
 
       {:error, reason} ->
@@ -515,14 +516,7 @@ defmodule Rondo.AgentRunner do
     }
   end
 
-  defp continue_agent_turns(
-         context,
-         issue,
-         turn_number,
-         effective_run_ref,
-         final_report,
-         previous_final_report_fingerprint
-       ) do
+  defp continue_agent_turns(context, issue, turn_number, effective_run_ref, final_report, previous_final_report_fingerprint) do
     analysis = FinalReport.analyze(final_report)
 
     case continuation_decision(
@@ -534,25 +528,18 @@ defmodule Rondo.AgentRunner do
            final_report,
            effective_run_ref
          ) do
-      {:continue, refreshed_issue, current_final_report_fingerprint} when turn_number < context.max_turns ->
+      {:continue, refreshed_issue, current_final_report_fingerprint, next_context} when turn_number < context.max_turns ->
         Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} turn=#{turn_number}/#{context.max_turns}")
+        do_run_agent_turns(next_context, refreshed_issue, turn_number + 1, effective_run_ref, current_final_report_fingerprint)
 
-        do_run_agent_turns(
-          context,
-          refreshed_issue,
-          turn_number + 1,
-          effective_run_ref,
-          current_final_report_fingerprint
-        )
-
-      {:continue, refreshed_issue, _current_final_report_fingerprint} ->
+      {:continue, refreshed_issue, _current_final_report_fingerprint, _next_context} ->
         Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with delivery still incomplete")
         :ok
 
-      {:done, _refreshed_issue} ->
+      {:done, _refreshed_issue, _next_context} ->
         :ok
 
-      {:pause, interrupt} ->
+      {:pause, interrupt, _next_context} ->
         {:pause, interrupt}
 
       {:error, reason} ->
@@ -604,10 +591,10 @@ defmodule Rondo.AgentRunner do
   defp final_report_unparsed_pause(context, issue, analysis, turn_number, final_report, effective_run_ref) do
     case final_report_state_classification(analysis.next_state_hint) do
       :blocked when analysis.status != :valid ->
-        {:pause, final_report_interrupt(context, issue, effective_run_ref, analysis, final_report, turn_number, "blocked_state_unparsed")}
+        {:pause, final_report_interrupt(context, issue, effective_run_ref, analysis, final_report, turn_number, "blocked_state_unparsed"), clear_live_update_prompt(context)}
 
       :terminal when analysis.status != :valid ->
-        {:pause, final_report_interrupt(context, issue, effective_run_ref, analysis, final_report, turn_number, "terminal_state_unparsed")}
+        {:pause, final_report_interrupt(context, issue, effective_run_ref, analysis, final_report, turn_number, "terminal_state_unparsed"), clear_live_update_prompt(context)}
 
       _other ->
         nil
@@ -625,7 +612,7 @@ defmodule Rondo.AgentRunner do
        ) do
     if analysis.status != :valid && previous_final_report_fingerprint && final_report_loop_guardable?(final_report) &&
          final_report_loop_guard?(analysis.fingerprint, previous_final_report_fingerprint) do
-      {:pause, final_report_interrupt(context, issue, effective_run_ref, analysis, final_report, turn_number, "repeated_final_report")}
+      {:pause, final_report_interrupt(context, issue, effective_run_ref, analysis, final_report, turn_number, "repeated_final_report"), clear_live_update_prompt(context)}
     else
       nil
     end
@@ -633,32 +620,35 @@ defmodule Rondo.AgentRunner do
 
   defp continuation_decision_by_status(context, issue, analysis) do
     case analysis.status do
-      :valid -> valid_final_report_continuation(issue, analysis)
+      :valid -> valid_final_report_continuation(context, issue, analysis)
       _invalid_or_missing -> invalid_or_missing_final_report_continuation(context, issue, analysis)
     end
   end
 
-  defp valid_final_report_continuation(issue, analysis) do
+  defp valid_final_report_continuation(context, issue, analysis) do
     if active_issue_state?(Map.get(analysis.report, "next_state")) do
-      {:continue, issue, analysis.fingerprint}
+      case maybe_continue_with_live_update(context, issue, :continue) do
+        {:continue, refreshed_issue, next_context} -> {:continue, refreshed_issue, analysis.fingerprint, next_context}
+        {:done, refreshed_issue, next_context} -> {:done, refreshed_issue, next_context}
+        {:pause, interrupt, next_context} -> {:pause, interrupt, next_context}
+        {:error, reason} -> {:error, reason}
+      end
     else
-      {:done, issue}
+      {:done, issue, clear_live_update_prompt(context)}
     end
   end
 
   defp invalid_or_missing_final_report_continuation(context, issue, analysis) do
     if tracker_capable?(context) do
-      case continue_with_issue?(issue, context.issue_state_fetcher) do
-        {:continue, refreshed_issue} -> {:continue, refreshed_issue, analysis.fingerprint}
-        other -> other
+      case maybe_continue_with_live_update(context, issue, :continue) do
+        {:continue, refreshed_issue, next_context} -> {:continue, refreshed_issue, analysis.fingerprint, next_context}
+        {:done, refreshed_issue, next_context} -> {:done, refreshed_issue, next_context}
+        {:pause, interrupt, next_context} -> {:pause, interrupt, next_context}
+        {:error, reason} -> {:error, reason}
       end
     else
-      {:done, issue}
+      {:done, issue, clear_live_update_prompt(context)}
     end
-  end
-
-  defp tracker_capable?(%{issue_state_fetcher: fetcher}) do
-    fetcher != (&__MODULE__.no_tracker_issue_state_fetcher/1)
   end
 
   defp final_report_interrupt(context, issue, effective_run_ref, analysis, final_report, turn_number, classification) do
@@ -726,6 +716,175 @@ defmodule Rondo.AgentRunner do
 
   defp final_report_excerpt(report), do: inspect(report) |> final_report_excerpt()
 
+  defp maybe_continue_with_live_update(context, issue, no_tracker_result) do
+    if tracker_capable?(context) do
+      continue_with_live_update(context, issue)
+    else
+      {no_tracker_result, issue, clear_live_update_prompt(context)}
+    end
+  end
+
+  defp tracker_capable?(%{issue_state_fetcher: fetcher}) do
+    fetcher != (&__MODULE__.no_tracker_issue_state_fetcher/1)
+  end
+
+  defp clear_live_update_prompt(%{opts: opts} = context) when is_list(opts) do
+    %{context | opts: Keyword.delete(opts, :live_update_prompt)}
+  end
+
+  defp clear_live_update_prompt(context), do: context
+
+  defp continue_with_live_update(context, %Issue{} = issue) do
+    case continue_with_issue?(issue, context.issue_state_fetcher) do
+      {:continue, refreshed_issue} ->
+        refresh_live_issue_context(context, refreshed_issue)
+
+      {:done, refreshed_issue} ->
+        {:done, refreshed_issue, clear_live_update_prompt(context)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp refresh_live_issue_context(context, %Issue{} = refreshed_issue) do
+    case current_issue_context_snapshot(refreshed_issue, Map.get(context, :issue_context_fetcher)) do
+      {:ok, current_snapshot} ->
+        previous_snapshot = Map.get(context, :issue_context_snapshot)
+        detection = UpdateDetector.detect_update(previous_snapshot, current_snapshot)
+
+        updated_context =
+          context
+          |> Map.put(:issue_context_snapshot, current_snapshot)
+          |> maybe_put_live_update_prompt(detection)
+
+        maybe_send_tracker_update(context.claude_update_recipient, refreshed_issue, detection)
+
+        case detection.action do
+          :pause ->
+            interrupt = tracker_update_interrupt(context, refreshed_issue, detection)
+            {:pause, interrupt, clear_live_update_prompt(updated_context)}
+
+          _ ->
+            {:continue, refreshed_issue, updated_context}
+        end
+
+      {:error, reason} ->
+        Logger.debug("Failed to refresh live tracker context for #{issue_context(refreshed_issue)}: #{inspect(reason)}")
+        {:continue, refreshed_issue, clear_live_update_prompt(context)}
+    end
+  end
+
+  defp maybe_put_live_update_prompt(context, %{action: :inject, prompt_lines: prompt_lines}) when is_list(prompt_lines) and prompt_lines != [] do
+    prompt = Enum.join(prompt_lines, "\n")
+    update_in(context, [:opts], &Keyword.put(&1, :live_update_prompt, prompt))
+  end
+
+  defp maybe_put_live_update_prompt(context, _detection), do: clear_live_update_prompt(context)
+
+  defp initial_issue_context_snapshot(%Issue{} = issue, issue_context_fetcher) do
+    case current_issue_context_snapshot(issue, issue_context_fetcher) do
+      {:ok, snapshot} -> snapshot
+      {:error, _reason} -> UpdateDetector.snapshot_from_issue(issue)
+    end
+  end
+
+  # credo:disable-for-next-line
+  defp current_issue_context_snapshot(%Issue{id: issue_id} = _issue, issue_context_fetcher)
+       when is_binary(issue_id) and is_function(issue_context_fetcher, 1) do
+    case issue_context_fetcher.([issue_id]) do
+      {:ok, [%{snapshot: snapshot} | _]} when is_map(snapshot) ->
+        {:ok, snapshot}
+
+      {:ok, [%{"snapshot" => snapshot} | _]} when is_map(snapshot) ->
+        {:ok, snapshot}
+
+      {:ok, [%{} = context | _]} ->
+        case Map.get(context, :snapshot) || Map.get(context, "snapshot") do
+          snapshot when is_map(snapshot) -> {:ok, snapshot}
+          _ -> {:error, :missing_issue_context_snapshot}
+        end
+
+      {:ok, []} ->
+        {:error, :issue_context_not_found}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp current_issue_context_snapshot(%Issue{} = issue, _issue_context_fetcher) do
+    {:ok, UpdateDetector.snapshot_from_issue(issue)}
+  end
+
+  defp maybe_send_tracker_update(nil, _issue, _detection), do: :ok
+
+  defp maybe_send_tracker_update(recipient, %Issue{id: issue_id}, detection) when is_pid(recipient) and is_binary(issue_id) do
+    send(
+      recipient,
+      {:claude_worker_update, issue_id,
+       %{
+         event: :tracker_update_detected,
+         timestamp: DateTime.utc_now(),
+         session_id: nil,
+         usage: nil,
+         message: Map.get(detection, :summary),
+         raw: detection
+       }}
+    )
+
+    :ok
+  end
+
+  defp maybe_send_tracker_update(_recipient, _issue, _detection), do: :ok
+
+  defp tracker_update_interrupt(context, issue, detection) do
+    Interrupt.action_policy_guidance_required(%{
+      issue: issue,
+      timestamp: DateTime.utc_now(),
+      run_id: Map.get(context, :run_id),
+      run_dir: Map.get(context, :run_dir),
+      session_id: Map.get(context, :session_id),
+      question: tracker_update_question(detection),
+      blocked_side_effect: %{
+        "type" => "tracker_update",
+        "action" => to_string(Map.get(detection, :action)),
+        "classification" => to_string(Map.get(detection, :classification)),
+        "reason" => Map.get(detection, :reason),
+        "summary" => Map.get(detection, :summary)
+      },
+      guidance_severity: Map.get(detection, :guidance_severity),
+      policy: %{reason: Map.get(detection, :reason)},
+      suggested_responses: tracker_update_suggested_responses(detection),
+      resume: %{run_id: Map.get(context, :run_id), run_dir: Map.get(context, :run_dir), session_id: Map.get(context, :session_id)}
+    })
+  end
+
+  defp tracker_update_question(%{classification: :conflicting_or_ambiguous_update}) do
+    "The ticket changed in a conflicting or ambiguous way. Should Rondo pause and await guidance?"
+  end
+
+  defp tracker_update_question(%{classification: :relation_or_blocker_change}) do
+    "The ticket's blockers or relations changed. Should Rondo pause and re-evaluate the run?"
+  end
+
+  defp tracker_update_question(%{classification: :policy_or_risk_change}) do
+    "The ticket now contains a policy, safety, or risk change. Should Rondo pause for guidance?"
+  end
+
+  defp tracker_update_question(_detection) do
+    "The ticket changed while the run was active. Should Rondo continue with the refreshed tracker context?"
+  end
+
+  defp tracker_update_suggested_responses(%{action: :pause}) do
+    [
+      %{"id" => "resume", "label" => "Pause and review the live update before continuing"},
+      %{"id" => "abort", "label" => "Abort this run"}
+    ]
+  end
+
+  defp tracker_update_suggested_responses(_detection), do: []
+
   defp adapter_module(opts) do
     opts
     |> Keyword.get(:agent_adapter, Config.agent_adapter())
@@ -772,22 +931,38 @@ defmodule Rondo.AgentRunner do
   defp blocking_probe?(%{checks: checks}), do: map_size(Map.get(checks, :blocking, %{})) > 0
 
   defp build_turn_prompt(provider, issue, opts, 1, _max_turns) do
-    case opts |> Keyword.get(:operator_guidance) |> normalize_operator_guidance() do
-      nil -> ProcessProvider.prompt(provider, issue, opts)
-      guidance -> operator_guidance_prompt(guidance)
-    end
+    prompt =
+      case opts |> Keyword.get(:operator_guidance) |> normalize_operator_guidance() do
+        nil -> ProcessProvider.prompt(provider, issue, opts)
+        guidance -> operator_guidance_prompt(guidance)
+      end
+
+    prepend_live_update_prompt(prompt, opts)
   end
 
-  defp build_turn_prompt(_provider, _issue, _opts, turn_number, max_turns) do
-    """
-    Continuation guidance:
+  defp build_turn_prompt(_provider, _issue, opts, turn_number, max_turns) do
+    prompt =
+      """
+      Continuation guidance:
 
-    - The previous turn completed normally, but the work is not yet complete (your final report did not declare a terminal next_state, or the tracker issue is still active).
-    - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
-    - Resume from the current workspace state instead of restarting from scratch.
-    - The original task instructions and prior turn context are already present in this session, so do not restate them before acting.
-    - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
-    """
+      - The previous turn completed normally, but the work is not yet complete (your final report did not declare a terminal next_state, or the tracker issue is still active).
+      - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
+      - Resume from the current workspace state instead of restarting from scratch.
+      - The original task instructions and prior turn context are already present in this session, so do not restate them before acting.
+      - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
+      """
+
+    prepend_live_update_prompt(prompt, opts)
+  end
+
+  defp prepend_live_update_prompt(prompt, opts) when is_binary(prompt) do
+    case Keyword.get(opts, :live_update_prompt) do
+      value when is_binary(value) and value != "" ->
+        "Live tracker update to incorporate:\n\n" <> value <> "\n\n" <> prompt
+
+      _ ->
+        prompt
+    end
   end
 
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
