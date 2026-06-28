@@ -309,6 +309,8 @@ defmodule Rondo.RunLedgerTest do
     assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "invocation_failed"}) == "turn_failed"
     assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "gates_completed"}) == "gates_completed"
     assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "gates_reused"}) == "gates_reused"
+    assert RunLedger.checkpoint_kind_for_agent_update(%{event: :tracker_update_detected}) == "tracker_update_detected"
+    assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "tracker_update_detected"}) == "tracker_update_detected"
     assert RunLedger.checkpoint_kind_for_agent_update(%{event: :unknown}) == nil
   end
 

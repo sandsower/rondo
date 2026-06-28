@@ -181,6 +181,164 @@ defmodule Rondo.Linear.Client do
   }
   """
 
+  @query_context_by_ids """
+  query RondoLinearIssueContextById($ids: [ID!]!, $projectSlug: String!, $first: Int!, $relationFirst: Int!, $commentFirst: Int!, $attachmentFirst: Int!) {
+    issues(filter: {id: {in: $ids}, project: {slugId: {eq: $projectSlug}}}, first: $first) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        priority
+        state {
+          name
+        }
+        branchName
+        url
+        assignee {
+          id
+        }
+        labels {
+          nodes {
+            name
+          }
+        }
+        relations(first: $relationFirst) {
+          nodes {
+            type
+            issue {
+              id
+              identifier
+              title
+              state {
+                name
+              }
+            }
+          }
+        }
+        inverseRelations(first: $relationFirst) {
+          nodes {
+            type
+            issue {
+              id
+              identifier
+              title
+              state {
+                name
+              }
+            }
+          }
+        }
+        comments(first: $commentFirst) {
+          nodes {
+            id
+            body
+            updatedAt
+            createdAt
+            user {
+              id
+              name
+            }
+          }
+        }
+        attachments(first: $attachmentFirst) {
+          nodes {
+            id
+            title
+            subtitle
+            url
+            sourceType
+            metadata
+            createdAt
+            updatedAt
+          }
+        }
+        createdAt
+        updatedAt
+      }
+    }
+  }
+  """
+
+  @query_context_by_ids_with_labels """
+  query RondoLinearIssueContextByIdWithLabels($ids: [ID!]!, $projectSlug: String!, $labelNames: [String!]!, $first: Int!, $relationFirst: Int!, $commentFirst: Int!, $attachmentFirst: Int!) {
+    issues(filter: {id: {in: $ids}, project: {slugId: {eq: $projectSlug}}, labels: {name: {in: $labelNames}}}, first: $first) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        priority
+        state {
+          name
+        }
+        branchName
+        url
+        assignee {
+          id
+        }
+        labels {
+          nodes {
+            name
+          }
+        }
+        relations(first: $relationFirst) {
+          nodes {
+            type
+            issue {
+              id
+              identifier
+              title
+              state {
+                name
+              }
+            }
+          }
+        }
+        inverseRelations(first: $relationFirst) {
+          nodes {
+            type
+            issue {
+              id
+              identifier
+              title
+              state {
+                name
+              }
+            }
+          }
+        }
+        comments(first: $commentFirst) {
+          nodes {
+            id
+            body
+            updatedAt
+            createdAt
+            user {
+              id
+              name
+            }
+          }
+        }
+        attachments(first: $attachmentFirst) {
+          nodes {
+            id
+            title
+            subtitle
+            url
+            sourceType
+            metadata
+            createdAt
+            updatedAt
+          }
+        }
+        createdAt
+        updatedAt
+      }
+    }
+  }
+  """
+
   @viewer_query """
   query RondoLinearViewer {
     viewer {
@@ -239,6 +397,13 @@ defmodule Rondo.Linear.Client do
     |> fetch_visible_issue_states_by_ids()
   end
 
+  @spec fetch_issue_contexts_by_ids([String.t()]) :: {:ok, [map()]} | {:error, term()}
+  def fetch_issue_contexts_by_ids(issue_ids) when is_list(issue_ids) do
+    issue_ids
+    |> Enum.uniq()
+    |> fetch_visible_issue_contexts_by_ids()
+  end
+
   defp fetch_visible_issue_states_by_ids([]), do: {:ok, []}
 
   defp fetch_visible_issue_states_by_ids(ids) do
@@ -256,9 +421,32 @@ defmodule Rondo.Linear.Client do
     end
   end
 
+  defp fetch_visible_issue_contexts_by_ids([]), do: {:ok, []}
+
+  defp fetch_visible_issue_contexts_by_ids(ids) do
+    project_slug = Config.linear_project_slug()
+
+    cond do
+      is_nil(Config.linear_api_token()) ->
+        {:error, :missing_linear_api_token}
+
+      is_nil(project_slug) ->
+        {:error, :missing_linear_project_slug}
+
+      true ->
+        fetch_visible_issue_contexts_by_ids(ids, project_slug)
+    end
+  end
+
   defp fetch_visible_issue_states_by_ids(ids, project_slug) do
     with {:ok, assignee_filter} <- routing_assignee_filter() do
       do_fetch_issue_states(ids, assignee_filter, project_slug, Config.tracker_label_filter())
+    end
+  end
+
+  defp fetch_visible_issue_contexts_by_ids(ids, project_slug) do
+    with {:ok, assignee_filter} <- routing_assignee_filter() do
+      do_fetch_issue_contexts(ids, assignee_filter, project_slug, Config.tracker_label_filter())
     end
   end
 
@@ -283,6 +471,49 @@ defmodule Rondo.Linear.Client do
       {:error, reason} ->
         Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
         {:error, {:linear_api_request, reason}}
+    end
+  end
+
+  @doc false
+  @spec normalize_issue_context_for_test(map(), String.t() | nil) :: map() | nil
+  def normalize_issue_context_for_test(issue, assignee \\ nil) when is_map(issue) do
+    assignee_filter =
+      case assignee do
+        value when is_binary(value) ->
+          case build_assignee_filter(value) do
+            {:ok, filter} -> filter
+            {:error, _reason} -> nil
+          end
+
+        _ ->
+          nil
+      end
+
+    normalize_issue_context(issue, assignee_filter)
+  end
+
+  @doc false
+  @spec fetch_issue_contexts_by_ids_for_test(
+          [String.t()],
+          (String.t(), map() -> {:ok, map()} | {:error, term()}),
+          keyword()
+        ) :: {:ok, [map()]} | {:error, term()}
+  def fetch_issue_contexts_by_ids_for_test(issue_ids, graphql_fun, opts \\ [])
+      when is_list(issue_ids) and is_function(graphql_fun, 2) and is_list(opts) do
+    ids = Enum.uniq(issue_ids)
+
+    case ids do
+      [] ->
+        {:ok, []}
+
+      ids ->
+        do_fetch_issue_contexts(
+          ids,
+          nil,
+          Keyword.get(opts, :project_slug, "test-project"),
+          Keyword.get(opts, :label_filter, []),
+          graphql_fun
+        )
     end
   end
 
@@ -450,6 +681,228 @@ defmodule Rondo.Linear.Client do
         {:error, reason}
     end
   end
+
+  defp do_fetch_issue_contexts(ids, assignee_filter, project_slug, label_filter) do
+    graphql_fun = fn query, vars -> graphql(query, vars) end
+
+    do_fetch_issue_contexts(ids, assignee_filter, project_slug, label_filter, graphql_fun)
+  end
+
+  defp do_fetch_issue_contexts(ids, assignee_filter, project_slug, label_filter, graphql_fun)
+       when is_list(ids) and is_binary(project_slug) and is_function(graphql_fun, 2) do
+    issue_order_index = issue_order_index(ids)
+    do_fetch_issue_contexts_page(ids, assignee_filter, project_slug, label_filter, graphql_fun, [], issue_order_index)
+  end
+
+  defp do_fetch_issue_contexts_page(
+         [],
+         _assignee_filter,
+         _project_slug,
+         _label_filter,
+         _graphql_fun,
+         acc_contexts,
+         issue_order_index
+       ) do
+    acc_contexts
+    |> finalize_paginated_issues()
+    |> sort_contexts_by_requested_ids(issue_order_index)
+    |> then(&{:ok, &1})
+  end
+
+  defp do_fetch_issue_contexts_page(ids, assignee_filter, project_slug, label_filter, graphql_fun, acc_contexts, issue_order_index) do
+    {batch_ids, rest_ids} = Enum.split(ids, @issue_page_size)
+    {query, variables} = build_issue_contexts_by_ids_query(batch_ids, project_slug, label_filter)
+
+    case graphql_fun.(query, variables) do
+      {:ok, body} ->
+        with {:ok, contexts} <- decode_linear_context_response(body, assignee_filter) do
+          updated_acc = prepend_page_issues(contexts, acc_contexts)
+
+          do_fetch_issue_contexts_page(
+            rest_ids,
+            assignee_filter,
+            project_slug,
+            label_filter,
+            graphql_fun,
+            updated_acc,
+            issue_order_index
+          )
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp build_issue_contexts_by_ids_query(batch_ids, project_slug, label_filter)
+       when is_list(label_filter) and label_filter != [] do
+    {@query_context_by_ids_with_labels,
+     %{
+       ids: batch_ids,
+       projectSlug: project_slug,
+       labelNames: label_filter,
+       first: length(batch_ids),
+       relationFirst: @issue_page_size,
+       commentFirst: @issue_page_size,
+       attachmentFirst: @issue_page_size
+     }}
+  end
+
+  defp build_issue_contexts_by_ids_query(batch_ids, project_slug, _label_filter) do
+    {@query_context_by_ids,
+     %{
+       ids: batch_ids,
+       projectSlug: project_slug,
+       first: length(batch_ids),
+       relationFirst: @issue_page_size,
+       commentFirst: @issue_page_size,
+       attachmentFirst: @issue_page_size
+     }}
+  end
+
+  defp decode_linear_context_response(%{"data" => %{"issues" => %{"nodes" => nodes}}}, assignee_filter) do
+    contexts =
+      nodes
+      |> Enum.map(&normalize_issue_context(&1, assignee_filter))
+      |> Enum.reject(&is_nil/1)
+
+    {:ok, contexts}
+  end
+
+  defp decode_linear_context_response(%{"errors" => errors}, _assignee_filter) do
+    {:error, {:linear_graphql_errors, errors}}
+  end
+
+  defp decode_linear_context_response(_unknown, _assignee_filter) do
+    {:error, :linear_unknown_payload}
+  end
+
+  defp sort_contexts_by_requested_ids(contexts, issue_order_index)
+       when is_list(contexts) and is_map(issue_order_index) do
+    fallback_index = map_size(issue_order_index)
+
+    Enum.sort_by(contexts, fn
+      %{issue: %Issue{id: issue_id}} -> Map.get(issue_order_index, issue_id, fallback_index)
+      %{issue: %{"id" => issue_id}} -> Map.get(issue_order_index, issue_id, fallback_index)
+      _ -> fallback_index
+    end)
+  end
+
+  defp normalize_issue_context(issue, assignee_filter) when is_map(issue) do
+    case normalize_issue(issue, assignee_filter) do
+      nil ->
+        nil
+
+      %Issue{} = issue_struct ->
+        %{
+          issue: issue_struct,
+          snapshot: normalize_issue_context_snapshot(issue)
+        }
+    end
+  end
+
+  defp normalize_issue_context_snapshot(issue) when is_map(issue) do
+    %{
+      "id" => issue["id"],
+      "identifier" => issue["identifier"],
+      "title" => issue["title"],
+      "description" => issue["description"],
+      "state" => get_in(issue, ["state", "name"]),
+      "updated_at" => parse_datetime(issue["updatedAt"]),
+      "labels" => extract_labels(issue),
+      "blocked_by" => extract_blockers(issue),
+      "relations" => extract_relations(issue),
+      "inverse_relations" => extract_inverse_relations(issue),
+      "comments" => extract_comments(issue),
+      "attachments" => extract_attachments(issue),
+      "custom_fields" => extract_custom_fields(issue),
+      "created_at" => parse_datetime(issue["createdAt"])
+    }
+    |> Map.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp extract_relations(%{"relations" => %{"nodes" => relations}}) when is_list(relations) do
+    Enum.map(relations, &normalize_relation_node/1) |> Enum.reject(&is_nil/1)
+  end
+
+  defp extract_relations(_), do: []
+
+  defp extract_inverse_relations(%{"inverseRelations" => %{"nodes" => relations}}) when is_list(relations) do
+    Enum.map(relations, &normalize_relation_node/1) |> Enum.reject(&is_nil/1)
+  end
+
+  defp extract_inverse_relations(_), do: []
+
+  defp normalize_relation_node(%{"type" => relation_type, "issue" => issue}) when is_map(issue) do
+    %{
+      type: relation_type,
+      issue_id: issue["id"],
+      issue_identifier: issue["identifier"],
+      issue_title: issue["title"],
+      issue_state: get_in(issue, ["state", "name"])
+    }
+  end
+
+  defp normalize_relation_node(_), do: nil
+
+  defp extract_comments(%{"comments" => %{"nodes" => comments}}) when is_list(comments) do
+    comments
+    |> Enum.map(&normalize_comment_node/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp extract_comments(_), do: []
+
+  defp normalize_comment_node(%{} = comment) do
+    %{
+      id: comment["id"],
+      body: comment["body"],
+      updated_at: parse_datetime(comment["updatedAt"]),
+      created_at: parse_datetime(comment["createdAt"]),
+      author_id: get_in(comment, ["user", "id"]),
+      author_name: get_in(comment, ["user", "name"])
+    }
+  end
+
+  defp normalize_comment_node(_), do: nil
+
+  defp extract_attachments(%{"attachments" => %{"nodes" => attachments}}) when is_list(attachments) do
+    attachments
+    |> Enum.map(&normalize_attachment_node/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp extract_attachments(_), do: []
+
+  defp normalize_attachment_node(%{} = attachment) do
+    %{
+      id: attachment["id"],
+      title: attachment["title"],
+      subtitle: attachment["subtitle"],
+      url: attachment["url"],
+      source_type: attachment["sourceType"],
+      metadata: attachment["metadata"],
+      created_at: parse_datetime(attachment["createdAt"]),
+      updated_at: parse_datetime(attachment["updatedAt"])
+    }
+  end
+
+  defp normalize_attachment_node(_), do: nil
+
+  defp extract_custom_fields(%{"customFields" => %{"nodes" => fields}}) when is_list(fields) do
+    fields
+    |> Enum.map(&normalize_custom_field_node/1)
+    |> Enum.reject(&is_nil/1)
+    |> Map.new()
+  end
+
+  defp extract_custom_fields(_), do: %{}
+
+  defp normalize_custom_field_node(%{"name" => name} = field) do
+    {name, field["value"]}
+  end
+
+  defp normalize_custom_field_node(_), do: nil
 
   defp build_issue_states_by_ids_query(batch_ids, project_slug, label_filter)
        when is_list(label_filter) and label_filter != [] do

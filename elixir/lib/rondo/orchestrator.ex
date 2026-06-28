@@ -2399,6 +2399,10 @@ defmodule Rondo.Orchestrator do
     Map.get(raw, "subtype") || Map.get(raw, :subtype)
   end
 
+  defp extract_event_summary(:tracker_update_detected, update) do
+    Map.get(update, :message) || Map.get(update, "message")
+  end
+
   defp extract_event_summary(_event, _update), do: nil
 
   defp get_in_any(map, [key | rest]) when is_map(map) do

@@ -17,6 +17,9 @@ defmodule Rondo.GitHub.Adapter do
   def fetch_issue_states_by_ids(issue_ids), do: Client.fetch_issue_states_by_ids(issue_ids)
 
   @impl true
+  def fetch_issue_contexts_by_ids(issue_ids), do: Client.fetch_issue_contexts_by_ids(issue_ids)
+
+  @impl true
   def create_comment(issue_id, body), do: Client.create_comment(issue_id, body)
 
   @impl true

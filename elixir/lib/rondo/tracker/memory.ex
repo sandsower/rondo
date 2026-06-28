@@ -6,6 +6,7 @@ defmodule Rondo.Tracker.Memory do
   @behaviour Rondo.Tracker
 
   alias Rondo.Linear.Issue
+  alias Rondo.Tracker.UpdateDetector
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
@@ -35,6 +36,18 @@ defmodule Rondo.Tracker.Memory do
      end)}
   end
 
+  @spec fetch_issue_contexts_by_ids([String.t()]) :: {:ok, [map()]} | {:error, term()}
+  def fetch_issue_contexts_by_ids(issue_ids) do
+    wanted_ids = MapSet.new(issue_ids)
+
+    contexts =
+      issue_entries()
+      |> Enum.filter(fn %Issue{id: id} -> MapSet.member?(wanted_ids, id) end)
+      |> Enum.map(&issue_context/1)
+
+    {:ok, contexts}
+  end
+
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) do
     send_event({:memory_tracker_comment, issue_id, body})
@@ -53,6 +66,15 @@ defmodule Rondo.Tracker.Memory do
 
   defp issue_entries do
     Enum.filter(configured_issues(), &match?(%Issue{}, &1))
+  end
+
+  defp issue_context(%Issue{} = issue) do
+    extras = Map.get(Application.get_env(:rondo, :memory_tracker_issue_contexts, %{}), issue.id, %{})
+
+    %{
+      issue: issue,
+      snapshot: UpdateDetector.snapshot_from_issue(issue, extras)
+    }
   end
 
   defp send_event(message) do

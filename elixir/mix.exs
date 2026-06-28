@@ -35,6 +35,7 @@ defmodule Rondo.MixProject do
           Rondo.LogFile,
           Rondo.PathSafety,
           Rondo.ReleaseLoop,
+          Rondo.Tracker.UpdateDetector,
           Rondo.StatusDashboard,
           Rondo.TimeSeries,
           RondoWeb.Endpoint,

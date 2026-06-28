@@ -57,11 +57,26 @@ defmodule Rondo.GitHub.Client do
     |> do_fetch_issue_states_by_ids(opts)
   end
 
+  @spec fetch_issue_contexts_by_ids([String.t()], keyword()) :: {:ok, [map()]} | {:error, term()}
+  def fetch_issue_contexts_by_ids(issue_ids, opts \\ []) when is_list(issue_ids) do
+    issue_ids
+    |> Enum.uniq()
+    |> do_fetch_issue_contexts_by_ids(opts)
+  end
+
   defp do_fetch_issue_states_by_ids([], _opts), do: {:ok, []}
 
   defp do_fetch_issue_states_by_ids(ids, opts) do
     with {:ok, context} <- context(opts) do
       view_issues_by_id(ids, context)
+    end
+  end
+
+  defp do_fetch_issue_contexts_by_ids([], _opts), do: {:ok, []}
+
+  defp do_fetch_issue_contexts_by_ids(ids, opts) do
+    with {:ok, context} <- context(opts) do
+      {:ok, view_issues_context_by_id(ids, context)}
     end
   end
 
@@ -147,6 +162,61 @@ defmodule Rondo.GitHub.Client do
       {:ok, issues} -> {:ok, Enum.reverse(issues)}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp view_issues_context_by_id(ids, context) do
+    ids
+    |> Enum.reduce_while([], fn issue_id, acc ->
+      case view_issue_context_by_id(issue_id, context) do
+        {:ok, issue_context} -> {:cont, [issue_context | acc]}
+        {:skip, :missing} -> {:cont, acc}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:error, reason} -> {:error, reason}
+      contexts -> Enum.reverse(contexts)
+    end
+  end
+
+  defp view_issue_context_by_id(issue_id, context) do
+    with {:ok, number} <- parse_issue_number(issue_id, context.repo),
+         {:ok, raw_issue} <- view_raw_issue(context, number) do
+      {:ok, normalize_issue_context(raw_issue, context)}
+    else
+      {:error, reason} -> view_issue_context_error(reason)
+    end
+  end
+
+  defp view_issue_context_error(reason) do
+    if issue_missing_error?(reason) do
+      {:skip, :missing}
+    else
+      {:error, reason}
+    end
+  end
+
+  defp normalize_issue_context(raw_issue, context) do
+    issue = normalize_issue(raw_issue, context.repo, context.state_label_prefix)
+
+    %{
+      issue: issue,
+      snapshot: %{
+        "id" => raw_issue["number"],
+        "identifier" => issue.identifier,
+        "title" => issue.title,
+        "description" => raw_issue["body"],
+        "state" => issue.state,
+        "updated_at" => raw_issue["updatedAt"],
+        "labels" => issue.labels,
+        "blocked_by" => [],
+        "relations" => [],
+        "inverse_relations" => [],
+        "attachments" => [],
+        "comments" => [],
+        "custom_fields" => %{}
+      }
+    }
   end
 
   defp maybe_prepend_visible_issue(raw_issue, issues, context) do
