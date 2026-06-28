@@ -539,6 +539,98 @@ defmodule Rondo.OrchestratorStatusTest do
     assert second["accounted_usage"] == %{"cost" => 0.0, "input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0}
   end
 
+  test "orchestrator preserves the fallback baseline when pi usage upgrades to session_id" do
+    issue_id = "issue-pi-accounting-upgrade"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PI-UPGRADE",
+      title: "Pi fallback-to-stable accounting upgrade",
+      description: "Preserve cumulative Pi baseline when session metadata arrives late",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-PI-UPGRADE"
+    }
+
+    workspace_root = tmp_dir("orchestrator-pi-fallback-upgrade-ledger")
+    assert {:ok, ledger} = Rondo.RunLedger.create_run(issue, workspace_root: workspace_root)
+
+    orchestrator_name = Module.concat(__MODULE__, :PiFallbackToStableOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      run_id: ledger.run_id,
+      run_dir: ledger.run_dir,
+      ledger: ledger,
+      run_ref: nil,
+      turn_count: 0,
+      last_claude_message: nil,
+      last_claude_timestamp: nil,
+      last_claude_event: nil,
+      claude_input_tokens: 0,
+      claude_output_tokens: 0,
+      claude_total_tokens: 0,
+      claude_last_reported_input_tokens: 0,
+      claude_last_reported_output_tokens: 0,
+      claude_last_reported_total_tokens: 0,
+      started_at: started_at,
+      event_log: []
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    usage = %{input_tokens: 80, output_tokens: 20, total_tokens: 100, cost: 0.25}
+    upgraded_usage = %{input_tokens: 120, output_tokens: 30, total_tokens: 150, cost: 0.35}
+
+    for {event, update} <- [
+          {:assistant_message, %{adapter: "pi", usage: usage}},
+          {:assistant_message, %{adapter: "pi", session_id: "pi-session-upgrade", usage: usage}},
+          {:invocation_completed, %{adapter: "pi", session_id: "pi-session-upgrade", usage: upgraded_usage}}
+        ] do
+      send(pid, {:claude_worker_update, issue_id, Map.merge(update, %{event: event, timestamp: DateTime.utc_now()})})
+    end
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.claude_input_tokens == 120
+    assert snapshot_entry.claude_output_tokens == 30
+    assert snapshot_entry.claude_total_tokens == 150
+
+    events_path = Path.join(ledger.run_dir, "artifacts/agent-events.ndjson")
+
+    [first, second, third] =
+      events_path
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.map(&Jason.decode!/1)
+
+    assert first["accounted_usage"] == %{"cost" => 0.25, "input_tokens" => 80, "output_tokens" => 20, "total_tokens" => 100}
+    assert second["usage"] == first["usage"]
+    assert second["accounted_usage"] == %{"cost" => 0.0, "input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0}
+    assert third["accounted_usage"]["input_tokens"] == 40
+    assert third["accounted_usage"]["output_tokens"] == 10
+    assert third["accounted_usage"]["total_tokens"] == 50
+    assert_in_delta third["accounted_usage"]["cost"], 0.1, 1.0e-12
+  end
+
   test "orchestrator accounts cumulative pi growth by positive deltas" do
     issue_id = "issue-pi-cumulative-growth"
 

@@ -1933,10 +1933,6 @@ defmodule Rondo.Orchestrator do
     claude_input_tokens = Map.get(running_entry, :claude_input_tokens, 0)
     claude_output_tokens = Map.get(running_entry, :claude_output_tokens, 0)
     claude_total_tokens = Map.get(running_entry, :claude_total_tokens, 0)
-    last_reported_input = Map.get(running_entry, :claude_last_reported_input_tokens, 0)
-    last_reported_output = Map.get(running_entry, :claude_last_reported_output_tokens, 0)
-    last_reported_total = Map.get(running_entry, :claude_last_reported_total_tokens, 0)
-    last_reported_cost = Map.get(running_entry, :claude_last_reported_cost, 0)
     turn_count = Map.get(running_entry, :turn_count, 0)
 
     message = extract_event_summary(event, update)
@@ -1965,10 +1961,10 @@ defmodule Rondo.Orchestrator do
         claude_input_tokens: claude_input_tokens + token_delta.input_tokens,
         claude_output_tokens: claude_output_tokens + token_delta.output_tokens,
         claude_total_tokens: claude_total_tokens + token_delta.total_tokens,
-        claude_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
-        claude_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
-        claude_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
-        claude_last_reported_cost: max_number(last_reported_cost, Map.get(token_delta, :cost_reported)),
+        claude_last_reported_input_tokens: Map.get(token_delta, :input_reported, 0),
+        claude_last_reported_output_tokens: Map.get(token_delta, :output_reported, 0),
+        claude_last_reported_total_tokens: Map.get(token_delta, :total_reported, 0),
+        claude_last_reported_cost: Map.get(token_delta, :cost_reported) || 0,
         claude_usage_accounting_ref: usage_accounting_ref(update) || Map.get(running_entry, :claude_usage_accounting_ref),
         turn_count: turn_count_for_update(turn_count, running_entry.session_id, update),
         latest_gate: latest_gate_for_update(running_entry, update),
@@ -2886,7 +2882,7 @@ defmodule Rondo.Orchestrator do
   end
 
   defp cumulative_token_delta(running_entry, update, input, output, total, cost) do
-    same_accounting_ref? = usage_accounting_ref(update) == Map.get(running_entry, :claude_usage_accounting_ref)
+    same_accounting_ref? = continue_cumulative_usage?(running_entry, update, total)
     last_input = if same_accounting_ref?, do: Map.get(running_entry, :claude_last_reported_input_tokens, 0), else: 0
     last_output = if same_accounting_ref?, do: Map.get(running_entry, :claude_last_reported_output_tokens, 0), else: 0
     last_total = if same_accounting_ref?, do: Map.get(running_entry, :claude_last_reported_total_tokens, 0), else: 0
@@ -2920,6 +2916,21 @@ defmodule Rondo.Orchestrator do
     end
   end
 
+  defp continue_cumulative_usage?(running_entry, update, current_total) do
+    previous_ref = Map.get(running_entry, :claude_usage_accounting_ref)
+    current_ref = usage_accounting_ref(update)
+    previous_total = Map.get(running_entry, :claude_last_reported_total_tokens, 0)
+
+    ref_continues? =
+      current_ref == previous_ref or fallback_to_stable_usage_ref_upgrade?(previous_ref, current_ref)
+
+    ref_continues? and current_total >= previous_total
+  end
+
+  defp fallback_to_stable_usage_ref_upgrade?({:adapter, _}, {:session_id, _}), do: true
+  defp fallback_to_stable_usage_ref_upgrade?({:adapter, _}, {:run_ref, _}), do: true
+  defp fallback_to_stable_usage_ref_upgrade?(_, _), do: false
+
   defp positive_delta(current, previous) when is_integer(current) and is_integer(previous), do: max(0, current - previous)
   defp positive_delta(current, _previous) when is_integer(current), do: current
   defp positive_delta(_current, _previous), do: 0
@@ -2929,11 +2940,6 @@ defmodule Rondo.Orchestrator do
   defp positive_number_delta(current, previous) when is_number(current) and is_number(previous), do: max(0, current - previous)
   defp positive_number_delta(current, _previous) when is_number(current), do: current
   defp positive_number_delta(_current, _previous), do: nil
-
-  defp max_number(current, nil), do: current
-  defp max_number(nil, value), do: value
-  defp max_number(current, value) when is_number(current) and is_number(value), do: max(current, value)
-  defp max_number(current, _value), do: current
 
   defp put_accounted_usage(update, token_delta) do
     usage = extract_token_usage(update)
