@@ -47,6 +47,8 @@ defmodule Rondo.Config do
   @default_process_provider_kind "native"
   @default_process_provider_required false
   @valid_process_provider_kinds ["native", "beislid"]
+  @default_release_loop_max_pr_risk_level "low"
+  @valid_release_loop_pr_risk_levels ["low", "medium", "high"]
   @default_clean_eval_enabled false
   @default_debug false
   @default_observability_enabled true
@@ -156,6 +158,40 @@ defmodule Rondo.Config do
                                  policy_file: [type: {:or, [:string, nil]}, default: nil]
                                ]
                              ],
+                             release_loop: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 enabled: [type: :boolean, default: false],
+                                 pr_review_source: [type: {:or, [:string, nil]}, default: nil],
+                                 pr_review_update: [type: {:or, [:string, nil]}, default: nil],
+                                 wait_interval_seconds: [type: :pos_integer, default: 60],
+                                 run_configured_gates_before_push: [type: :boolean, default: true],
+                                 max_pr_risk_level: [
+                                   type: :string,
+                                   default: @default_release_loop_max_pr_risk_level
+                                 ],
+                                 review_state: [type: :string, default: "Human Review"],
+                                 rework_state: [type: :string, default: "Rework"],
+                                 merge_state: [type: :string, default: "Merging"],
+                                 done_state: [type: :string, default: "Done"],
+                                 closeout: [
+                                   type: :map,
+                                   default: %{},
+                                   keys: [
+                                     merge: [
+                                       type: :map,
+                                       default: %{},
+                                       keys: [
+                                         mode: [type: :string, default: "auto"],
+                                         method: [type: :string, default: "merge"],
+                                         delete_branch: [type: :boolean, default: true]
+                                       ]
+                                     ]
+                                   ]
+                                 ]
+                               ]
+                             ],
                              process_provider: [
                                type: :map,
                                default: %{},
@@ -258,6 +294,27 @@ defmodule Rondo.Config do
         }
   @type gate_reuse :: %{
           enabled: boolean()
+        }
+  @type release_loop_closeout_merge :: %{
+          mode: String.t(),
+          method: String.t(),
+          delete_branch: boolean()
+        }
+  @type release_loop_closeout :: %{
+          merge: release_loop_closeout_merge()
+        }
+  @type release_loop :: %{
+          enabled: boolean(),
+          pr_review_source: String.t() | nil,
+          pr_review_update: String.t() | nil,
+          wait_interval_seconds: pos_integer(),
+          run_configured_gates_before_push: boolean(),
+          max_pr_risk_level: String.t(),
+          review_state: String.t(),
+          rework_state: String.t(),
+          merge_state: String.t(),
+          done_state: String.t(),
+          closeout: release_loop_closeout()
         }
   @type process_provider :: %{
           kind: String.t(),
@@ -498,6 +555,72 @@ defmodule Rondo.Config do
       run_mode: Map.get(policy, :run_mode),
       policy_file: Map.get(policy, :policy_file)
     }
+  end
+
+  @spec release_loop() :: release_loop()
+  def release_loop do
+    loop = get_in(validated_workflow_options(), [:release_loop])
+    closeout = Map.get(loop, :closeout, %{})
+    merge = Map.get(closeout, :merge, %{})
+
+    %{
+      enabled: Map.get(loop, :enabled),
+      pr_review_source: Map.get(loop, :pr_review_source),
+      pr_review_update: Map.get(loop, :pr_review_update),
+      wait_interval_seconds: Map.get(loop, :wait_interval_seconds),
+      run_configured_gates_before_push: Map.get(loop, :run_configured_gates_before_push),
+      max_pr_risk_level: Map.get(loop, :max_pr_risk_level),
+      review_state: Map.get(loop, :review_state),
+      rework_state: Map.get(loop, :rework_state),
+      merge_state: Map.get(loop, :merge_state),
+      done_state: Map.get(loop, :done_state),
+      closeout: %{merge: %{mode: Map.get(merge, :mode), method: Map.get(merge, :method), delete_branch: Map.get(merge, :delete_branch)}}
+    }
+  end
+
+  @spec release_loop_enabled?() :: boolean()
+  def release_loop_enabled?, do: release_loop().enabled
+
+  @spec release_loop_pr_review_source() :: String.t() | nil
+  def release_loop_pr_review_source, do: release_loop().pr_review_source
+
+  @spec release_loop_pr_review_update() :: String.t() | nil
+  def release_loop_pr_review_update, do: release_loop().pr_review_update
+
+  @spec release_loop_wait_interval_seconds() :: pos_integer()
+  def release_loop_wait_interval_seconds, do: release_loop().wait_interval_seconds
+
+  @spec release_loop_run_configured_gates_before_push?() :: boolean()
+  def release_loop_run_configured_gates_before_push?, do: release_loop().run_configured_gates_before_push
+
+  @spec release_loop_max_pr_risk_level() :: String.t()
+  def release_loop_max_pr_risk_level, do: release_loop().max_pr_risk_level
+
+  @spec release_loop_review_state() :: String.t()
+  def release_loop_review_state, do: release_loop().review_state
+
+  @spec release_loop_rework_state() :: String.t()
+  def release_loop_rework_state, do: release_loop().rework_state
+
+  @spec release_loop_merge_state() :: String.t()
+  def release_loop_merge_state, do: release_loop().merge_state
+
+  @spec release_loop_done_state() :: String.t()
+  def release_loop_done_state, do: release_loop().done_state
+
+  @spec release_loop_merge_mode() :: String.t()
+  def release_loop_merge_mode do
+    get_in(validated_workflow_options(), [:release_loop, :closeout, :merge, :mode])
+  end
+
+  @spec release_loop_merge_method() :: String.t()
+  def release_loop_merge_method do
+    get_in(validated_workflow_options(), [:release_loop, :closeout, :merge, :method])
+  end
+
+  @spec release_loop_delete_branch?() :: boolean()
+  def release_loop_delete_branch? do
+    get_in(validated_workflow_options(), [:release_loop, :closeout, :merge, :delete_branch])
   end
 
   @spec action_policy_command() :: String.t()
@@ -863,6 +986,7 @@ defmodule Rondo.Config do
       claude: extract_claude_options(section_map(config, "claude")),
       pi: extract_pi_options(section_map(config, "pi")),
       action_policy: extract_action_policy_options(section_map(config, "action_policy")),
+      release_loop: extract_release_loop_options(section_map(config, "release_loop")),
       process_provider: extract_process_provider_options(section_map(config, "process_provider")),
       model_routing: extract_model_routing_options(section_map(config, "model_routing")),
       hooks: extract_hooks_options(section_map(config, "hooks")),
@@ -935,6 +1059,43 @@ defmodule Rondo.Config do
     |> put_if_present(:run_mode, scalar_string_value(Map.get(section, "run_mode")))
     |> put_if_present(:policy_file, policy_file_value(Map.get(section, "policy_file")))
   end
+
+  defp extract_release_loop_options(section) do
+    closeout = section_map(section, "closeout")
+    merge = section_map(closeout, "merge")
+
+    %{}
+    |> put_if_present(:enabled, boolean_value(Map.get(section, "enabled")))
+    |> put_if_present(:pr_review_source, command_value(Map.get(section, "pr_review_source")))
+    |> put_if_present(:pr_review_update, command_value(Map.get(section, "pr_review_update")))
+    |> put_if_present(:wait_interval_seconds, positive_integer_value(Map.get(section, "wait_interval_seconds")))
+    |> put_if_present(:run_configured_gates_before_push, boolean_value(Map.get(section, "run_configured_gates_before_push")))
+    |> put_if_present(:max_pr_risk_level, normalized_release_loop_pr_risk_level(Map.get(section, "max_pr_risk_level")))
+    |> put_if_present(:review_state, scalar_string_value(Map.get(section, "review_state")))
+    |> put_if_present(:rework_state, scalar_string_value(Map.get(section, "rework_state")))
+    |> put_if_present(:merge_state, scalar_string_value(Map.get(section, "merge_state")))
+    |> put_if_present(:done_state, scalar_string_value(Map.get(section, "done_state")))
+    |> put_if_present(
+      :closeout,
+      %{}
+      |> put_if_present(
+        :merge,
+        %{}
+        |> put_if_present(:mode, scalar_string_value(Map.get(merge, "mode")))
+        |> put_if_present(:method, scalar_string_value(Map.get(merge, "method")))
+        |> put_if_present(:delete_branch, boolean_value(Map.get(merge, "delete_branch")))
+      )
+    )
+  end
+
+  defp normalized_release_loop_pr_risk_level(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> :omit
+      trimmed -> String.downcase(trimmed)
+    end
+  end
+
+  defp normalized_release_loop_pr_risk_level(_value), do: :omit
 
   defp policy_file_value(value) when is_binary(value) do
     case String.trim(value) do
@@ -1069,6 +1230,9 @@ defmodule Rondo.Config do
     claude = section_map(config, "claude")
     pi = section_map(config, "pi")
     action_policy = section_map(config, "action_policy")
+    release_loop = section_map(config, "release_loop")
+    release_loop_closeout = section_map(release_loop, "closeout")
+    release_loop_merge = section_map(release_loop_closeout, "merge")
     process_provider = section_map(config, "process_provider")
     hooks = section_map(config, "hooks")
     gates = Map.get(config, "gates")
@@ -1085,6 +1249,9 @@ defmodule Rondo.Config do
       validate_section_map(config, "claude"),
       validate_section_map(config, "pi"),
       validate_section_map(config, "action_policy"),
+      validate_section_map(config, "release_loop"),
+      validate_section_map(release_loop, "closeout"),
+      validate_section_map(release_loop_closeout, "merge"),
       validate_section_map(config, "process_provider"),
       validate_section_map(config, "model_routing"),
       validate_section_map(config, "hooks"),
@@ -1129,6 +1296,19 @@ defmodule Rondo.Config do
       validate_string_field(action_policy, "action_policy.command"),
       validate_inclusion_field(action_policy, "action_policy.run_mode", @valid_action_policy_run_modes),
       validate_existing_file_field(action_policy, "action_policy.policy_file"),
+      validate_boolean_field(release_loop, "release_loop.enabled"),
+      validate_string_field(release_loop, "release_loop.pr_review_source"),
+      validate_string_field(release_loop, "release_loop.pr_review_update"),
+      validate_positive_integer_field(release_loop, "release_loop.wait_interval_seconds"),
+      validate_boolean_field(release_loop, "release_loop.run_configured_gates_before_push"),
+      validate_inclusion_field(release_loop, "release_loop.max_pr_risk_level", @valid_release_loop_pr_risk_levels),
+      validate_string_field(release_loop, "release_loop.review_state"),
+      validate_string_field(release_loop, "release_loop.rework_state"),
+      validate_string_field(release_loop, "release_loop.merge_state"),
+      validate_string_field(release_loop, "release_loop.done_state"),
+      validate_inclusion_field(release_loop_closeout, "release_loop.closeout.merge.mode", ["auto", "ask", "deny"]),
+      validate_inclusion_field(release_loop_merge, "release_loop.closeout.merge.method", ["merge", "squash", "rebase"]),
+      validate_boolean_field(release_loop_merge, "release_loop.closeout.merge.delete_branch"),
       validate_inclusion_field(process_provider, "process_provider.kind", @valid_process_provider_kinds),
       validate_boolean_field(process_provider, "process_provider.required"),
       validate_string_field(process_provider, "process_provider.artifact_path"),

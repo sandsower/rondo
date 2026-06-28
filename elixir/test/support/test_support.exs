@@ -125,6 +125,19 @@ defmodule Rondo.TestSupport do
           action_policy_command: default_action_policy_command(),
           action_policy_run_mode: "unattended-auto",
           action_policy_policy_file: nil,
+          release_loop_enabled: nil,
+          release_loop_pr_review_source: nil,
+          release_loop_pr_review_update: nil,
+          release_loop_wait_interval_seconds: nil,
+          release_loop_run_configured_gates_before_push: nil,
+          release_loop_max_pr_risk_level: nil,
+          release_loop_review_state: nil,
+          release_loop_rework_state: nil,
+          release_loop_merge_state: nil,
+          release_loop_done_state: nil,
+          release_loop_merge_mode: nil,
+          release_loop_merge_method: nil,
+          release_loop_merge_delete_branch: nil,
           process_provider_kind: "native",
           process_provider_required: false,
           process_provider_artifact_path: nil,
@@ -181,6 +194,36 @@ defmodule Rondo.TestSupport do
     action_policy_command = Keyword.get(config, :action_policy_command)
     action_policy_run_mode = Keyword.get(config, :action_policy_run_mode)
     action_policy_policy_file = Keyword.get(config, :action_policy_policy_file)
+    release_loop_enabled = Keyword.get(config, :release_loop_enabled)
+    release_loop_pr_review_source = Keyword.get(config, :release_loop_pr_review_source)
+    release_loop_pr_review_update = Keyword.get(config, :release_loop_pr_review_update)
+    release_loop_wait_interval_seconds = Keyword.get(config, :release_loop_wait_interval_seconds)
+    release_loop_run_configured_gates_before_push = Keyword.get(config, :release_loop_run_configured_gates_before_push)
+    release_loop_max_pr_risk_level = Keyword.get(config, :release_loop_max_pr_risk_level)
+    release_loop_review_state = Keyword.get(config, :release_loop_review_state)
+    release_loop_rework_state = Keyword.get(config, :release_loop_rework_state)
+    release_loop_merge_state = Keyword.get(config, :release_loop_merge_state)
+    release_loop_done_state = Keyword.get(config, :release_loop_done_state)
+    release_loop_merge_mode = Keyword.get(config, :release_loop_merge_mode)
+    release_loop_merge_method = Keyword.get(config, :release_loop_merge_method)
+    release_loop_merge_delete_branch = Keyword.get(config, :release_loop_merge_delete_branch)
+
+    release_loop_config = %{
+      enabled: release_loop_enabled,
+      pr_review_source: release_loop_pr_review_source,
+      pr_review_update: release_loop_pr_review_update,
+      wait_interval_seconds: release_loop_wait_interval_seconds,
+      run_configured_gates_before_push: release_loop_run_configured_gates_before_push,
+      max_pr_risk_level: release_loop_max_pr_risk_level,
+      review_state: release_loop_review_state,
+      rework_state: release_loop_rework_state,
+      merge_state: release_loop_merge_state,
+      done_state: release_loop_done_state,
+      merge_mode: release_loop_merge_mode,
+      merge_method: release_loop_merge_method,
+      merge_delete_branch: release_loop_merge_delete_branch
+    }
+
     process_provider_kind = Keyword.get(config, :process_provider_kind)
     process_provider_required = Keyword.get(config, :process_provider_required)
     process_provider_artifact_path = Keyword.get(config, :process_provider_artifact_path)
@@ -244,6 +287,7 @@ defmodule Rondo.TestSupport do
         "  command: #{yaml_value(action_policy_command)}",
         "  run_mode: #{yaml_value(action_policy_run_mode)}",
         "  policy_file: #{yaml_value(action_policy_policy_file)}",
+        release_loop_yaml(release_loop_config),
         "process_provider:",
         "  kind: #{yaml_value(process_provider_kind)}",
         "  required: #{yaml_value(process_provider_required)}",
@@ -384,6 +428,53 @@ defmodule Rondo.TestSupport do
 
   defp gate_action_classes_yaml(nil), do: nil
   defp gate_action_classes_yaml(action_classes), do: "    action_classes: #{yaml_value(action_classes)}"
+
+  defp release_loop_yaml(config) when is_map(config) do
+    if Enum.all?(Map.values(config), &is_nil/1) do
+      nil
+    else
+      [
+        "release_loop:",
+        release_loop_line("enabled", Map.get(config, :enabled)),
+        release_loop_line("pr_review_source", Map.get(config, :pr_review_source)),
+        release_loop_line("pr_review_update", Map.get(config, :pr_review_update)),
+        release_loop_line("wait_interval_seconds", Map.get(config, :wait_interval_seconds)),
+        release_loop_line("run_configured_gates_before_push", Map.get(config, :run_configured_gates_before_push)),
+        release_loop_line("max_pr_risk_level", Map.get(config, :max_pr_risk_level)),
+        release_loop_line("review_state", Map.get(config, :review_state)),
+        release_loop_line("rework_state", Map.get(config, :rework_state)),
+        release_loop_line("merge_state", Map.get(config, :merge_state)),
+        release_loop_line("done_state", Map.get(config, :done_state)),
+        release_loop_closeout_yaml(
+          Map.get(config, :merge_mode),
+          Map.get(config, :merge_method),
+          Map.get(config, :merge_delete_branch)
+        )
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n")
+    end
+  end
+
+  defp release_loop_line(_key, nil), do: nil
+  defp release_loop_line(key, value), do: "  #{key}: #{yaml_value(value)}"
+
+  defp release_loop_closeout_yaml(nil, nil, nil), do: nil
+
+  defp release_loop_closeout_yaml(merge_mode, merge_method, merge_delete_branch) do
+    [
+      "  closeout:",
+      "    merge:",
+      release_loop_closeout_line("mode", merge_mode),
+      release_loop_closeout_line("method", merge_method),
+      release_loop_closeout_line("delete_branch", merge_delete_branch)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+  end
+
+  defp release_loop_closeout_line(_key, nil), do: nil
+  defp release_loop_closeout_line(key, value), do: "      #{key}: #{yaml_value(value)}"
 
   defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
 
