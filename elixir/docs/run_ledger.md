@@ -90,9 +90,12 @@ Ledger write failures are logged as warnings and do not stop the run.
   "run_ref": {"adapter": "claude_code", "provider_ref": "…", "provider_ref_kind": "session_id", "resumable?": true},
   "session_id": "…",
   "usage": {"input_tokens": 1},
+  "accounted_usage": {"input_tokens": 1},
   "raw": {}
 }
 ```
+
+`usage` is the raw provider-normalized event payload. `accounted_usage`, when present, is the spend Rondo counted for that event after adapter-specific normalization. For Pi, repeated/cumulative snapshots keep the raw `usage` value but `accounted_usage` only includes the positive delta so dashboard and billing-style totals do not sum the same snapshot repeatedly.
 
 Values are size-capped, secret-looking keys are redacted, and all persisted strings additionally pass through the `Rondo.Redaction` deny-list (API-key shapes, bearer/GitHub/Slack/AWS tokens, private-key blocks, secret-named assignments, and values of secret-named environment variables). Usage token counts are preserved, but full prompts, file contents, auth headers, cookies, API keys, and secret-looking values should not be treated as captured source of truth.
 

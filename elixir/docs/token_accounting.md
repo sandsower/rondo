@@ -115,6 +115,10 @@ If Rondo documents token reporting externally, the contract should be:
 - Token counts are per-invocation; Rondo accumulates across continuations.
 - Reporting is session-based, and multiple invocations can occur for one logical session via `--resume`.
 
+## Pi Adapter Notes
+
+Pi-backed runs can emit the same cumulative usage snapshot on multiple stream events, including a final invocation-completed event that repeats the latest assistant-message usage. Rondo therefore retains each raw event `usage` in the run ledger while exposing per-event `accounted_usage` separately. For Pi, `accounted_usage` is the positive delta from the previous reported snapshot for that run/session, so repeated snapshots count as zero fresh spend and growing cumulative totals count only their growth.
+
 ## Implementation Checklist
 
 - Parse usage events from stream-json output

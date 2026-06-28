@@ -445,6 +445,182 @@ defmodule Rondo.OrchestratorStatusTest do
            }
   end
 
+  test "orchestrator accounts repeated pi cumulative snapshots once and records raw/accounted usage" do
+    issue_id = "issue-pi-repeated-usage"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PI-REPEAT",
+      title: "Pi repeated usage",
+      description: "Do not double count repeated cumulative Pi usage",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-PI-REPEAT"
+    }
+
+    workspace_root = tmp_dir("orchestrator-pi-repeated-ledger")
+    assert {:ok, ledger} = Rondo.RunLedger.create_run(issue, workspace_root: workspace_root)
+
+    orchestrator_name = Module.concat(__MODULE__, :PiRepeatedUsageOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "pi-session-repeat",
+      run_id: ledger.run_id,
+      run_dir: ledger.run_dir,
+      ledger: ledger,
+      run_ref: nil,
+      turn_count: 0,
+      last_claude_message: nil,
+      last_claude_timestamp: nil,
+      last_claude_event: nil,
+      claude_input_tokens: 0,
+      claude_output_tokens: 0,
+      claude_total_tokens: 0,
+      claude_last_reported_input_tokens: 0,
+      claude_last_reported_output_tokens: 0,
+      claude_last_reported_total_tokens: 0,
+      started_at: started_at,
+      event_log: []
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    usage = %{input_tokens: 80, output_tokens: 20, total_tokens: 100, cost: 0.25}
+
+    for event <- [:assistant_message, :invocation_completed] do
+      send(
+        pid,
+        {:claude_worker_update, issue_id,
+         %{
+           event: event,
+           adapter: "pi",
+           session_id: "pi-session-repeat",
+           usage: usage,
+           timestamp: DateTime.utc_now()
+         }}
+      )
+    end
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.claude_input_tokens == 80
+    assert snapshot_entry.claude_output_tokens == 20
+    assert snapshot_entry.claude_total_tokens == 100
+
+    events_path = Path.join(ledger.run_dir, "artifacts/agent-events.ndjson")
+
+    [first, second] =
+      events_path
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.map(&Jason.decode!/1)
+
+    assert first["usage"] == %{"cost" => 0.25, "input_tokens" => 80, "output_tokens" => 20, "total_tokens" => 100}
+    assert first["accounted_usage"] == %{"cost" => 0.25, "input_tokens" => 80, "output_tokens" => 20, "total_tokens" => 100}
+    assert second["usage"] == first["usage"]
+    assert second["accounted_usage"] == %{"cost" => 0.0, "input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0}
+  end
+
+  test "orchestrator accounts cumulative pi growth by positive deltas" do
+    issue_id = "issue-pi-cumulative-growth"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PI-GROW",
+      title: "Pi cumulative growth",
+      description: "Account cumulative Pi usage growth without summing snapshots",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-PI-GROW"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :PiCumulativeGrowthOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+    started_at = DateTime.utc_now()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "pi-session-growth",
+      turn_count: 0,
+      last_claude_message: nil,
+      last_claude_timestamp: nil,
+      last_claude_event: nil,
+      claude_input_tokens: 0,
+      claude_output_tokens: 0,
+      claude_total_tokens: 0,
+      claude_last_reported_input_tokens: 0,
+      claude_last_reported_output_tokens: 0,
+      claude_last_reported_total_tokens: 0,
+      started_at: started_at,
+      event_log: []
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    for {event, usage} <- [
+          {:assistant_message, %{input_tokens: 100, output_tokens: 50, total_tokens: 150}},
+          {:assistant_message, %{input_tokens: 125, output_tokens: 70, total_tokens: 195}},
+          {:invocation_completed, %{input_tokens: 125, output_tokens: 70, total_tokens: 195}}
+        ] do
+      send(
+        pid,
+        {:claude_worker_update, issue_id,
+         %{
+           event: event,
+           adapter: "pi",
+           session_id: "pi-session-growth",
+           usage: usage,
+           timestamp: DateTime.utc_now()
+         }}
+      )
+    end
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [snapshot_entry]} = snapshot
+    assert snapshot_entry.claude_input_tokens == 125
+    assert snapshot_entry.claude_output_tokens == 70
+    assert snapshot_entry.claude_total_tokens == 195
+
+    send(pid, {:DOWN, process_ref, :process, self(), :normal})
+    completed_state = :sys.get_state(pid)
+    assert completed_state.claude_totals.input_tokens == 125
+    assert completed_state.claude_totals.output_tokens == 70
+    assert completed_state.claude_totals.total_tokens == 195
+  end
+
   test "orchestrator snapshot tracks claude session totals and session id" do
     issue_id = "issue-usage-snapshot"
 

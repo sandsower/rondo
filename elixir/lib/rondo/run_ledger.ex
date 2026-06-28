@@ -279,6 +279,7 @@ defmodule Rondo.RunLedger do
       run_ref: sanitize_value(agent_update_value(update, :run_ref)),
       session_id: sanitize_value(Map.get(update, :session_id, Map.get(update, "session_id"))),
       usage: sanitize_value(Map.get(update, :usage, Map.get(update, "usage"))),
+      accounted_usage: sanitize_value(Map.get(update, :accounted_usage, Map.get(update, "accounted_usage"))),
       capabilities: sanitize_value(agent_update_value(update, :capabilities)),
       final_report: sanitize_value(agent_update_value(update, :final_report)),
       diff_source: sanitize_value(agent_update_value(update, :diff_source)),
@@ -302,6 +303,7 @@ defmodule Rondo.RunLedger do
       "run_ref" => agent_update_value(update, :run_ref),
       "session_id" => Map.get(update, :session_id, Map.get(update, "session_id")),
       "usage" => Map.get(update, :usage, Map.get(update, "usage")),
+      "accounted_usage" => Map.get(update, :accounted_usage, Map.get(update, "accounted_usage")),
       "capabilities" => agent_update_value(update, :capabilities),
       "final_report" => agent_update_value(update, :final_report),
       "diff_source" => agent_update_value(update, :diff_source),
@@ -414,6 +416,8 @@ defmodule Rondo.RunLedger do
   defp maybe_put_final_report_classification(manifest, :invalid), do: Map.put(manifest, "failure_classification", "final_report_invalid")
 
   defp agent_event_payload(event, timestamp) do
+    accounted_usage = Map.get(event, :accounted_usage, Map.get(event, "accounted_usage"))
+
     %{
       "schema" => @events_schema,
       "timestamp" => timestamp,
@@ -424,6 +428,13 @@ defmodule Rondo.RunLedger do
       "usage" => sanitize_value(Map.get(event, :usage, Map.get(event, "usage"))),
       "raw" => event |> Map.get(:raw, Map.get(event, "raw", %{})) |> sanitize_agent_raw()
     }
+    |> maybe_put_accounted_usage(accounted_usage)
+  end
+
+  defp maybe_put_accounted_usage(payload, nil), do: payload
+
+  defp maybe_put_accounted_usage(payload, accounted_usage) do
+    Map.put(payload, "accounted_usage", sanitize_value(accounted_usage))
   end
 
   defp build_manifest(issue, opts, now, run_id, run_dir, workspace_root, workspace, policy_snapshot) do
