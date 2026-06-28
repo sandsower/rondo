@@ -1,13 +1,26 @@
 defmodule Rondo.AgentRunner do
   @moduledoc """
-  Executes a single Linear issue in an isolated workspace with the configured agent adapter.
+  Executes a Linear issue in an isolated workspace.
   """
 
   require Logger
   alias Rondo.Agent.Adapter
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.PiAdapter
-  alias Rondo.{Config, FinalReport, Gates, Linear.Issue, ModelRouting, ProcessProvider, RunLedger, Tracker, Workspace}
+
+  alias Rondo.{
+    Config,
+    FinalReport,
+    Gates,
+    Interrupt,
+    Linear.Issue,
+    ModelRouting,
+    ProcessProvider,
+    RunLedger,
+    Tracker,
+    Workspace
+  }
+
   alias Rondo.ProcessProvider.{Beislid, Native}
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
@@ -24,6 +37,7 @@ defmodule Rondo.AgentRunner do
           try do
             case run_agent_turns(workspace, issue, claude_update_recipient, opts) do
               :ok -> :ok
+              {:pause, interrupt} -> exit({:final_report_invalid, interrupt})
               {:error, reason} -> handle_agent_run_error(issue, reason)
             end
           after
@@ -178,7 +192,7 @@ defmodule Rondo.AgentRunner do
         run_dir: Keyword.get(opts, :run_dir)
       }
 
-      do_run_agent_turns(context, issue, 1, Keyword.get(opts, :initial_run_ref))
+      do_run_agent_turns(context, issue, 1, Keyword.get(opts, :initial_run_ref), nil)
     end
   end
 
@@ -273,7 +287,7 @@ defmodule Rondo.AgentRunner do
     end
   end
 
-  defp do_run_agent_turns(context, issue, turn_number, run_ref) do
+  defp do_run_agent_turns(context, issue, turn_number, run_ref, previous_final_report_fingerprint) do
     prompt = build_turn_prompt(context.process_provider, issue, context.opts, turn_number, context.max_turns)
 
     completion_ref = make_ref()
@@ -310,7 +324,7 @@ defmodule Rondo.AgentRunner do
         )
 
         with :ok <- run_gates(context, issue, turn_number) do
-          continue_agent_turns(context, issue, turn_number, effective_run_ref, Map.get(invocation_result, :final_report))
+          continue_agent_turns(context, issue, turn_number, effective_run_ref, Map.get(invocation_result, :final_report), previous_final_report_fingerprint)
         end
 
       {:error, reason} ->
@@ -497,18 +511,45 @@ defmodule Rondo.AgentRunner do
     }
   end
 
-  defp continue_agent_turns(context, issue, turn_number, effective_run_ref, final_report) do
-    case continuation_decision(context, issue, final_report) do
-      {:continue, refreshed_issue} when turn_number < context.max_turns ->
-        Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} turn=#{turn_number}/#{context.max_turns}")
-        do_run_agent_turns(context, refreshed_issue, turn_number + 1, effective_run_ref)
+  defp continue_agent_turns(
+         context,
+         issue,
+         turn_number,
+         effective_run_ref,
+         final_report,
+         previous_final_report_fingerprint
+       ) do
+    analysis = FinalReport.analyze(final_report)
 
-      {:continue, refreshed_issue} ->
+    case continuation_decision(
+           context,
+           issue,
+           analysis,
+           turn_number,
+           previous_final_report_fingerprint,
+           final_report,
+           effective_run_ref
+         ) do
+      {:continue, refreshed_issue, current_final_report_fingerprint} when turn_number < context.max_turns ->
+        Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} turn=#{turn_number}/#{context.max_turns}")
+
+        do_run_agent_turns(
+          context,
+          refreshed_issue,
+          turn_number + 1,
+          effective_run_ref,
+          current_final_report_fingerprint
+        )
+
+      {:continue, refreshed_issue, _current_final_report_fingerprint} ->
         Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with delivery still incomplete")
         :ok
 
       {:done, _refreshed_issue} ->
         :ok
+
+      {:pause, interrupt} ->
+        {:pause, interrupt}
 
       {:error, reason} ->
         {:error, reason}
@@ -517,31 +558,169 @@ defmodule Rondo.AgentRunner do
 
   # Continuation is delivery-driven. A valid `rondo.final_report/v0` decides
   # directly via its declared `next_state` (terminal -> stop, active -> continue),
-  # regardless of tracker state. Without a usable report we only fall back to
+  # regardless of tracker state. When the final report is invalid but clearly
+  # describes a blocked or terminal state, we pause instead of blindly
+  # continuing. Repeated identical/near-identical reports across continuations
+  # also pause to avoid loops. Without a usable report we only fall back to
   # tracker-state continuation when the run actually has tracker capability (a
   # real issue_state_fetcher); tracker-less envelope/manifest runs stop instead
   # of looping on an unsatisfiable "issue still active" nudge.
-  defp continuation_decision(context, issue, final_report) do
-    case FinalReport.extract(final_report) do
-      {:ok, report} ->
-        if active_issue_state?(Map.get(report, "next_state")) do
-          {:continue, issue}
-        else
-          {:done, issue}
-        end
+  defp continuation_decision(
+         context,
+         issue,
+         analysis,
+         turn_number,
+         previous_final_report_fingerprint,
+         final_report,
+         effective_run_ref
+       ) do
+    with nil <-
+           final_report_unparsed_pause(
+             context,
+             issue,
+             analysis,
+             turn_number,
+             final_report,
+             effective_run_ref
+           ),
+         nil <-
+           final_report_repetition_pause(
+             context,
+             issue,
+             analysis,
+             turn_number,
+             previous_final_report_fingerprint,
+             final_report,
+             effective_run_ref
+           ) do
+      continuation_decision_by_status(context, issue, analysis)
+    end
+  end
 
-      {:error, _missing_or_invalid} ->
-        if tracker_capable?(context) do
-          continue_with_issue?(issue, context.issue_state_fetcher)
-        else
-          {:done, issue}
-        end
+  defp final_report_unparsed_pause(context, issue, analysis, turn_number, final_report, effective_run_ref) do
+    case final_report_state_classification(analysis.next_state_hint) do
+      :blocked when analysis.status != :valid ->
+        {:pause, final_report_interrupt(context, issue, effective_run_ref, analysis, final_report, turn_number, "blocked_state_unparsed")}
+
+      :terminal when analysis.status != :valid ->
+        {:pause, final_report_interrupt(context, issue, effective_run_ref, analysis, final_report, turn_number, "terminal_state_unparsed")}
+
+      _other ->
+        nil
+    end
+  end
+
+  defp final_report_repetition_pause(
+         context,
+         issue,
+         analysis,
+         turn_number,
+         previous_final_report_fingerprint,
+         final_report,
+         effective_run_ref
+       ) do
+    if analysis.status != :valid && previous_final_report_fingerprint && final_report_loop_guardable?(final_report) &&
+         final_report_loop_guard?(analysis.fingerprint, previous_final_report_fingerprint) do
+      {:pause, final_report_interrupt(context, issue, effective_run_ref, analysis, final_report, turn_number, "repeated_final_report")}
+    else
+      nil
+    end
+  end
+
+  defp continuation_decision_by_status(context, issue, analysis) do
+    case analysis.status do
+      :valid -> valid_final_report_continuation(issue, analysis)
+      _invalid_or_missing -> invalid_or_missing_final_report_continuation(context, issue, analysis)
+    end
+  end
+
+  defp valid_final_report_continuation(issue, analysis) do
+    if active_issue_state?(Map.get(analysis.report, "next_state")) do
+      {:continue, issue, analysis.fingerprint}
+    else
+      {:done, issue}
+    end
+  end
+
+  defp invalid_or_missing_final_report_continuation(context, issue, analysis) do
+    if tracker_capable?(context) do
+      case continue_with_issue?(issue, context.issue_state_fetcher) do
+        {:continue, refreshed_issue} -> {:continue, refreshed_issue, analysis.fingerprint}
+        other -> other
+      end
+    else
+      {:done, issue}
     end
   end
 
   defp tracker_capable?(%{issue_state_fetcher: fetcher}) do
     fetcher != (&__MODULE__.no_tracker_issue_state_fetcher/1)
   end
+
+  defp final_report_interrupt(context, issue, effective_run_ref, analysis, final_report, turn_number, classification) do
+    Interrupt.final_report_invalid(%{
+      issue: issue,
+      run_id: Map.get(context, :run_id),
+      run_dir: Map.get(context, :run_dir),
+      workspace: context.workspace,
+      session_id: Map.get(effective_run_ref || %{}, :provider_ref),
+      run_ref: effective_run_ref,
+      retry_attempt: Keyword.get(Map.get(context, :opts, []), :retry_attempt) || Keyword.get(Map.get(context, :opts, []), :attempt),
+      classification: classification,
+      final_report_status: Atom.to_string(analysis.status),
+      errors: analysis.errors,
+      reported_next_state: analysis.next_state_hint,
+      continuation_count: max(turn_number - 1, 0),
+      fingerprint: analysis.fingerprint,
+      excerpt: final_report_excerpt(final_report)
+    })
+  end
+
+  defp final_report_state_classification(next_state) when is_binary(next_state) do
+    normalized_state = normalize_issue_state(next_state)
+
+    cond do
+      normalized_state == "blocked" -> :blocked
+      active_issue_state?(next_state) -> :active
+      terminal_issue_state?(next_state) -> :terminal
+      true -> :other
+    end
+  end
+
+  defp final_report_state_classification(_next_state), do: :other
+
+  defp terminal_issue_state?(state_name) when is_binary(state_name) do
+    normalized_state = normalize_issue_state(state_name)
+
+    Config.tracker_terminal_states()
+    |> Enum.any?(fn terminal_state -> normalize_issue_state(terminal_state) == normalized_state end)
+  end
+
+  defp final_report_loop_guard?(current_fingerprint, previous_fingerprint)
+       when is_binary(current_fingerprint) and is_binary(previous_fingerprint) do
+    current_fingerprint == previous_fingerprint or
+      String.jaro_distance(current_fingerprint, previous_fingerprint) >= 0.97
+  end
+
+  defp final_report_loop_guard?(_current_fingerprint, _previous_fingerprint), do: false
+
+  defp final_report_loop_guardable?(report) when is_binary(report), do: String.trim(report) != ""
+  defp final_report_loop_guardable?(report), do: not is_nil(report)
+
+  defp final_report_excerpt(report) when is_binary(report) do
+    report
+    |> String.trim()
+    |> String.replace(~r/\s+/, " ")
+    |> String.slice(0, 500)
+  end
+
+  defp final_report_excerpt(report) when is_map(report) do
+    report
+    |> Jason.encode!()
+    |> final_report_excerpt()
+  end
+
+  defp final_report_excerpt(report), do: inspect(report) |> final_report_excerpt()
 
   defp adapter_module(opts) do
     opts

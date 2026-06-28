@@ -191,6 +191,10 @@ defmodule Rondo.Orchestrator do
               Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=action_policy_guidance")
               pause_running_entry(state, issue_id, running_entry, reason)
 
+            final_report_invalid_exit?(reason) ->
+              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=final_report_invalid")
+              pause_running_entry(state, issue_id, running_entry, reason)
+
             pause_after_gate_failure?(running_entry, reason) ->
               Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=repeated_gate_failure")
               pause_running_entry(state, issue_id, running_entry, reason)
@@ -1163,6 +1167,9 @@ defmodule Rondo.Orchestrator do
   defp action_policy_guidance_exit?({:action_policy_guidance_required, interrupt}) when is_map(interrupt), do: true
   defp action_policy_guidance_exit?(_reason), do: false
 
+  defp final_report_invalid_exit?({:final_report_invalid, interrupt}) when is_map(interrupt), do: true
+  defp final_report_invalid_exit?(_reason), do: false
+
   defp retry_failure_reason(running_entry, reason) do
     if gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate)), do: :gate_failed
   end
@@ -1208,6 +1215,7 @@ defmodule Rondo.Orchestrator do
   end
 
   defp pause_interrupt_for_reason(_running_entry, {:action_policy_guidance_required, interrupt}) when is_map(interrupt), do: interrupt
+  defp pause_interrupt_for_reason(_running_entry, {:final_report_invalid, interrupt}) when is_map(interrupt), do: interrupt
   defp pause_interrupt_for_reason(running_entry, _reason), do: Interrupt.repeated_gate_failure(interrupt_context(running_entry))
 
   defp interrupt_context(running_entry) do
@@ -1242,6 +1250,8 @@ defmodule Rondo.Orchestrator do
       workspace: running_entry_workspace(running_entry),
       paused_at: interrupt["created_at"],
       retry_attempt: Map.get(running_entry, :retry_attempt),
+      turn_count: Map.get(running_entry, :turn_count, 0),
+      continuation_count: get_in(interrupt, ["final_report", "continuation_count"]) || 0,
       latest_gate: Map.get(running_entry, :latest_gate),
       interrupt: interrupt,
       tracker_visibility: "known",
@@ -1426,6 +1436,8 @@ defmodule Rondo.Orchestrator do
       workspace: expected_workspace_for_issue(issue),
       paused_at: interrupt["created_at"],
       retry_attempt: 0,
+      turn_count: 0,
+      continuation_count: 0,
       latest_gate: nil,
       interrupt: interrupt,
       tracker_visibility: "known",
@@ -1848,6 +1860,7 @@ defmodule Rondo.Orchestrator do
           claude_output_tokens: metadata.claude_output_tokens,
           claude_total_tokens: metadata.claude_total_tokens,
           turn_count: Map.get(metadata, :turn_count, 0),
+          continuation_count: max(Map.get(metadata, :turn_count, 0) - 1, 0),
           started_at: metadata.started_at,
           last_claude_timestamp: metadata.last_claude_timestamp,
           last_claude_message: metadata.last_claude_message,
@@ -1883,8 +1896,13 @@ defmodule Rondo.Orchestrator do
           workspace: Map.get(metadata, :workspace),
           paused_at: Map.get(metadata, :paused_at),
           retry_attempt: Map.get(metadata, :retry_attempt),
+          turn_count: Map.get(metadata, :turn_count, 0),
+          continuation_count: Map.get(metadata, :continuation_count, max(Map.get(metadata, :turn_count, 0) - 1, 0)),
           latest_gate: Map.get(metadata, :latest_gate),
           interrupt: Map.get(metadata, :interrupt, %{}),
+          final_report_status: get_in(metadata, [:interrupt, "final_report", "status"]),
+          final_report_classification: get_in(metadata, [:interrupt, "classification"]),
+          reported_next_state: get_in(metadata, [:interrupt, "final_report", "reported_next_state"]),
           tracker_visibility: Map.get(metadata, :tracker_visibility, "unknown"),
           blocks_dispatch: MapSet.member?(state.claimed, issue_id),
           blocked_dispatch_reason: paused_blocked_dispatch_reason(metadata),

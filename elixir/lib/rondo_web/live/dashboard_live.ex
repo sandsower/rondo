@@ -579,6 +579,11 @@ defmodule RondoWeb.DashboardLive do
               <p class="muted" style="font-size: 12px; margin-bottom: 12px;">
                 <%= get_in(@selected_issue_data, [:interrupt, :question]) || get_in(@selected_issue_data, [:interrupt, :recommendation]) || "Provide operator guidance to resume this paused run." %>
               </p>
+              <%= if final_report_interrupt_summary(@selected_issue_data) do %>
+                <p class="muted" style="font-size: 12px; margin-bottom: 12px;">
+                  <%= final_report_interrupt_summary(@selected_issue_data) %>
+                </p>
+              <% end %>
               <%= if paused_claim_status(@selected_issue_data) do %>
                 <p class="muted" style="font-size: 12px; margin-bottom: 12px;">
                   <%= paused_claim_status(@selected_issue_data) %>
@@ -781,6 +786,37 @@ defmodule RondoWeb.DashboardLive do
       "operator guidance"
   end
 
+  defp final_report_interrupt_summary(entry) do
+    interrupt = Map.get(entry, :interrupt, %{})
+
+    if final_report_interrupt?(interrupt) do
+      final_report = final_report_payload(interrupt)
+
+      [
+        "Final report: #{final_report_classification(interrupt)}",
+        "next_state=#{final_report_detail(final_report, :reported_next_state, "n/a")}",
+        "continuations=#{final_report_detail(final_report, :continuation_count, 0)}"
+      ]
+      |> Enum.join(" · ")
+    end
+  end
+
+  defp final_report_interrupt?(interrupt) do
+    Map.get(interrupt, :reason) == "final_report_invalid" || Map.get(interrupt, "reason") == "final_report_invalid"
+  end
+
+  defp final_report_payload(interrupt) do
+    Map.get(interrupt, :final_report) || Map.get(interrupt, "final_report") || %{}
+  end
+
+  defp final_report_classification(interrupt) do
+    Map.get(interrupt, :classification) || Map.get(interrupt, "classification") || "invalid"
+  end
+
+  defp final_report_detail(final_report, key, default) do
+    Map.get(final_report, key) || Map.get(final_report, Atom.to_string(key)) || default
+  end
+
   defp paused_claim_status(%{blocks_dispatch: true} = entry) do
     reason = Map.get(entry, :blocked_dispatch_reason) || "paused_claim"
     stale = Map.get(entry, :stale_reason)
@@ -795,6 +831,7 @@ defmodule RondoWeb.DashboardLive do
 
   defp humanize_interrupt_reason("repeated_gate_failure"), do: "Gate failure"
   defp humanize_interrupt_reason("action_policy_guidance_required"), do: "Action policy"
+  defp humanize_interrupt_reason("final_report_invalid"), do: "Final report"
 
   defp humanize_interrupt_reason(reason) when is_binary(reason) do
     reason

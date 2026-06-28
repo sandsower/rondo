@@ -49,6 +49,51 @@ defmodule Rondo.Interrupt do
     |> drop_nil_values()
   end
 
+  @spec final_report_invalid(map()) :: payload()
+  def final_report_invalid(context) when is_map(context) do
+    classification = value(context, :classification) || "final_report_unparsed"
+
+    %{
+      "reason" => "final_report_invalid",
+      "state" => "paused",
+      "classification" => classification,
+      "created_at" => timestamp(context),
+      "question" => final_report_question(classification),
+      "final_report" => final_report_summary(context),
+      "suggested_responses" => normalize_value(value(context, :suggested_responses) || []),
+      "resume" => normalize_value(value(context, :resume) || %{})
+    }
+    |> drop_nil_values()
+  end
+
+  defp final_report_question("blocked_state_unparsed") do
+    "The last assistant message reported a blocked state, but it was not valid rondo.final_report/v0 JSON."
+  end
+
+  defp final_report_question("terminal_state_unparsed") do
+    "The last assistant message reported a terminal state, but it was not valid rondo.final_report/v0 JSON."
+  end
+
+  defp final_report_question("repeated_final_report") do
+    "The assistant repeated the same final report across continuations. Rondo paused to avoid a loop."
+  end
+
+  defp final_report_question(_classification) do
+    "The last assistant message was not valid rondo.final_report/v0 JSON."
+  end
+
+  defp final_report_summary(context) do
+    %{
+      "status" => value(context, :final_report_status) || "invalid",
+      "errors" => normalize_value(value(context, :errors) || []),
+      "reported_next_state" => value(context, :reported_next_state),
+      "continuation_count" => value(context, :continuation_count),
+      "fingerprint" => value(context, :fingerprint),
+      "excerpt" => value(context, :excerpt)
+    }
+    |> drop_nil_values()
+  end
+
   defp timestamp(context) do
     context
     |> value(:timestamp)

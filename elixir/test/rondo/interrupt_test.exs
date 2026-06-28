@@ -157,6 +157,25 @@ defmodule Rondo.InterruptTest do
     assert interrupt["policy"] == %{}
   end
 
+  test "builds terminal and generic final report interrupts" do
+    terminal_interrupt =
+      Interrupt.final_report_invalid(%{
+        classification: "terminal_state_unparsed",
+        final_report_status: "missing",
+        continuation_count: 2,
+        reported_next_state: "done",
+        fingerprint: "abc123",
+        excerpt: "blocked"
+      })
+
+    assert terminal_interrupt["classification"] == "terminal_state_unparsed"
+    assert terminal_interrupt["question"] =~ "terminal state"
+
+    generic_interrupt = Interrupt.final_report_invalid(%{classification: "something_else"})
+
+    assert generic_interrupt["question"] == "The last assistant message was not valid rondo.final_report/v0 JSON."
+  end
+
   test "normalizes map inputs and optional values" do
     interrupt =
       Interrupt.repeated_gate_failure(%{
