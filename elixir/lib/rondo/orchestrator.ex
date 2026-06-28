@@ -230,7 +230,8 @@ defmodule Rondo.Orchestrator do
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_claude_update(running_entry, update)
-        updated_running_entry = record_ledger_claude_update(updated_running_entry, update)
+        accounted_update = put_accounted_usage(update, token_delta)
+        updated_running_entry = record_ledger_claude_update(updated_running_entry, accounted_update)
 
         state =
           state
@@ -980,6 +981,8 @@ defmodule Rondo.Orchestrator do
             claude_last_reported_input_tokens: 0,
             claude_last_reported_output_tokens: 0,
             claude_last_reported_total_tokens: 0,
+            claude_last_reported_cost: 0,
+            claude_usage_accounting_ref: nil,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
             retry_failure_reason: Keyword.get(attempt_metadata, :failure_reason),
@@ -1948,9 +1951,6 @@ defmodule Rondo.Orchestrator do
     claude_input_tokens = Map.get(running_entry, :claude_input_tokens, 0)
     claude_output_tokens = Map.get(running_entry, :claude_output_tokens, 0)
     claude_total_tokens = Map.get(running_entry, :claude_total_tokens, 0)
-    last_reported_input = Map.get(running_entry, :claude_last_reported_input_tokens, 0)
-    last_reported_output = Map.get(running_entry, :claude_last_reported_output_tokens, 0)
-    last_reported_total = Map.get(running_entry, :claude_last_reported_total_tokens, 0)
     turn_count = Map.get(running_entry, :turn_count, 0)
 
     message = extract_event_summary(event, update)
@@ -1979,9 +1979,11 @@ defmodule Rondo.Orchestrator do
         claude_input_tokens: claude_input_tokens + token_delta.input_tokens,
         claude_output_tokens: claude_output_tokens + token_delta.output_tokens,
         claude_total_tokens: claude_total_tokens + token_delta.total_tokens,
-        claude_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
-        claude_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
-        claude_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
+        claude_last_reported_input_tokens: Map.get(token_delta, :input_reported, 0),
+        claude_last_reported_output_tokens: Map.get(token_delta, :output_reported, 0),
+        claude_last_reported_total_tokens: Map.get(token_delta, :total_reported, 0),
+        claude_last_reported_cost: Map.get(token_delta, :cost_reported) || 0,
+        claude_usage_accounting_ref: usage_accounting_ref(update) || Map.get(running_entry, :claude_usage_accounting_ref),
         turn_count: turn_count_for_update(turn_count, running_entry.session_id, update),
         latest_gate: latest_gate_for_update(running_entry, update),
         event_log: event_log
@@ -2869,24 +2871,114 @@ defmodule Rondo.Orchestrator do
     }
   end
 
-  # Claude CLI reports per-message usage on assistant events (not cumulative),
-  # so each event's tokens are added directly to the running total.
-  defp extract_token_delta(_running_entry, %{event: _, timestamp: _} = update) do
+  # Claude Code events are retained as additive per-event usage for compatibility
+  # with existing adapter semantics. Pi emits cumulative/repeated snapshots, so
+  # Rondo accounts only positive deltas while retaining the raw usage payload in
+  # ledger events for diagnostics.
+  defp extract_token_delta(running_entry, %{event: _, timestamp: _} = update) do
     usage = extract_token_usage(update)
 
     input = get_token_usage(usage, :input) || 0
     output = get_token_usage(usage, :output) || 0
     total = get_token_usage(usage, :total) || 0
+    cost = get_token_cost(usage)
+
+    if cumulative_usage_update?(update) do
+      cumulative_token_delta(running_entry, update, input, output, total, cost)
+    else
+      %{
+        input_tokens: input,
+        output_tokens: output,
+        total_tokens: total,
+        cost: cost,
+        input_reported: input,
+        output_reported: output,
+        total_reported: total,
+        cost_reported: cost
+      }
+    end
+  end
+
+  defp cumulative_token_delta(running_entry, update, input, output, total, cost) do
+    same_accounting_ref? = continue_cumulative_usage?(running_entry, update, total)
+    last_input = if same_accounting_ref?, do: Map.get(running_entry, :claude_last_reported_input_tokens, 0), else: 0
+    last_output = if same_accounting_ref?, do: Map.get(running_entry, :claude_last_reported_output_tokens, 0), else: 0
+    last_total = if same_accounting_ref?, do: Map.get(running_entry, :claude_last_reported_total_tokens, 0), else: 0
+    last_cost = if same_accounting_ref?, do: Map.get(running_entry, :claude_last_reported_cost, 0), else: 0
 
     %{
-      input_tokens: input,
-      output_tokens: output,
-      total_tokens: total,
+      input_tokens: positive_delta(input, last_input),
+      output_tokens: positive_delta(output, last_output),
+      total_tokens: positive_delta(total, last_total),
+      cost: positive_number_delta(cost, last_cost),
       input_reported: input,
       output_reported: output,
-      total_reported: total
+      total_reported: total,
+      cost_reported: cost
     }
   end
+
+  defp cumulative_usage_update?(update), do: Map.get(update, :adapter, Map.get(update, "adapter")) == "pi"
+
+  defp usage_accounting_ref(update) do
+    session_id = Map.get(update, :session_id, Map.get(update, "session_id"))
+    run_ref = Map.get(update, :run_ref, Map.get(update, "run_ref"))
+    provider_ref = if is_map(run_ref), do: Map.get(run_ref, :provider_ref, Map.get(run_ref, "provider_ref"))
+    adapter = Map.get(update, :adapter, Map.get(update, "adapter"))
+
+    cond do
+      is_binary(session_id) and session_id != "" -> {:session_id, session_id}
+      is_binary(provider_ref) and provider_ref != "" -> {:run_ref, provider_ref}
+      is_binary(adapter) and adapter != "" -> {:adapter, adapter}
+      true -> nil
+    end
+  end
+
+  defp continue_cumulative_usage?(running_entry, update, current_total) do
+    previous_ref = Map.get(running_entry, :claude_usage_accounting_ref)
+    current_ref = usage_accounting_ref(update)
+    previous_total = Map.get(running_entry, :claude_last_reported_total_tokens, 0)
+
+    ref_continues? =
+      current_ref == previous_ref or fallback_to_stable_usage_ref_upgrade?(previous_ref, current_ref)
+
+    ref_continues? and current_total >= previous_total
+  end
+
+  defp fallback_to_stable_usage_ref_upgrade?({:adapter, _}, {:session_id, _}), do: true
+  defp fallback_to_stable_usage_ref_upgrade?({:adapter, _}, {:run_ref, _}), do: true
+  defp fallback_to_stable_usage_ref_upgrade?(_, _), do: false
+
+  defp positive_delta(current, previous) when is_integer(current) and is_integer(previous), do: max(0, current - previous)
+  defp positive_delta(current, _previous) when is_integer(current), do: current
+  defp positive_delta(_current, _previous), do: 0
+
+  defp positive_number_delta(nil, _previous), do: nil
+
+  defp positive_number_delta(current, previous) when is_number(current) and is_number(previous), do: max(0, current - previous)
+  defp positive_number_delta(current, _previous) when is_number(current), do: current
+  defp positive_number_delta(_current, _previous), do: nil
+
+  defp put_accounted_usage(update, token_delta) do
+    usage = extract_token_usage(update)
+
+    if usage == %{} do
+      update
+    else
+      accounted_usage =
+        %{
+          input_tokens: Map.get(token_delta, :input_tokens, 0),
+          output_tokens: Map.get(token_delta, :output_tokens, 0),
+          total_tokens: Map.get(token_delta, :total_tokens, 0)
+        }
+        |> maybe_put_cost(Map.get(token_delta, :cost))
+
+      Map.put(update, :accounted_usage, accounted_usage)
+    end
+  end
+
+  defp maybe_put_cost(accounted_usage, nil), do: accounted_usage
+  defp maybe_put_cost(accounted_usage, cost) when is_number(cost), do: Map.put(accounted_usage, :cost, cost)
 
   defp extract_token_usage(update) do
     usage = Map.get(update, :usage) || Map.get(update, "usage") || %{}
@@ -3009,8 +3101,22 @@ defmodule Rondo.Orchestrator do
         :totalTokens
       ])
 
+  defp get_token_cost(usage) when is_map(usage) do
+    case Map.get(usage, :cost, Map.get(usage, "cost")) do
+      value when is_number(value) and value >= 0 -> value
+      %{} = cost -> payload_number(cost, ["total", :total])
+      _value -> nil
+    end
+  end
+
+  defp get_token_cost(_usage), do: nil
+
   defp payload_get(payload, fields) do
     Enum.find_value(fields, fn field -> map_integer_value(payload, field) end)
+  end
+
+  defp payload_number(payload, fields) do
+    Enum.find_value(fields, fn field -> map_number_value(payload, field) end)
   end
 
   defp map_integer_value(payload, field) do
@@ -3019,6 +3125,13 @@ defmodule Rondo.Orchestrator do
       integer_like(value)
     else
       nil
+    end
+  end
+
+  defp map_number_value(payload, field) do
+    case Map.get(payload, field) do
+      value when is_number(value) and value >= 0 -> value
+      _other -> nil
     end
   end
 
