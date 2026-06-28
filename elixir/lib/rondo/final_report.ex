@@ -28,6 +28,16 @@ defmodule Rondo.FinalReport do
 
   @type validation_error :: String.t()
 
+  @type analysis :: %{
+          status: :valid | :invalid | :missing,
+          errors: [validation_error()],
+          next_state_hint: String.t() | nil,
+          fingerprint: String.t(),
+          report: map() | nil
+        }
+
+  @next_state_hint_pattern ~r/\bnext_state\b\s*[:=]\s*["']?([^"'\n\r,}]+)["']?/i
+
   @doc "Returns the final report schema identifier."
   @spec schema() :: String.t()
   def schema, do: @schema
@@ -49,6 +59,39 @@ defmodule Rondo.FinalReport do
   end
 
   def extract(_report), do: {:error, :missing}
+
+  @doc "Returns a validation summary, best-effort next-state hint, and loop fingerprint for a final report source."
+  @spec analyze(term()) :: analysis()
+  def analyze(report) do
+    case extract(report) do
+      {:ok, decoded} ->
+        %{
+          status: :valid,
+          errors: [],
+          next_state_hint: Map.get(decoded, "next_state"),
+          fingerprint: fingerprint(report),
+          report: decoded
+        }
+
+      {:error, :missing} ->
+        %{
+          status: :missing,
+          errors: ["final report missing or not parseable as #{schema()} JSON"],
+          next_state_hint: next_state_hint(report),
+          fingerprint: fingerprint(report),
+          report: nil
+        }
+
+      {:error, {:invalid, errors}} ->
+        %{
+          status: :invalid,
+          errors: errors,
+          next_state_hint: next_state_hint(report),
+          fingerprint: fingerprint(report),
+          report: nil
+        }
+    end
+  end
 
   @doc "Validates a decoded report map against `rondo.final_report/v0`."
   @spec validate(map()) :: {:ok, map()} | {:error, {:invalid, [validation_error()]}}
@@ -149,5 +192,73 @@ defmodule Rondo.FinalReport do
       value when is_list(value) -> errors
       other -> ["#{field} must be a list, got: #{inspect(other)}" | errors]
     end
+  end
+
+  defp next_state_hint(report) when is_map(report) do
+    case Map.get(report, "next_state") do
+      value when is_binary(value) -> String.trim(value)
+      _ -> nil
+    end
+  end
+
+  defp next_state_hint(report) when is_binary(report) do
+    decoded_next_state_hint(report) || text_next_state_hint(report)
+  end
+
+  defp next_state_hint(_report), do: nil
+
+  defp decoded_next_state_hint(report) do
+    report
+    |> decoded_candidates()
+    |> Enum.find_value(&candidate_next_state_hint/1)
+  end
+
+  defp candidate_next_state_hint(candidate) do
+    case Map.get(candidate, "next_state") do
+      value when is_binary(value) -> trim_non_blank(value)
+      _ -> nil
+    end
+  end
+
+  defp trim_non_blank(value) when is_binary(value) do
+    value = String.trim(value)
+
+    if value == "" do
+      nil
+    else
+      value
+    end
+  end
+
+  defp text_next_state_hint(text) when is_binary(text) do
+    case Regex.run(@next_state_hint_pattern, text, capture: :all_but_first) do
+      [hint | _] -> hint |> String.trim() |> normalize_whitespace()
+      _ -> nil
+    end
+  end
+
+  defp fingerprint(report) when is_map(report) do
+    report
+    |> report_text()
+    |> normalized_report_text()
+  end
+
+  defp fingerprint(report) when is_binary(report), do: normalized_report_text(report)
+  defp fingerprint(report), do: normalized_report_text(report_text(report))
+
+  defp report_text(report) when is_map(report), do: Jason.encode!(report)
+  defp report_text(report), do: inspect(report)
+
+  defp normalized_report_text(text) when is_binary(text) do
+    text
+    |> String.downcase()
+    |> String.replace(~r/```json|```/s, " ")
+    |> normalize_whitespace()
+  end
+
+  defp normalize_whitespace(text) when is_binary(text) do
+    text
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
   end
 end

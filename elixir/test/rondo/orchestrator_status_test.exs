@@ -3260,6 +3260,109 @@ defmodule Rondo.OrchestratorStatusTest do
     assert event.tokens.total_tokens == 150
   end
 
+  test "orchestrator pauses when the final report text reports blocked next_state without schema JSON" do
+    workspace_root = tmp_dir("orchestrator-final-report-blocked")
+
+    issue = %Issue{
+      id: "issue-final-report-blocked",
+      identifier: "MT-FR-BLOCKED",
+      title: "Final report blocked",
+      description: "Should pause on unparsed blocked state",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-FR-BLOCKED"
+    }
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: fake_claude_script_with_result(workspace_root, "blocked-session", "Blocked: still waiting on external auth.\nnext_state: blocked\n"),
+      max_turns: 3
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :FinalReportBlockedOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    paused_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).paused do
+          [entry] -> entry
+          _ -> nil
+        end
+      end)
+
+    assert paused_entry.issue_id == issue.id
+    assert paused_entry.interrupt["reason"] == "final_report_invalid"
+    assert paused_entry.interrupt["classification"] == "blocked_state_unparsed"
+    assert paused_entry.final_report_status == "missing"
+    assert paused_entry.reported_next_state == "blocked"
+    assert paused_entry.continuation_count == 0
+    assert GenServer.call(pid, :snapshot).running == []
+  end
+
+  test "orchestrator pauses after a repeated invalid final report to avoid a loop" do
+    workspace_root = tmp_dir("orchestrator-final-report-loop")
+
+    issue = %Issue{
+      id: "issue-final-report-loop",
+      identifier: "MT-FR-LOOP",
+      title: "Final report loop",
+      description: "Should pause on repeated invalid reports",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-FR-LOOP"
+    }
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: fake_claude_script_with_result(workspace_root, "loop-session", "{\"schema\": \"rondo.final_report/v0\", \"next_state\": \"In Progress\"}"),
+      max_turns: 3
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :FinalReportLoopGuardOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    paused_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).paused do
+          [entry] -> entry
+          _ -> nil
+        end
+      end)
+
+    trace_file = Path.join(workspace_root, "claude.trace")
+
+    argv_lines =
+      trace_file
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.filter(&String.starts_with?(&1, "ARGV:"))
+
+    assert length(argv_lines) == 2
+    assert paused_entry.issue_id == issue.id
+    assert paused_entry.interrupt["reason"] == "final_report_invalid"
+    assert paused_entry.interrupt["classification"] == "repeated_final_report"
+    assert paused_entry.final_report_status == "invalid"
+    assert paused_entry.reported_next_state == "In Progress"
+    assert paused_entry.continuation_count == 1
+    assert GenServer.call(pid, :snapshot).running == []
+  end
+
   test "archived run loader rejects path traversal" do
     assert {:error, :invalid_path} = Rondo.Orchestrator.load_archived_run("../outside", "run.json")
     assert {:error, :invalid_path} = Rondo.Orchestrator.load_archived_run("MT-401", "../outside.json")
@@ -3302,6 +3405,26 @@ defmodule Rondo.OrchestratorStatusTest do
     echo '{"type":"system","subtype":"init","session_id":"#{session_id}","tools":[]}'
     sleep #{sleep_seconds}
     echo '{"type":"result","subtype":"success","session_id":"#{session_id}","usage":{"input_tokens":1,"output_tokens":1}}'
+    """)
+
+    File.chmod!(path, 0o755)
+    path
+  end
+
+  defp fake_claude_script_with_result(root, session_id, result_text) do
+    path = Path.join(root, "fake-claude.sh")
+    trace_file = Path.join(root, "claude.trace")
+    system_line = Jason.encode!(%{"type" => "system", "subtype" => "init", "session_id" => session_id, "tools" => []})
+    result_line = Jason.encode!(%{"type" => "result", "subtype" => "success", "session_id" => session_id, "usage" => %{"input_tokens" => 1, "output_tokens" => 1}, "result" => result_text})
+
+    File.write!(path, """
+    #!/bin/sh
+    printf 'ARGV:%s\n' "$*" >> "#{trace_file}"
+    cat <<'EOF'
+    #{system_line}
+    #{result_line}
+    EOF
+    exit 0
     """)
 
     File.chmod!(path, 0o755)

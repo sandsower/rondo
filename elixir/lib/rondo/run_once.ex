@@ -302,6 +302,11 @@ defmodule Rondo.RunOnce do
       _ledger = pause_run_once_ledger(ledger, interrupt)
       {:error, {:action_policy_guidance_required, interrupt}}
 
+    :exit, {:final_report_invalid, interrupt} when is_map(interrupt) ->
+      {ledger, _updates} = record_queued_updates(ledger, issue.id)
+      _ledger = pause_run_once_ledger(ledger, interrupt, source: %{interrupt: "final_report"})
+      {:error, {:final_report_invalid, interrupt}}
+
     :exit, reason ->
       reason = {:agent_run_failed, {:exit, reason}}
       {ledger, _updates} = record_queued_updates(ledger, issue.id)
@@ -392,8 +397,8 @@ defmodule Rondo.RunOnce do
   defp complete_run_once_ledger(ledger, :ok), do: RunLedger.complete_run(ledger, :completed, %{mode: "run_once"})
   defp complete_run_once_ledger(ledger, {:error, reason}), do: RunLedger.complete_run(ledger, :failed, %{mode: "run_once", reason: inspect(reason)})
 
-  defp pause_run_once_ledger(ledger, interrupt) do
-    case RunLedger.pause_run(ledger, interrupt, source: %{interrupt: "action_policy"}) do
+  defp pause_run_once_ledger(ledger, interrupt, opts \\ [source: %{interrupt: "action_policy"}]) do
+    case RunLedger.pause_run(ledger, interrupt, opts) do
       {:ok, ledger} -> ledger
       {:error, _reason} -> ledger
     end

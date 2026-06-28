@@ -106,6 +106,47 @@ defmodule Rondo.FinalReportTest do
     assert {:error, :missing} = FinalReport.extract("```json\nnot json at all\n```")
   end
 
+  test "analyze surfaces a blocked next_state hint from prose without schema JSON" do
+    analysis = FinalReport.analyze("Blocked: still waiting on external auth.\nnext_state: blocked\n")
+
+    assert analysis.status == :missing
+    assert analysis.next_state_hint == "blocked"
+    assert analysis.fingerprint =~ "next_state"
+  end
+
+  test "analyze keeps malformed json distinct from missing prose" do
+    analysis = FinalReport.analyze(~s({"schema": "rondo.final_report/v0"}))
+
+    assert analysis.status == :invalid
+    assert analysis.next_state_hint == nil
+    assert Enum.any?(analysis.errors, &(&1 =~ "summary must be"))
+  end
+
+  test "analyze extracts a blocked next_state hint from an invalid decoded report map" do
+    analysis =
+      FinalReport.analyze(%{
+        "schema" => "rondo.final_report/v1",
+        "next_state" => "blocked"
+      })
+
+    assert analysis.status == :invalid
+    assert analysis.next_state_hint == "blocked"
+  end
+
+  test "analyze extracts a blocked next_state hint from invalid json text" do
+    analysis = FinalReport.analyze(~s({"schema":"rondo.final_report/v1","next_state":"blocked"}))
+
+    assert analysis.status == :invalid
+    assert analysis.next_state_hint == "blocked"
+  end
+
+  test "analyze ignores non-string next_state hints in decoded maps" do
+    analysis = FinalReport.analyze(%{"schema" => "rondo.final_report/v1", "next_state" => 123})
+
+    assert analysis.status == :invalid
+    assert analysis.next_state_hint == nil
+  end
+
   test "rejects reports with the wrong schema" do
     assert {:error, {:invalid, errors}} = FinalReport.extract(Map.put(@valid_report, "schema", "rondo.final_report/v1"))
     assert Enum.any?(errors, &(&1 =~ "schema must be"))
