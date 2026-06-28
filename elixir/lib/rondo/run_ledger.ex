@@ -469,6 +469,7 @@ defmodule Rondo.RunLedger do
           },
           policy_snapshot
         ),
+      "release_loop" => sanitize_value(Keyword.get(opts, :release_loop, Config.release_loop())),
       "timestamps" => %{
         "created_at" => iso_timestamp,
         "updated_at" => iso_timestamp,

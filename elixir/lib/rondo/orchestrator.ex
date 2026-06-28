@@ -8,8 +8,20 @@ defmodule Rondo.Orchestrator do
   import Bitwise, only: [<<<: 2]
 
   alias Rondo.Agent.Adapter, as: AgentAdapter
-  alias Rondo.{AgentRunner, Config, Interrupt, RunLedger, SideEffectPolicy, StatusDashboard, Tracker, Workspace}
+  alias Rondo.AgentRunner
+  alias Rondo.Config
+  alias Rondo.Interrupt
   alias Rondo.Linear.Issue
+  alias Rondo.ReleaseLoop
+  alias Rondo.RunLedger
+  alias Rondo.SideEffectPolicy
+  alias Rondo.StatusDashboard
+  alias Rondo.Tracker
+  alias Rondo.Workspace
+
+  @dialyzer {:nowarn_function, handle_release_loop_dispatch: 7}
+  @dialyzer {:nowarn_function, transition_issue_to_release_state: 2}
+  @dialyzer {:nowarn_function, parse_repo_slug: 1}
 
   @timeseries_sample_interval_ms 10_000
   @continuation_retry_delay_ms 1_000
@@ -921,7 +933,7 @@ defmodule Rondo.Orchestrator do
 
     case transition_issue_to_in_progress(issue, ledger) do
       {:ok, issue, ledger} ->
-        start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger)
+        maybe_dispatch_release_loop(state, issue, attempt, attempt_metadata, recipient, ledger)
 
       {:paused, interrupt, ledger} ->
         pause_action_policy_guidance(state, issue, interrupt, ledger)
@@ -937,6 +949,134 @@ defmodule Rondo.Orchestrator do
           error: "action policy blocked dispatch: #{inspect(reason)}"
         })
     end
+  end
+
+  defp maybe_dispatch_release_loop(%State{} = state, issue, attempt, attempt_metadata, recipient, ledger) do
+    case ReleaseLoop.inspect(issue,
+           ledger: ledger,
+           workspace: expected_workspace_for_issue(issue),
+           repo: tracker_repo()
+         ) do
+      {:ok, decision, ledger} ->
+        handle_release_loop_dispatch(state, issue, attempt, attempt_metadata, recipient, ledger, decision)
+
+      {:skip, :disabled, ledger} ->
+        start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger)
+
+      {:skip, :missing_branch, ledger} ->
+        start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger)
+
+      {:skip, :no_pr, ledger} ->
+        start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger)
+
+      {:skip, {:risk_above_threshold, assessment}, ledger} ->
+        handle_release_loop_manual_review(state, issue, ledger, assessment, :risk_above_threshold)
+
+      {:skip, {:risk_gate_unavailable, reason}, ledger} ->
+        handle_release_loop_manual_review(state, issue, ledger, %{reason: reason}, :risk_gate_unavailable)
+
+      {:skip, _reason, ledger} ->
+        start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger)
+
+      {:error, reason, ledger} ->
+        Logger.warning("Release loop inspection failed #{issue_context(issue)} reason=#{inspect(reason)}; continuing normal dispatch")
+        start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger)
+    end
+  end
+
+  defp handle_release_loop_dispatch(%State{} = state, %Issue{} = issue, attempt, attempt_metadata, recipient, ledger, %{action: :fix} = decision) do
+    issue = transition_issue_to_release_state(issue, release_loop_rework_state())
+    agent_opts = [operator_guidance: Map.get(decision, :guidance)]
+
+    ledger = write_run_ledger_checkpoint(ledger, :release_loop_action_selected, %{action: "fix", feedback_count: length(Map.get(decision, :feedback_queue, []))})
+    start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger, agent_opts)
+  end
+
+  defp handle_release_loop_dispatch(%State{} = state, %Issue{} = issue, _attempt, _attempt_metadata, _recipient, ledger, %{action: :wait} = decision) do
+    issue = transition_issue_to_release_state(issue, release_loop_review_state())
+    ledger = write_run_ledger_checkpoint(ledger, :release_loop_action_selected, %{action: "wait", wait_interval_seconds: Map.get(decision, :wait_interval_seconds)})
+    _ledger = complete_run_ledger(ledger, :completed, %{phase: "release_loop_wait", wait_interval_seconds: Map.get(decision, :wait_interval_seconds)})
+
+    state =
+      schedule_issue_retry(state, issue.id, nil, %{
+        identifier: issue.identifier,
+        delay_type: :release_loop_wait,
+        error: "release loop waiting for PR checks or mergeability"
+      })
+
+    %{state | claimed: MapSet.put(state.claimed, issue.id)}
+  end
+
+  defp handle_release_loop_dispatch(
+         %State{} = state,
+         %Issue{} = issue,
+         _attempt,
+         _attempt_metadata,
+         _recipient,
+         ledger,
+         %{action: :merge} = decision
+       ) do
+    issue = transition_issue_to_release_state(issue, release_loop_merge_state())
+
+    case ReleaseLoop.execute_closeout(issue, decision,
+           ledger: ledger,
+           workspace: expected_workspace_for_issue(issue),
+           repo: tracker_repo()
+         ) do
+      {:ok, _result, ledger} ->
+        _ledger = complete_run_ledger(ledger, :completed, %{phase: "release_loop_closeout", action: "merge"})
+        %{state | completed: MapSet.put(state.completed, issue.id)}
+
+      {:skip, reason, ledger} ->
+        _ledger = complete_run_ledger(ledger, :failed, %{phase: "release_loop_closeout", reason: inspect(reason)})
+
+        state =
+          schedule_issue_retry(state, issue.id, nil, %{
+            identifier: issue.identifier,
+            error: "release loop closeout skipped: #{inspect(reason)}"
+          })
+
+        %{state | claimed: MapSet.put(state.claimed, issue.id)}
+
+      {:error, reason, ledger} ->
+        _ledger = complete_run_ledger(ledger, :failed, %{phase: "release_loop_closeout", reason: inspect(reason)})
+
+        state =
+          schedule_issue_retry(state, issue.id, nil, %{
+            identifier: issue.identifier,
+            error: "release loop closeout failed: #{inspect(reason)}"
+          })
+
+        %{state | claimed: MapSet.put(state.claimed, issue.id)}
+    end
+  end
+
+  defp handle_release_loop_dispatch(%State{} = state, issue, attempt, attempt_metadata, recipient, ledger, _decision) do
+    start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger)
+  end
+
+  defp handle_release_loop_manual_review(%State{} = state, %Issue{} = issue, ledger, assessment, reason) do
+    issue = transition_issue_to_release_state(issue, release_loop_review_state())
+
+    ledger =
+      write_run_ledger_checkpoint(ledger, :release_loop_manual_review, %{
+        reason: Atom.to_string(reason),
+        risk_level: Map.get(assessment, :level),
+        risk_threshold: Map.get(assessment, :threshold),
+        risk_allowed: Map.get(assessment, :allowed),
+        risk_source: Map.get(assessment, :source),
+        risk_evidence: Map.get(assessment, :evidence)
+      })
+
+    _ledger =
+      complete_run_ledger(ledger, :completed, %{
+        phase: "release_loop_manual_review",
+        reason: Atom.to_string(reason),
+        risk_level: Map.get(assessment, :level),
+        risk_threshold: Map.get(assessment, :threshold)
+      })
+
+    %{state | completed: MapSet.put(state.completed, issue.id)}
   end
 
   defp start_agent_for_issue(%State{} = state, issue, attempt, attempt_metadata, recipient, ledger, agent_opts \\ []) do
@@ -1671,6 +1811,7 @@ defmodule Rondo.Orchestrator do
       :continuation when attempt == 1 -> @continuation_retry_delay_ms
       :poll_retry -> @poll_retry_delay_ms
       :slot_wait -> @slot_wait_delay_ms
+      :release_loop_wait -> Config.release_loop_wait_interval_seconds() * 1_000
       _ -> failure_retry_delay(attempt)
     end
   end
@@ -2738,6 +2879,66 @@ defmodule Rondo.Orchestrator do
         {:blocked, {:issue_transition_failed, reason}, ledger}
     end
   end
+
+  defp transition_issue_to_release_state(%Issue{state: current_state} = issue, target_state) when is_binary(target_state) do
+    if normalize_state(current_state) == normalize_state(target_state) do
+      issue
+    else
+      case Tracker.update_issue_state(issue.id, target_state) do
+        :ok ->
+          Logger.info("Transitioned #{issue_context(issue)} to #{target_state}")
+          %{issue | state: target_state}
+
+        {:error, reason} ->
+          Logger.warning("Failed to transition #{issue_context(issue)} to #{target_state}: #{inspect(reason)}")
+          issue
+      end
+    end
+  end
+
+  defp transition_issue_to_release_state(issue, _target_state), do: issue
+
+  defp release_loop_rework_state, do: Config.release_loop_rework_state()
+  defp release_loop_review_state, do: Config.release_loop_review_state()
+  defp release_loop_merge_state, do: Config.release_loop_merge_state()
+
+  defp tracker_repo do
+    Config.tracker_repo() || repo_slug_from_git()
+  end
+
+  defp repo_slug_from_git do
+    case System.find_executable("git") do
+      nil ->
+        nil
+
+      git ->
+        case System.cmd(git, ["remote", "get-url", "origin"], stderr_to_stdout: true) do
+          {output, 0} -> parse_repo_slug(String.trim(output))
+          _ -> nil
+        end
+    end
+  end
+
+  defp parse_repo_slug(url) when is_binary(url) do
+    cond do
+      String.contains?(url, "github.com:") ->
+        url
+        |> String.split("github.com:", parts: 2)
+        |> List.last()
+        |> String.trim_trailing(".git")
+
+      String.contains?(url, "github.com/") ->
+        url
+        |> String.split("github.com/", parts: 2)
+        |> List.last()
+        |> String.trim_trailing(".git")
+
+      true ->
+        nil
+    end
+  end
+
+  defp parse_repo_slug(_url), do: nil
 
   defp tracker_transition_side_effect(%Issue{id: issue_id} = issue) do
     %{
