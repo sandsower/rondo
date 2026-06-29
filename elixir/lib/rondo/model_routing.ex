@@ -54,19 +54,23 @@ defmodule Rondo.ModelRouting do
   defp effective_hints(opts, repo_routing, routing_context) do
     provider_hint_map = Keyword.get(opts, :model_routing_hints, %{}) || %{}
     source_hint_map = source_contract_hints(opts)
+    repo_step_hint_map = repo_step_hints(repo_routing)
+
     provider_context_hints = context_specific_hints(provider_hint_map, routing_context)
+    repo_step_context_hints = context_specific_hints(repo_step_hint_map, routing_context)
     source_context_hints = context_specific_hints(source_hint_map, routing_context)
-    context_hints = source_context_hints || provider_context_hints
+    context_hints = source_context_hints || provider_context_hints || repo_step_context_hints
     context_hint_map = normalize_hint_map(context_hints || %{})
 
     hints =
       repo_routing
       |> repo_default_hints()
       |> apply_hint_map(provider_hint_map)
+      |> apply_hint_map(repo_step_context_hints || %{})
       |> apply_hint_map(provider_context_hints || %{})
+      |> maybe_clear_broad_model_for_context(context_hint_map)
       |> apply_hint_map(source_hint_map)
       |> apply_hint_map(source_context_hints || %{})
-      |> maybe_clear_broad_model_for_context(context_hint_map)
 
     {hints, normalize_context_metadata(context_hints, routing_context)}
   end
@@ -78,6 +82,14 @@ defmodule Rondo.ModelRouting do
   end
 
   defp repo_default_hints(_repo_routing), do: %{}
+
+  defp repo_step_hints(repo_routing) when is_map(repo_routing) do
+    repo_routing
+    |> map_value(:step_hints)
+    |> map_or_empty()
+  end
+
+  defp repo_step_hints(_repo_routing), do: %{}
 
   defp source_contract_hints(opts) do
     source_contract = Keyword.get(opts, :source_contract, %{})

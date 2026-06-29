@@ -207,7 +207,8 @@ defmodule Rondo.Config do
                                keys: [
                                  tiers: [type: :map, default: %{}],
                                  floor: [type: :map, default: %{}],
-                                 defaults: [type: :map, default: %{}]
+                                 defaults: [type: :map, default: %{}],
+                                 step_hints: [type: :map, default: %{}]
                                ]
                              ],
                              hooks: [
@@ -1118,6 +1119,7 @@ defmodule Rondo.Config do
     |> put_if_present(:tiers, normalize_model_routing_tiers(Map.get(section, "tiers")))
     |> put_if_present(:floor, normalize_model_routing_map(Map.get(section, "floor")))
     |> put_if_present(:defaults, normalize_model_routing_map(Map.get(section, "defaults")))
+    |> put_if_present(:step_hints, normalize_model_routing_step_hints(model_routing_step_hints_value(section)))
   end
 
   defp normalize_model_routing_tiers(tiers) when is_map(tiers) do
@@ -1131,6 +1133,27 @@ defmodule Rondo.Config do
   end
 
   defp normalize_model_routing_tiers(_tiers), do: :omit
+
+  defp model_routing_step_hints_value(section) when is_map(section) do
+    if Map.has_key?(section, "step_hints"), do: Map.get(section, "step_hints"), else: :omit
+  end
+
+  defp normalize_model_routing_step_hints(hints) when is_map(hints) do
+    hints
+    |> Enum.reduce(%{}, fn {key, value}, acc ->
+      case normalize_model_routing_step_hints_key(key) do
+        nil -> acc
+        normalized -> Map.put(acc, normalized, value)
+      end
+    end)
+  end
+
+  defp normalize_model_routing_step_hints(_hints), do: :omit
+
+  defp normalize_model_routing_step_hints_key(value) when value in ["initial", :initial, "initial_spawn", :initial_spawn], do: :initial
+  defp normalize_model_routing_step_hints_key(value) when value in ["steps", :steps], do: :steps
+  defp normalize_model_routing_step_hints_key(value) when value in ["phases", :phases], do: :phases
+  defp normalize_model_routing_step_hints_key(_value), do: nil
 
   defp normalize_model_routing_candidates(candidates) when is_list(candidates), do: Enum.map(candidates, &normalize_model_routing_map/1)
   defp normalize_model_routing_candidates(_candidates), do: []
