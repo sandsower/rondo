@@ -125,7 +125,7 @@ defmodule Rondo.LiveLinearClaudeE2ETest do
   # live values. The tracker project_slug scopes every Rondo query to the test
   # project, so the normal Rondo project is never read or mutated.
   #
-  # The adapter section (claude: or pi:) is determined by context.agent_adapter
+  # The adapter section (claude:, pi:, or codex:) is determined by context.agent_adapter
   # via LiveE2E.workflow_overrides_for_adapter/1, keeping adapter-specific keys
   # out of the shared overrides list.
   defp configure_live_workflow!(context, project) do

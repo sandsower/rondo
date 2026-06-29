@@ -125,6 +125,9 @@ defmodule Rondo.TestSupport do
           pi_command: "pi",
           pi_turn_timeout_ms: 3_600_000,
           pi_stall_timeout_ms: 300_000,
+          codex_command: "codex",
+          codex_turn_timeout_ms: 3_600_000,
+          codex_stall_timeout_ms: 300_000,
           action_policy_command: default_action_policy_command(),
           action_policy_run_mode: "unattended-auto",
           action_policy_policy_file: nil,
@@ -199,6 +202,9 @@ defmodule Rondo.TestSupport do
     pi_command = Keyword.get(config, :pi_command)
     pi_turn_timeout_ms = Keyword.get(config, :pi_turn_timeout_ms)
     pi_stall_timeout_ms = Keyword.get(config, :pi_stall_timeout_ms)
+    codex_command = Keyword.get(config, :codex_command)
+    codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
+    codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
     action_policy_command = Keyword.get(config, :action_policy_command)
     action_policy_run_mode = Keyword.get(config, :action_policy_run_mode)
     action_policy_policy_file = Keyword.get(config, :action_policy_policy_file)
@@ -296,6 +302,10 @@ defmodule Rondo.TestSupport do
         "  command: #{yaml_value(pi_command)}",
         "  turn_timeout_ms: #{yaml_value(pi_turn_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(pi_stall_timeout_ms)}",
+        "codex:",
+        "  command: #{yaml_value(codex_command)}",
+        "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
+        "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
         "action_policy:",
         "  command: #{yaml_value(action_policy_command)}",
         "  run_mode: #{yaml_value(action_policy_run_mode)}",

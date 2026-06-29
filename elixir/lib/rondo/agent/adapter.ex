@@ -147,6 +147,8 @@ defmodule Rondo.Agent.Adapter do
   def provider_session_id(%{run_ref: run_ref}), do: provider_session_id(run_ref)
   def provider_session_id(%{provider_ref_kind: "session_id", provider_ref: provider_ref}) when is_binary(provider_ref), do: provider_ref
   def provider_session_id(%{provider_ref_kind: :session_id, provider_ref: provider_ref}) when is_binary(provider_ref), do: provider_ref
+  def provider_session_id(%{provider_ref_kind: "thread_id", provider_ref: provider_ref}) when is_binary(provider_ref), do: provider_ref
+  def provider_session_id(%{provider_ref_kind: :thread_id, provider_ref: provider_ref}) when is_binary(provider_ref), do: provider_ref
   def provider_session_id(_event_or_run_ref), do: nil
 
   defp kind_to_string(nil), do: nil

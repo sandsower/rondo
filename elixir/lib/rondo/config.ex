@@ -39,8 +39,11 @@ defmodule Rondo.Config do
   @default_claude_turn_timeout_ms 3_600_000
   @default_claude_stall_timeout_ms 300_000
   @default_pi_command "pi"
+  @default_codex_command "codex"
   @default_pi_turn_timeout_ms 3_600_000
   @default_pi_stall_timeout_ms 300_000
+  @default_codex_turn_timeout_ms 3_600_000
+  @default_codex_stall_timeout_ms 300_000
   @default_action_policy_command "beislid"
   @default_action_policy_run_mode "unattended-auto"
   @valid_action_policy_run_modes ["supervised-auto", "unattended-auto"]
@@ -151,6 +154,15 @@ defmodule Rondo.Config do
                                  command: [type: :string, default: @default_pi_command],
                                  turn_timeout_ms: [type: :integer, default: @default_pi_turn_timeout_ms],
                                  stall_timeout_ms: [type: :integer, default: @default_pi_stall_timeout_ms]
+                               ]
+                             ],
+                             codex: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 command: [type: :string, default: @default_codex_command],
+                                 turn_timeout_ms: [type: :integer, default: @default_codex_turn_timeout_ms],
+                                 stall_timeout_ms: [type: :integer, default: @default_codex_stall_timeout_ms]
                                ]
                              ],
                              action_policy: [
@@ -596,6 +608,11 @@ defmodule Rondo.Config do
     get_in(validated_workflow_options(), [:pi, :command])
   end
 
+  @spec codex_command() :: String.t()
+  def codex_command do
+    get_in(validated_workflow_options(), [:codex, :command])
+  end
+
   @spec action_policy() :: action_policy()
   def action_policy do
     policy = get_in(validated_workflow_options(), [:action_policy])
@@ -728,6 +745,18 @@ defmodule Rondo.Config do
   def pi_stall_timeout_ms do
     validated_workflow_options()
     |> get_in([:pi, :stall_timeout_ms])
+    |> max(0)
+  end
+
+  @spec codex_turn_timeout_ms() :: pos_integer()
+  def codex_turn_timeout_ms do
+    get_in(validated_workflow_options(), [:codex, :turn_timeout_ms])
+  end
+
+  @spec codex_stall_timeout_ms() :: non_neg_integer()
+  def codex_stall_timeout_ms do
+    validated_workflow_options()
+    |> get_in([:codex, :stall_timeout_ms])
     |> max(0)
   end
 
@@ -889,6 +918,10 @@ defmodule Rondo.Config do
     require_command(options, [:pi, :command], :missing_pi_command)
   end
 
+  defp require_codex_command(options) do
+    require_command(options, [:codex, :command], :missing_codex_command)
+  end
+
   defp require_command(options, path, error) do
     case get_in(options, path) do
       command when is_binary(command) ->
@@ -954,12 +987,13 @@ defmodule Rondo.Config do
     case get_in(options, [:agent, :adapter]) do
       "claude_code" -> require_claude_command(options, path)
       "pi" -> require_pi_command(options, path)
+      "codex" -> require_codex_command(options, path)
       adapter -> {:error, invalid_workflow_config(path, [unsupported_adapter_error(adapter)])}
     end
   end
 
   defp unsupported_adapter_error(adapter) do
-    config_error("agent.adapter", adapter, "unsupported agent adapter; must be claude_code or pi")
+    config_error("agent.adapter", adapter, "unsupported agent adapter; must be claude_code, pi, or codex")
   end
 
   defp require_claude_command(options, path) do
@@ -980,6 +1014,17 @@ defmodule Rondo.Config do
 
       {:error, :missing_pi_command} ->
         error = config_error("pi.command", nil, "is required")
+        {:error, invalid_workflow_config(path, [error])}
+    end
+  end
+
+  defp require_codex_command(options, path) do
+    case require_codex_command(options) do
+      :ok ->
+        :ok
+
+      {:error, :missing_codex_command} ->
+        error = config_error("codex.command", nil, "is required")
         {:error, invalid_workflow_config(path, [error])}
     end
   end
@@ -1035,6 +1080,7 @@ defmodule Rondo.Config do
       agent: extract_agent_options(section_map(config, "agent")),
       claude: extract_claude_options(section_map(config, "claude")),
       pi: extract_pi_options(section_map(config, "pi")),
+      codex: extract_codex_options(section_map(config, "codex")),
       action_policy: extract_action_policy_options(section_map(config, "action_policy")),
       release_loop: extract_release_loop_options(section_map(config, "release_loop")),
       process_provider: extract_process_provider_options(section_map(config, "process_provider")),
@@ -1098,6 +1144,13 @@ defmodule Rondo.Config do
   end
 
   defp extract_pi_options(section) do
+    %{}
+    |> put_if_present(:command, command_value(Map.get(section, "command")))
+    |> put_if_present(:turn_timeout_ms, integer_value(Map.get(section, "turn_timeout_ms")))
+    |> put_if_present(:stall_timeout_ms, integer_value(Map.get(section, "stall_timeout_ms")))
+  end
+
+  defp extract_codex_options(section) do
     %{}
     |> put_if_present(:command, command_value(Map.get(section, "command")))
     |> put_if_present(:turn_timeout_ms, integer_value(Map.get(section, "turn_timeout_ms")))
@@ -1379,6 +1432,7 @@ defmodule Rondo.Config do
     agent = section_map(config, "agent")
     claude = section_map(config, "claude")
     pi = section_map(config, "pi")
+    codex = section_map(config, "codex")
     action_policy = section_map(config, "action_policy")
     release_loop = section_map(config, "release_loop")
     release_loop_closeout = section_map(release_loop, "closeout")
@@ -1399,6 +1453,7 @@ defmodule Rondo.Config do
       validate_section_map(config, "agent"),
       validate_section_map(config, "claude"),
       validate_section_map(config, "pi"),
+      validate_section_map(config, "codex"),
       validate_section_map(config, "action_policy"),
       validate_section_map(config, "release_loop"),
       validate_section_map(release_loop, "closeout"),
@@ -1450,6 +1505,9 @@ defmodule Rondo.Config do
       validate_string_field(pi, "pi.command", allow_empty: true),
       validate_positive_integer_field(pi, "pi.turn_timeout_ms"),
       validate_positive_integer_field(pi, "pi.stall_timeout_ms"),
+      validate_string_field(codex, "codex.command", allow_empty: true),
+      validate_positive_integer_field(codex, "codex.turn_timeout_ms"),
+      validate_positive_integer_field(codex, "codex.stall_timeout_ms"),
       validate_string_field(action_policy, "action_policy.command"),
       validate_inclusion_field(action_policy, "action_policy.run_mode", @valid_action_policy_run_modes),
       validate_existing_file_field(action_policy, "action_policy.policy_file"),
