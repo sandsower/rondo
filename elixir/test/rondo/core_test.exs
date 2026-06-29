@@ -1264,7 +1264,7 @@ defmodule Rondo.CoreTest do
   test "orchestrator ignores stale tick tokens" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     {:ok, orch} = Orchestrator.start_link(name: Module.concat(__MODULE__, :StaleTick))
-    on_exit(fn -> if Process.alive?(orch), do: GenServer.stop(orch) end)
+    on_exit(fn -> stop_orchestrator(orch) end)
 
     # Send a stale tick with a fake token
     send(orch, {:tick, make_ref()})
@@ -1280,7 +1280,7 @@ defmodule Rondo.CoreTest do
   test "orchestrator ignores stale retry tokens" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     {:ok, orch} = Orchestrator.start_link(name: Module.concat(__MODULE__, :StaleRetry))
-    on_exit(fn -> if Process.alive?(orch), do: GenServer.stop(orch) end)
+    on_exit(fn -> stop_orchestrator(orch) end)
 
     # Send a retry message with a fake token
     send(orch, {:retry_issue, "fake-issue-id", make_ref()})
@@ -1338,6 +1338,23 @@ defmodule Rondo.CoreTest do
     # still show the issue as running.
     snapshot = Orchestrator.snapshot(Module.concat(__MODULE__, :MissingReconcile), 1_000)
     assert length(snapshot.running) == 1
+  end
+
+  # Stops an orchestrator GenServer used in a test, tolerating shutdown
+  # races that can occur under load when the process is already terminating.
+  # Using Process.exit + monitor instead of GenServer.stop avoids the
+  # :sys.terminate race that produces a spurious shutdown EXIT.
+  defp stop_orchestrator(orch) when is_pid(orch) do
+    if Process.alive?(orch) do
+      ref = Process.monitor(orch)
+      Process.exit(orch, :normal)
+
+      receive do
+        {:DOWN, ^ref, :process, ^orch, _} -> :ok
+      after
+        1_000 -> :ok
+      end
+    end
   end
 
   defp continuation_issue(id, identifier) do
