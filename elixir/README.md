@@ -250,8 +250,10 @@ Notes:
   validation and again at every evaluation — a broken path is an error, never a silent fallback to
   the builtin policy. At run-ledger creation the effective policy file is frozen into the run dir
   (`artifacts/action-policy.json`); run-owned evaluations use the frozen copy, and the run manifest
-  records the frozen path, source path, and frozen content sha256. Execution-request manifests can
-  override it per run via `runner_extensions.action_policy.policy_file`.
+  records the frozen path, source path, and frozen content sha256. The checked-in workflow points
+  this at `../.beislid/action-policy.json`, which explicitly allows owned-branch `git.push` and
+  `gh.pr.create` handoff actions in `unattended-auto`. Execution-request manifests can override it
+  per run via `runner_extensions.action_policy.policy_file`.
 - Beislið owns the action-policy vocabulary and decision table; Rondo enforces it at Rondo-owned
   orchestration boundaries and persists the returned envelopes in run artifacts. Claude/pi
   permission flags are useful host controls, but they are not a substitute for external policy

@@ -25,7 +25,8 @@ work instead of supervising coding agents.
 
 Rondo polls a configured tracker (Linear or GitHub Issues) for issues, creates an isolated workspace for each one, and launches a
 Claude Code session to do the work. When the agent finishes, it moves the ticket forward
-(opens a PR, requests review, etc.). Multiple agents run concurrently. For CI/CD or scripted
+(opens a PR, requests review, etc.). Owned-branch handoff now uses an explicit action-policy override so
+`git.push` and `gh.pr.create` can complete without manual shell intervention. Multiple agents run concurrently. For CI/CD or scripted
 integrations, Rondo also provides a `run-once` mode that runs one selected tracker issue or local execution manifest and exits.
 
 See [elixir/README.md](elixir/README.md) for setup and usage.
