@@ -986,7 +986,11 @@ defmodule Rondo.Orchestrator do
 
   defp handle_release_loop_dispatch(%State{} = state, %Issue{} = issue, attempt, attempt_metadata, recipient, ledger, %{action: :fix} = decision) do
     issue = transition_issue_to_release_state(issue, release_loop_rework_state())
-    agent_opts = [operator_guidance: Map.get(decision, :guidance)]
+
+    agent_opts = [
+      operator_guidance: Map.get(decision, :guidance),
+      model_routing_context: %{stage: :turn, skill: "review-response", phase: "review"}
+    ]
 
     ledger = write_run_ledger_checkpoint(ledger, :release_loop_action_selected, %{action: "fix", feedback_count: length(Map.get(decision, :feedback_queue, []))})
     start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger, agent_opts)

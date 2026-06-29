@@ -354,11 +354,11 @@ defmodule Rondo.ModelRoutingTest do
              status: :honored,
              requested_tier: "frontier",
              resolved: %{adapter: "pi", model: "openrouter/frontier"},
-             context: %{stage: "turn", skill: "ready-for-review", phase: "review"},
+             context: %{stage: "turn", skill: "ready_for_review", phase: "review"},
              reason: reason
            } =
              ModelRouting.resolve(
-               routing_context: %{stage: :turn, skill: "ready-for-review", phase: "review"},
+               routing_context: %{stage: :turn, skill: "ready_for_review", phase: "review"},
                model_routing_hints: %{
                  "steps" => [
                    "not-a-map",
@@ -375,7 +375,7 @@ defmodule Rondo.ModelRoutingTest do
                }
              )
 
-    assert reason =~ "turn/ready-for-review/review"
+    assert reason =~ "turn/ready_for_review/review"
   end
 
   test "step matching requires every hint selector to match the routing context" do
@@ -419,6 +419,41 @@ defmodule Rondo.ModelRoutingTest do
                    heavy: [%{adapter: "pi", model: "openrouter/heavy"}]
                  }
                }
+             )
+  end
+
+  test "context selectors normalize hyphen and underscore vocabulary" do
+    assert %{
+             status: :honored,
+             requested_tier: "heavy",
+             resolved: %{adapter: "pi", model: "openrouter/heavy"},
+             context: %{stage: "turn", skill: "ready_for_review", phase: "context_discovery"}
+           } =
+             ModelRouting.resolve(
+               routing_context: %{stage: :turn, skill: "ready-for-review", phase: "context-discovery"},
+               model_routing_hints: %{
+                 "steps" => [
+                   %{
+                     "stage" => "turn",
+                     "skill" => "ready_for_review",
+                     "phase" => "context_discovery",
+                     "tier" => "heavy"
+                   }
+                 ]
+               },
+               repo_model_routing: %{tiers: %{heavy: [%{adapter: "pi", model: "openrouter/heavy"}]}}
+             )
+  end
+
+  test "blank context values normalize to nil" do
+    assert %{
+             status: :honored,
+             context: %{stage: "turn"}
+           } =
+             ModelRouting.resolve(
+               routing_context: %{stage: :turn, phase: "   "},
+               model_routing_hints: %{"steps" => [%{"stage" => "turn", "tier" => "heavy"}]},
+               repo_model_routing: %{tiers: %{heavy: [%{adapter: "pi", model: "openrouter/heavy"}]}}
              )
   end
 

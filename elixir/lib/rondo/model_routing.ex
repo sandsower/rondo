@@ -255,8 +255,12 @@ defmodule Rondo.ModelRouting do
   defp normalize_context_value(value) when is_atom(value), do: value |> Atom.to_string() |> normalize_context_value()
 
   defp normalize_context_value(value) when is_binary(value) do
-    value = String.trim(value)
-    if value == "", do: nil, else: value
+    value = String.trim(value) |> String.downcase()
+
+    case value do
+      "" -> nil
+      trimmed -> Regex.replace(~r/[-\s_]+/, trimmed, "_")
+    end
   end
 
   defp normalize_context_value(_value), do: nil

@@ -521,6 +521,88 @@ defmodule Rondo.RunLedgerTest do
            }
   end
 
+  test "record_model_routing_decision writes a checkpoint and agent metadata" do
+    workspace_root = tmp_dir("ledger-model-routing-decision")
+    issue = issue_fixture()
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "57a1e002"
+             )
+
+    routing = %{
+      status: :honored,
+      mode: :prefer,
+      requested_tier: "heavy",
+      candidates: [%{adapter: "pi", model: "heavy-model"}],
+      resolved: %{adapter: "pi", model: "heavy-model"},
+      reason: "resolved turn/implementation tier heavy to pi/heavy-model",
+      context: %{stage: "turn", phase: "implementation"}
+    }
+
+    assert {:ok, ledger} =
+             RunLedger.record_model_routing_decision(ledger, routing)
+
+    manifest = decode_json!(ledger.manifest_path)
+
+    assert manifest["agent"]["model_routing"] == %{
+             "status" => "honored",
+             "mode" => "prefer",
+             "requested_tier" => "heavy",
+             "candidates" => [%{"adapter" => "pi", "model" => "heavy-model"}],
+             "resolved" => %{"adapter" => "pi", "model" => "heavy-model"},
+             "reason" => "resolved turn/implementation tier heavy to pi/heavy-model",
+             "context" => %{"stage" => "turn", "phase" => "implementation"}
+           }
+
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "model_routing_decision"))
+  end
+
+  test "record_model_routing_decision replaces a non-map agent manifest entry" do
+    workspace_root = tmp_dir("ledger-model-routing-decision-agent-string")
+    issue = issue_fixture()
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "57a1e003"
+             )
+
+    source = %{provider: "fake", stage: "turn", turn_number: 3}
+    routing = %{status: :blocked, resolved: nil, reason: "blocked", context: %{stage: "turn"}}
+    corrupted_ledger = %{ledger | manifest: Map.put(ledger.manifest, "agent", "legacy-agent")}
+
+    assert {:ok, updated_ledger} =
+             RunLedger.record_model_routing_decision(corrupted_ledger, routing, source: source)
+
+    manifest = decode_json!(updated_ledger.manifest_path)
+
+    assert manifest["agent"]["model_routing"] == %{
+             "status" => "blocked",
+             "resolved" => nil,
+             "reason" => "blocked",
+             "context" => %{"stage" => "turn"}
+           }
+  end
+
+  test "record_model_routing_decision rejects non-map routing input" do
+    workspace_root = tmp_dir("ledger-model-routing-decision-invalid")
+    issue = issue_fixture()
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "57a1e004"
+             )
+
+    assert {:error, {:invalid_model_routing, nil}} =
+             RunLedger.record_model_routing_decision(ledger, nil, source: %{provider: "fake"})
+  end
+
   test "update_agent_metadata falls back to in-memory manifest when on-disk manifest is unreadable" do
     workspace_root = tmp_dir("ledger-agent-metadata-unreadable")
     issue = issue_fixture()

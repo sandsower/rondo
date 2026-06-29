@@ -231,6 +231,54 @@ defmodule Rondo.AgentAdapterTest do
     def evaluate_action_policy(_action, _classes, _opts \\ []), do: {:error, :not_used}
   end
 
+  defmodule TurnAwareModelHintProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "turn_aware_model_hint_process"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test, prompt: :test, model_routing_hints: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :ok, checks: %{available: :ok}}
+
+    @impl true
+    def select_gates(_opts \\ []), do: {:ok, Rondo.ProcessProvider.gate_selection_result([])}
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Turn-aware model hint prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []) do
+      %{
+        "initial" => %{
+          "skill" => "kickoff",
+          "phase" => "context_discovery",
+          "tier" => "standard",
+          "mode" => "prefer"
+        },
+        "steps" => [
+          %{
+            "stage" => "turn",
+            "phase" => "implementation",
+            "tier" => "heavy",
+            "mode" => "prefer"
+          }
+        ]
+      }
+    end
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(_action, _classes, _opts \\ []), do: {:error, :not_used}
+  end
+
   defmodule InitialStageLessStepModelHintProcessProvider do
     @behaviour Rondo.ProcessProvider
 
@@ -946,6 +994,72 @@ defmodule Rondo.AgentAdapterTest do
       assert manifest["agent"]["model_routing"]["context"]["skill"] == "kickoff"
       assert manifest["agent"]["model_routing"]["context"]["phase"] == "context_discovery"
       assert manifest["agent"]["model_routing"]["resolved"]["model"] == "heavy-model"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner re-evaluates model routing on continuation turns" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-turn-routing-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 2,
+        gates: nil,
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{
+            standard: [%{model: "standard-model"}],
+            heavy: [%{model: "heavy-model"}]
+          }
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-turn-routing",
+        identifier: "MT-TURN-ROUTING",
+        title: "Turn routing",
+        description: "Exercise runtime turn-aware routing",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = self()
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+
+      state_fetcher = fn [_issue_id] ->
+        fetch_count = Process.get(:turn_model_routing_fetch_count, 0) + 1
+        Process.put(:turn_model_routing_fetch_count, fetch_count)
+
+        state = if fetch_count == 1, do: "In Progress", else: "Done"
+        {:ok, [%{issue | state: state}]}
+      end
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: TurnAwareModelHintProcessProvider,
+                 run_ledger: ledger,
+                 test_pid: parent,
+                 issue_state_fetcher: state_fetcher
+               )
+
+      assert_receive {:fake_adapter_opts, first_opts}, 500
+      assert Keyword.get(first_opts, :model) == "standard-model"
+      assert %{status: :honored, context: %{stage: "initial_spawn"}} = Keyword.fetch!(first_opts, :model_routing)
+
+      assert_receive {:fake_adapter_opts, second_opts}, 500
+      assert Keyword.get(second_opts, :model) == "heavy-model"
+      assert %{status: :honored, context: %{stage: "turn", phase: "implementation"}} = Keyword.fetch!(second_opts, :model_routing)
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["context"]["stage"] == "turn"
+      assert manifest["agent"]["model_routing"]["context"]["phase"] == "implementation"
+      assert Enum.count(manifest["checkpoints"], &(&1["kind"] == "model_routing_decision")) >= 2
     after
       File.rm_rf(test_root)
     end
