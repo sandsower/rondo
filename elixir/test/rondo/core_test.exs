@@ -1157,12 +1157,53 @@ defmodule Rondo.CoreTest do
       trace_file = continuation_env(test_root, "session-report-done", report, max_turns: 3)
 
       issue = continuation_issue("issue-report-done", "MT-300")
+      test_pid = self()
 
       # No-op (sentinel) fetcher => no tracker capability. A terminal report must
       # still stop the run regardless of tracker state.
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: &AgentRunner.no_tracker_issue_state_fetcher/1)
+      assert :ok = AgentRunner.run(issue, test_pid, issue_state_fetcher: &AgentRunner.no_tracker_issue_state_fetcher/1)
 
+      assert_receive {:claude_worker_update, "issue-report-done", %{event: :run_decision, decision_kind: "stop", reason_code: "final_report_terminal_or_complete"}}, 500
       assert length(trace_argv(trace_file)) == 1
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner falls back to tracker state when no usable final report exists" do
+    test_root =
+      Path.join(System.tmp_dir!(), "rondo-elixir-agent-runner-tracker-fallback-#{System.unique_integer([:positive])}")
+
+    try do
+      trace_file = continuation_env(test_root, "session-tracker-fallback", nil, max_turns: 2)
+
+      issue = continuation_issue("issue-tracker-fallback", "MT-303")
+      test_pid = self()
+
+      state_fetcher = fn [_issue_id] ->
+        attempt = Process.get(:agent_turn_fetch_count, 0) + 1
+        Process.put(:agent_turn_fetch_count, attempt)
+
+        state = if attempt == 1, do: "In Progress", else: "Done"
+
+        {:ok,
+         [
+           %Issue{
+             id: issue.id,
+             identifier: issue.identifier,
+             title: issue.title,
+             description: issue.description,
+             state: state,
+             url: issue.url,
+             labels: issue.labels
+           }
+         ]}
+      end
+
+      assert :ok = AgentRunner.run(issue, test_pid, issue_state_fetcher: state_fetcher)
+
+      assert_receive {:claude_worker_update, "issue-tracker-fallback", %{event: :run_decision, decision_kind: "continue", reason_code: "tracker_state_fallback"}}, 500
+      assert length(trace_argv(trace_file)) == 2
     after
       File.rm_rf(test_root)
     end

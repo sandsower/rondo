@@ -35,6 +35,8 @@ defmodule Rondo.OrchestratorStatusTest do
   end
 
   test "guidance can address paused claims by issue identifier" do
+    workspace_root = tmp_dir("orchestrator-guidance-abort")
+
     issue = %Issue{
       id: "issue-guidance-identifier",
       identifier: "MT-GUIDE-ID",
@@ -44,11 +46,14 @@ defmodule Rondo.OrchestratorStatusTest do
       url: "https://example.org/issues/MT-GUIDE-ID"
     }
 
+    assert {:ok, ledger} = Rondo.RunLedger.create_run(issue, workspace_root: workspace_root, random_suffix: "guidance-abort")
+
     orchestrator_name = Module.concat(__MODULE__, :IdentifierGuidanceOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
       if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
     end)
 
     paused_entry = %{
@@ -57,15 +62,15 @@ defmodule Rondo.OrchestratorStatusTest do
       issue: issue,
       state: issue.state,
       session_id: nil,
-      run_id: "run-guidance-identifier",
-      run_dir: nil,
+      run_id: ledger.run_id,
+      run_dir: ledger.run_dir,
       workspace: nil,
       paused_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
       retry_attempt: 0,
       latest_gate: nil,
       interrupt: %{"reason" => "action_policy_guidance_required"},
       tracker_visibility: "known",
-      ledger: nil
+      ledger: ledger
     }
 
     :sys.replace_state(pid, fn state ->
@@ -78,6 +83,18 @@ defmodule Rondo.OrchestratorStatusTest do
     snapshot = GenServer.call(pid, :snapshot)
     assert snapshot.paused == []
     refute MapSet.member?(:sys.get_state(pid).claimed, issue.id)
+
+    manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+    run_decision_checkpoint = Enum.find(manifest["checkpoints"], &(&1["kind"] == "run_decision"))
+    assert run_decision_checkpoint
+
+    run_decision =
+      Path.join(manifest["run_dir"], run_decision_checkpoint["path"])
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert run_decision["payload"]["decision_kind"] == "terminate"
+    assert run_decision["payload"]["reason_code"] == "operator_abort"
   end
 
   test "refresh releases stale action-policy paused claims when policy now allows" do
@@ -2769,6 +2786,17 @@ defmodule Rondo.OrchestratorStatusTest do
     assert manifest
     assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "gates_completed"))
     assert Enum.any?(manifest["artifacts"], &(&1["kind"] == "gate_results"))
+
+    run_decision_checkpoint = Enum.find(manifest["checkpoints"], &(&1["kind"] == "run_decision"))
+    assert run_decision_checkpoint
+
+    run_decision =
+      Path.join(manifest["run_dir"], run_decision_checkpoint["path"])
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert run_decision["payload"]["decision_kind"] == "retry"
+    assert run_decision["payload"]["reason_code"] == "gate_failed"
   end
 
   test "orchestrator pauses instead of retrying after a second gate failure" do
@@ -2858,6 +2886,17 @@ defmodule Rondo.OrchestratorStatusTest do
 
     assert paused_manifest
     assert Enum.any?(paused_manifest["checkpoints"], &(&1["kind"] == "interrupt_created"))
+
+    run_decision_checkpoint = Enum.find(paused_manifest["checkpoints"], &(&1["kind"] == "run_decision"))
+    assert run_decision_checkpoint
+
+    run_decision =
+      Path.join(paused_manifest["run_dir"], run_decision_checkpoint["path"])
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert run_decision["payload"]["decision_kind"] == "pause"
+    assert run_decision["payload"]["reason_code"] == "repeated_gate_failure"
   end
 
   test "orchestrator loads paused ledgers on startup and excludes them from redispatch" do
@@ -3099,6 +3138,17 @@ defmodule Rondo.OrchestratorStatusTest do
     manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
     assert manifest["status"] == "terminated"
     assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "terminated"))
+
+    run_decision_checkpoint = Enum.find(manifest["checkpoints"], &(&1["kind"] == "run_decision"))
+    assert run_decision_checkpoint
+
+    run_decision =
+      Path.join(manifest["run_dir"], run_decision_checkpoint["path"])
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert run_decision["payload"]["decision_kind"] == "terminate"
+    assert run_decision["payload"]["reason_code"] == "orchestrator_shutdown"
   end
 
   test "completed agent runs complete ledger and link existing archive" do
@@ -3578,11 +3628,29 @@ defmodule Rondo.OrchestratorStatusTest do
 
     # Event log is persisted to disk, not in-memory index
     filename =
-      archived.started_at
-      |> DateTime.truncate(:second)
-      |> DateTime.to_iso8601()
-      |> String.replace(~r/[:\.]/, "-")
-      |> Kernel.<>(".json")
+      case archived.started_at do
+        %DateTime{} = started_at ->
+          started_at
+          |> DateTime.truncate(:second)
+          |> DateTime.to_iso8601()
+          |> String.replace(~r/[:\.]/, "-")
+          |> Kernel.<>(".json")
+
+        started_at when is_binary(started_at) ->
+          case DateTime.from_iso8601(started_at) do
+            {:ok, datetime, _offset} ->
+              datetime
+              |> DateTime.truncate(:second)
+              |> DateTime.to_iso8601()
+              |> String.replace(~r/[:\.]/, "-")
+              |> Kernel.<>(".json")
+
+            _ ->
+              started_at
+              |> String.replace(~r/[:\.]/, "-")
+              |> Kernel.<>(".json")
+          end
+      end
 
     assert {:ok, full_run} = Rondo.Orchestrator.load_archived_run("MT-401", filename)
     assert [event] = full_run.event_log

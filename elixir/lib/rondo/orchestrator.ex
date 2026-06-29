@@ -14,6 +14,7 @@ defmodule Rondo.Orchestrator do
   alias Rondo.Interrupt
   alias Rondo.Linear.Issue
   alias Rondo.ReleaseLoop
+  alias Rondo.RunDecision
   alias Rondo.RunLedger
   alias Rondo.SideEffectPolicy
   alias Rondo.StatusDashboard
@@ -121,6 +122,17 @@ defmodule Rondo.Orchestrator do
   def terminate(_reason, _state), do: :ok
 
   defp terminate_run_ledger_on_shutdown(%{ledger: %RunLedger{} = ledger} = running_entry, reason) do
+    ledger =
+      record_run_decision_checkpoint(
+        ledger,
+        :terminate,
+        "orchestrator_shutdown",
+        "terminate because orchestrator shutdown or operator abort",
+        running_entry,
+        %{"shutdown_reason" => inspect(reason)},
+        %{"shutdown_reason" => inspect(reason)}
+      )
+
     complete_run_ledger(ledger, :terminated, %{
       exit_reason: "orchestrator shutdown: #{inspect(reason)}",
       session_id: Map.get(running_entry, :session_id),
@@ -1352,6 +1364,32 @@ defmodule Rondo.Orchestrator do
     end
   end
 
+  defp record_run_decision_checkpoint(nil, _kind, _reason_code, _summary, _entry, _signals, _evidence), do: nil
+
+  defp record_run_decision_checkpoint(%RunLedger{} = ledger, kind, reason_code, summary, entry, signals, evidence) do
+    decision =
+      RunDecision.checkpoint_payload(kind, reason_code, summary,
+        issue: Map.get(entry, :issue),
+        run_id: Map.get(entry, :run_id),
+        run_dir: Map.get(entry, :run_dir),
+        session_id: Map.get(entry, :session_id),
+        run_ref: running_entry_run_ref(entry),
+        turn_number: Map.get(entry, :turn_count, 0),
+        retry_attempt: Map.get(entry, :retry_attempt),
+        input_signals: signals,
+        evidence: evidence
+      )
+
+    case RunLedger.record_run_decision(ledger, decision) do
+      {:ok, ledger} ->
+        ledger
+
+      {:error, reason} ->
+        Logger.warning("Run ledger run decision failed #{ledger_context(ledger)} kind=#{kind} reason=#{inspect(reason)}")
+        ledger
+    end
+  end
+
   defp finalize_run_ledger_artifacts(nil, _status, _final_report), do: nil
 
   defp finalize_run_ledger_artifacts(%RunLedger{} = ledger, :completed, final_report) do
@@ -1502,6 +1540,25 @@ defmodule Rondo.Orchestrator do
     ledger = pause_run_ledger(ledger, interrupt, nil)
     paused_entry = paused_entry_from_issue(issue, interrupt, ledger)
 
+    ledger =
+      record_run_decision_checkpoint(
+        ledger,
+        :pause,
+        "action_policy_guidance_required",
+        "pause because action-policy guidance is required",
+        paused_entry,
+        %{
+          "guidance_severity" => Map.get(interrupt, "guidance_severity"),
+          "policy_decision" => get_in(interrupt, ["policy", "decision"]),
+          "blocked_side_effect" => get_in(interrupt, ["blocked_side_effect", "action"])
+        },
+        %{
+          "interrupt_reason" => Map.get(interrupt, "reason")
+        }
+      )
+
+    paused_entry = paused_entry_from_issue(issue, interrupt, ledger)
+
     Logger.warning(
       "Paused run for action-policy guidance #{issue_context(issue)} " <>
         "run_dir=#{Map.get(paused_entry, :run_dir) || "n/a"} question=#{interrupt["question"]}"
@@ -1517,7 +1574,12 @@ defmodule Rondo.Orchestrator do
 
   defp pause_running_entry(state, issue_id, running_entry, reason) do
     interrupt = pause_interrupt_for_reason(running_entry, reason)
-    ledger = pause_run_ledger(Map.get(running_entry, :ledger), interrupt, Map.get(running_entry, :session_id))
+
+    ledger =
+      Map.get(running_entry, :ledger)
+      |> maybe_record_repeated_gate_pause_decision(running_entry, reason, interrupt)
+      |> pause_run_ledger(interrupt, Map.get(running_entry, :session_id))
+
     paused_entry = paused_entry_from_running(issue_id, running_entry, interrupt, ledger)
 
     Logger.warning(
@@ -1603,6 +1665,12 @@ defmodule Rondo.Orchestrator do
 
   defp apply_guidance_response(state, issue_id, paused_entry, guidance) when guidance in ["abort_run", "abort"] do
     ledger = Map.get(paused_entry, :ledger)
+
+    ledger =
+      record_run_decision_checkpoint(ledger, :terminate, "operator_abort", "terminate because orchestrator shutdown or operator abort", paused_entry, %{"guidance" => guidance}, %{
+        "interrupt_reason" => Map.get(paused_entry, :interrupt, %{})["reason"]
+      })
+
     ledger = complete_run_ledger(ledger, :aborted, %{reason: "operator guidance abort"})
     _ledger = ledger
 
@@ -2767,6 +2835,11 @@ defmodule Rondo.Orchestrator do
     identifier = Map.get(running_entry, :identifier)
     finished_at = DateTime.utc_now()
 
+    ledger =
+      running_entry
+      |> Map.get(:ledger)
+      |> maybe_record_retry_run_decision(running_entry, reason)
+
     archived_entry =
       %{
         issue_id: issue && issue.id,
@@ -2793,8 +2866,7 @@ defmodule Rondo.Orchestrator do
 
     ledger_status = run_ledger_status(reason)
 
-    running_entry
-    |> Map.get(:ledger)
+    ledger
     |> finalize_run_ledger_artifacts(ledger_status, Map.get(running_entry, :final_report))
     |> complete_run_ledger(ledger_status, %{
       exit_reason: archive_exit_reason(reason),
@@ -2829,6 +2901,62 @@ defmodule Rondo.Orchestrator do
     do: Map.put(entry, :non_active_state, state)
 
   defp maybe_put_non_active_state(entry, _reason, _issue), do: entry
+
+  defp maybe_record_retry_run_decision(nil, _running_entry, _reason), do: nil
+
+  defp maybe_record_retry_run_decision(ledger, running_entry, reason) do
+    case retry_run_decision_reason_code(running_entry, reason) do
+      nil ->
+        ledger
+
+      {reason_code, input_signals, evidence} ->
+        record_run_decision_checkpoint(ledger, :retry, reason_code, "retry because worker/gate failed", running_entry, input_signals, evidence)
+    end
+  end
+
+  defp retry_run_decision_reason_code(running_entry, reason) do
+    if reason in [:normal, :handoff, :terminated] do
+      nil
+    else
+      evidence = %{"latest_gate" => Map.get(running_entry, :latest_gate)}
+
+      input_signals = %{
+        "failure_reason" => inspect(reason),
+        "retry_attempt" => Map.get(running_entry, :retry_attempt),
+        "gate_status" => Map.get(Map.get(running_entry, :latest_gate), :status)
+      }
+
+      if gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate)) do
+        {"gate_failed", input_signals, evidence}
+      else
+        {"worker_failed", input_signals, evidence}
+      end
+    end
+  end
+
+  defp maybe_record_repeated_gate_pause_decision(nil, _running_entry, _reason, _interrupt), do: nil
+
+  defp maybe_record_repeated_gate_pause_decision(ledger, running_entry, reason, interrupt) do
+    if pause_after_gate_failure?(running_entry, reason) do
+      record_run_decision_checkpoint(
+        ledger,
+        :pause,
+        "repeated_gate_failure",
+        "pause because repeated gate failure",
+        running_entry,
+        %{
+          "failure_reason" => inspect(reason),
+          "interrupt_reason" => Map.get(interrupt, "reason")
+        },
+        %{
+          "latest_gate" => Map.get(running_entry, :latest_gate),
+          "interrupt" => interrupt
+        }
+      )
+    else
+      ledger
+    end
+  end
 
   # --- Per-run file persistence ---
   # Layout: <archive_root>/<IDENTIFIER>/<timestamp>.json

@@ -88,6 +88,59 @@ defmodule Rondo.EscalationTest do
       assert config.token_budget == 1_000_000
       assert config.report_repair_attempts == 1
     end
+
+    test "default arity and malformed atom-keyed overrides still normalize to repo-safe values" do
+      config = Escalation.resolve_config()
+      assert config.enabled == true
+      assert config.tiers == ["light", "standard", "heavy", "frontier"]
+
+      override = %{
+        escalation: %{
+          enabled: 1,
+          tiers: :invalid,
+          max_total_attempts: %{},
+          token_budget: %{},
+          report_repair_attempts: %{}
+        }
+      }
+
+      config = Escalation.resolve_config(override)
+      assert config.enabled == false
+      assert config.tiers == ["light", "standard", "heavy", "frontier"]
+      assert config.max_total_attempts == 3
+      assert config.token_budget == nil
+      assert config.report_repair_attempts == 2
+    end
+
+    test "binary overrides parse numbers and invalid tiers fall back to the first ladder entry" do
+      override = %{
+        "escalation" => %{
+          "enabled" => "true",
+          "tiers" => ["light", "standard"],
+          "max_total_attempts" => "7",
+          "token_budget" => "9000",
+          "report_repair_attempts" => "4"
+        }
+      }
+
+      config = Escalation.resolve_config(override)
+      assert config.enabled == true
+      assert config.tiers == ["light", "standard"]
+      assert config.max_total_attempts == 7
+      assert config.token_budget == 9_000
+      assert config.report_repair_attempts == 4
+
+      invalid_tier_manifest =
+        manifest(%{
+          status: "failed",
+          failure_classification: "task_failure",
+          agent: %{"model_routing" => %{"requested_tier" => "mystery"}}
+        })
+
+      assert {:escalate, "standard", chain, prompt} = Escalation.after_attempt(invalid_tier_manifest, [])
+      assert List.last(chain).tier == "mystery"
+      assert String.contains?(prompt, "escalated attempt at tier `standard`")
+    end
   end
 
   describe "pass-on-first" do

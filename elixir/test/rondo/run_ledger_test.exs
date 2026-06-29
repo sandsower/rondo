@@ -383,6 +383,9 @@ defmodule Rondo.RunLedgerTest do
     assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "tracker_update_detected"}) == "tracker_update_detected"
     assert RunLedger.checkpoint_kind_for_agent_update(%{event: :model_routing_decision}) == "model_routing_decision"
     assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "model_routing_decision"}) == "model_routing_decision"
+    assert RunLedger.checkpoint_kind_for_agent_update(%{raw: %{"method" => "run_decision"}}) == "run_decision"
+    assert RunLedger.checkpoint_kind_for_agent_update(%{"event" => "run_decision"}) == "run_decision"
+    assert RunLedger.checkpoint_kind_for_agent_update(%{event: :run_decision}) == "run_decision"
     assert RunLedger.checkpoint_kind_for_agent_update(%{event: :unknown}) == nil
   end
 
@@ -395,10 +398,12 @@ defmodule Rondo.RunLedgerTest do
       "usage" => %{"input_tokens" => 11},
       "capabilities" => %{"resume" => "thread_id"},
       "final_report" => "done",
-      "raw" => %{"method" => "turn/completed", "result" => "private result"}
+      "raw" => %{"method" => "turn/completed", "result" => "private result", "turn_number" => 4, "retry_attempt" => 1}
     }
 
-    assert RunLedger.checkpoint_payload_for_agent_update(update) == %{
+    payload = RunLedger.checkpoint_payload_for_agent_update(update)
+
+    assert payload == %{
              event: "result",
              adapter: "fake",
              run_ref: %{"adapter" => "fake", "provider_ref" => "run-1", "provider_ref_kind" => "thread_id", "resumable?" => true},
@@ -406,7 +411,14 @@ defmodule Rondo.RunLedgerTest do
              usage: %{"input_tokens" => 11},
              capabilities: %{"resume" => "thread_id"},
              final_report: "done",
-             raw: %{"method" => "turn/completed", "result" => "[REDACTED]"}
+             turn_number: 4,
+             retry_attempt: 1,
+             raw: %{"method" => "turn/completed", "result" => "[REDACTED]", "turn_number" => 4, "retry_attempt" => 1}
+           }
+
+    assert RunLedger.checkpoint_source_for_agent_update(%{"event" => "run_decision", "raw" => %{"method" => "run_decision"}}) == %{
+             adapter: "claude_code",
+             event: "run_decision"
            }
 
     assert RunLedger.checkpoint_source_for_agent_update(update) == %{
@@ -424,6 +436,58 @@ defmodule Rondo.RunLedgerTest do
            }
 
     assert RunLedger.agent_metadata_for_agent_update(%{adapter: "atom-key-adapter"}) == %{"adapter" => "atom-key-adapter"}
+  end
+
+  test "record_attempt_chain persists escalation chain checkpoints" do
+    workspace_root = tmp_dir("ledger-attempt-chain")
+    issue = issue_fixture()
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "chain001"
+             )
+
+    chain = [
+      %{
+        run_id: "run-1",
+        tier: "light",
+        reason: :initial,
+        status: :failed,
+        failure_classification: nil,
+        gate_summary: %{"status" => "fail"},
+        final_report_status: "missing",
+        token_spend: %{input_tokens: 5, output_tokens: 3, total_tokens: 8},
+        started_at: "2026-05-10T15:30:00Z",
+        finished_at: "2026-05-10T15:31:00Z",
+        run_dir: "/tmp/run-1"
+      }
+    ]
+
+    assert {:ok, ledger} = RunLedger.record_attempt_chain(ledger, chain)
+
+    manifest = decode_json!(ledger.manifest_path)
+
+    assert [attempt] = manifest["escalation"]["attempt_chain"]
+    assert attempt["run_id"] == "run-1"
+    assert attempt["tier"] == "light"
+    assert attempt["reason"] == "initial"
+    assert attempt["status"] == "failed"
+    assert attempt["gate_summary"] == %{"status" => "fail"}
+    assert attempt["final_report_status"] == "missing"
+    assert attempt["token_spend"] == "[REDACTED]"
+    assert attempt["started_at"] == "2026-05-10T15:30:00Z"
+    assert attempt["finished_at"] == "2026-05-10T15:31:00Z"
+    assert attempt["run_dir"] == "/tmp/run-1"
+
+    checkpoint_index = Enum.find(manifest["checkpoints"], &(&1["kind"] == "escalation_chain"))
+    assert checkpoint_index
+
+    checkpoint = decode_json!(Path.join(ledger.run_dir, checkpoint_index["path"]))
+    assert [checkpoint_attempt] = checkpoint["payload"]["attempt_chain"]
+    assert checkpoint_attempt["run_id"] == "run-1"
+    assert checkpoint_attempt["token_spend"] == "[REDACTED]"
   end
 
   test "records Beislið action policy decisions as checkpoints" do
@@ -885,7 +949,9 @@ defmodule Rondo.RunLedgerTest do
         "message" => %{"content" => "prompt and file contents"},
         "params" => %{"diff" => "sensitive diff", "turn" => %{"status" => "completed"}},
         "result" => "private result text",
-        "safe" => "redacted by default"
+        "safe" => "redacted by default",
+        "turn_number" => 4,
+        "retry_attempt" => 1
       }
     }
 
@@ -904,6 +970,8 @@ defmodule Rondo.RunLedgerTest do
     assert decoded["raw"]["params"]["turn"]["status"] == "completed"
     assert decoded["raw"]["result"] == "[REDACTED]"
     assert decoded["raw"]["safe"] == "[REDACTED]"
+    assert decoded["raw"]["turn_number"] == 4
+    assert decoded["raw"]["retry_attempt"] == 1
     refute line =~ "super-secret-token"
     refute line =~ "prompt and file contents"
     refute line =~ "sensitive diff"

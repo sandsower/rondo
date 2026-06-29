@@ -177,6 +177,11 @@ defmodule Rondo.RunLedger do
     write_checkpoint(ledger, :action_policy_decision, payload, source: %{policy: "beislid_action_policy"})
   end
 
+  @spec record_run_decision(t(), map(), keyword()) :: {:ok, t()} | {:error, term()}
+  def record_run_decision(%__MODULE__{} = ledger, decision, opts \\ []) when is_map(decision) do
+    write_checkpoint(ledger, :run_decision, decision, source: Keyword.get(opts, :source, %{decision: "rondo_run_decision"}))
+  end
+
   @spec update_agent_metadata(t(), map()) :: {:ok, t()} | {:error, term()}
   def update_agent_metadata(%__MODULE__{} = ledger, metadata) when is_map(metadata) do
     with_run_lock(ledger.run_dir, fn ->
@@ -408,6 +413,13 @@ defmodule Rondo.RunLedger do
       accounted_usage: sanitize_value(Map.get(update, :accounted_usage, Map.get(update, "accounted_usage"))),
       capabilities: sanitize_value(agent_update_value(update, :capabilities)),
       final_report: sanitize_value(agent_update_value(update, :final_report)),
+      decision_kind: sanitize_value(agent_update_value(update, :decision_kind)),
+      reason_code: sanitize_value(agent_update_value(update, :reason_code)),
+      summary: sanitize_value(agent_update_value(update, :summary)),
+      input_signals: sanitize_value(agent_update_value(update, :input_signals)),
+      evidence: sanitize_value(agent_update_value(update, :evidence)),
+      turn_number: sanitize_value(agent_update_value(update, :turn_number)),
+      retry_attempt: sanitize_value(agent_update_value(update, :retry_attempt)),
       diff_source: sanitize_value(agent_update_value(update, :diff_source)),
       model_routing: sanitize_value(agent_update_value(update, :model_routing)),
       raw: sanitize_agent_raw(Map.get(update, :raw, Map.get(update, "raw", %{})))
@@ -456,6 +468,7 @@ defmodule Rondo.RunLedger do
   defp checkpoint_kind_for_method("turn/cancelled"), do: "turn_cancelled"
   defp checkpoint_kind_for_method("turn/diff/updated"), do: "edit_batch"
   defp checkpoint_kind_for_method("model_routing_decision"), do: "model_routing_decision"
+  defp checkpoint_kind_for_method("run_decision"), do: "run_decision"
   defp checkpoint_kind_for_method(_method), do: nil
 
   defp checkpoint_kind_for_event(:claude_starting), do: "workspace_ready"
@@ -476,6 +489,8 @@ defmodule Rondo.RunLedger do
   defp checkpoint_kind_for_event("tracker_update_detected"), do: "tracker_update_detected"
   defp checkpoint_kind_for_event(:model_routing_decision), do: "model_routing_decision"
   defp checkpoint_kind_for_event("model_routing_decision"), do: "model_routing_decision"
+  defp checkpoint_kind_for_event(:run_decision), do: "run_decision"
+  defp checkpoint_kind_for_event("run_decision"), do: "run_decision"
   defp checkpoint_kind_for_event(_event), do: nil
 
   @doc "Returns the normalized agent event JSONL schema identifier."
@@ -1127,6 +1142,11 @@ defmodule Rondo.RunLedger do
   defp safe_raw_key?("session_id"), do: true
   defp safe_raw_key?("status"), do: true
   defp safe_raw_key?("subtype"), do: true
+  defp safe_raw_key?("decision_kind"), do: true
+  defp safe_raw_key?("reason_code"), do: true
+  defp safe_raw_key?("summary"), do: true
+  defp safe_raw_key?("turn_number"), do: true
+  defp safe_raw_key?("retry_attempt"), do: true
   defp safe_raw_key?("timestamp"), do: true
   defp safe_raw_key?("tool"), do: true
   defp safe_raw_key?("type"), do: true
