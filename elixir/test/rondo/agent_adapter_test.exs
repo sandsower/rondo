@@ -78,6 +78,98 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  defmodule RoutingFallbackAdapter do
+    @behaviour Rondo.Agent.Adapter
+
+    @impl true
+    def id, do: "routing_fallback"
+
+    @impl true
+    def capabilities, do: FakeAdapter.capabilities()
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :ok, checks: %{available: :ok}}
+
+    @impl true
+    def invoke(%{prompt: _prompt, workspace: workspace, previous_run_ref: previous_run_ref, on_event: on_event, opts: opts}) do
+      test_pid = Keyword.fetch!(opts, :test_pid)
+      failure_mode = Keyword.get(opts, :failure_mode, :codex_quota)
+      invocation = Process.get({:routing_fallback_invocation, failure_mode}, 0) + 1
+      Process.put({:routing_fallback_invocation, failure_mode}, invocation)
+
+      maybe_touch_workspace(workspace, invocation, opts)
+
+      send(test_pid, {:routing_fallback_invoked, failure_mode, invocation, Keyword.get(opts, :model), previous_run_ref})
+      send(test_pid, {:routing_fallback_opts, failure_mode, opts})
+
+      run_ref = Adapter.run_ref(id(), "routing-run-#{failure_mode}-#{invocation}", "routing_run_id", true)
+
+      case {failure_mode, invocation} do
+        {:codex_quota, 1} ->
+          on_event.(failure_event("Codex error: The usage limit has been reached", run_ref))
+          {:error, {:subprocess_exit, 1}}
+
+        {:openrouter_rate_limit, 1} ->
+          on_event.(failure_event("OpenRouter error: rate limited", run_ref))
+          {:error, {:subprocess_exit, 1}}
+
+        {:plain_failure, _invocation} ->
+          on_event.(failure_event("Implementation failure: something went wrong", run_ref))
+          {:error, {:subprocess_exit, 1}}
+
+        _ ->
+          on_event.(
+            Adapter.event(:session_started,
+              adapter: id(),
+              run_ref: run_ref,
+              usage: %{input_tokens: invocation, output_tokens: 4, total_tokens: invocation + 4},
+              raw: %{"type" => "routing.started", "invocation" => invocation}
+            )
+          )
+
+          on_event.(
+            Adapter.event(:invocation_completed,
+              adapter: id(),
+              run_ref: run_ref,
+              usage: %{input_tokens: invocation, output_tokens: 4, total_tokens: invocation + 4},
+              final_report: "routing final #{failure_mode} #{invocation}",
+              raw: %{invocation: invocation}
+            )
+          )
+
+          {:ok,
+           Adapter.result(
+             run_ref: run_ref,
+             final_report: "routing final #{failure_mode} #{invocation}",
+             usage: %{input_tokens: invocation, output_tokens: 4, total_tokens: invocation + 4},
+             capabilities: capabilities(),
+             raw: %{invocation: invocation}
+           )}
+      end
+    end
+
+    defp failure_event(message, run_ref) do
+      Adapter.event(:assistant_message,
+        adapter: id(),
+        run_ref: run_ref,
+        message: message,
+        raw: %{"message" => message}
+      )
+    end
+
+    defp maybe_touch_workspace(workspace, invocation, opts) do
+      case Keyword.get(opts, :touch_workspace_on_invocation) do
+        ^invocation ->
+          path = Keyword.get(opts, :touch_workspace_path, "routing-fallback-change.txt")
+          contents = Keyword.get(opts, :touch_workspace_contents, "changed #{invocation}\n")
+          File.write!(Path.join(workspace, path), contents)
+
+        _ ->
+          :ok
+      end
+    end
+  end
+
   defp start_update_recorder(test_pid, ledger \\ nil) do
     spawn_link(fn -> update_recorder_loop(test_pid, ledger) end)
   end
@@ -970,6 +1062,187 @@ defmodule Rondo.AgentAdapterTest do
       manifest = opts |> Keyword.fetch!(:run_ledger) |> then(&File.read!(&1.manifest_path)) |> Jason.decode!()
       assert manifest["agent"]["model_routing"]["status"] == "fallback"
       assert manifest["agent"]["model_routing"]["resolved"] == nil
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner falls back to next configured model after a Codex usage-limit failure" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-model-routing-codex-fallback-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        gates: nil,
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{
+            standard: [
+              %{model: "openai-codex/gpt-5.4-mini"},
+              %{model: "openrouter/deepseek/deepseek-v4-pro"}
+            ]
+          }
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-routing-codex-fallback",
+        identifier: "MT-ROUTING-CODEX-FALLBACK",
+        title: "Routing codex fallback",
+        description: "Exercise provider quota fallback",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = start_update_recorder(self())
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: RoutingFallbackAdapter,
+                 process_provider: FakeProcessProvider,
+                 run_ledger: ledger,
+                 failure_mode: :codex_quota,
+                 test_pid: parent,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+               )
+
+      assert_receive {:routing_fallback_invoked, :codex_quota, 1, "openai-codex/gpt-5.4-mini", _previous_run_ref}, 500
+      assert_receive {:routing_fallback_invoked, :codex_quota, 2, "openrouter/deepseek/deepseek-v4-pro", _previous_run_ref}, 500
+      refute_received {:routing_fallback_invoked, :codex_quota, 3, _, _}
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "fallback"
+      assert manifest["agent"]["model_routing"]["resolved"]["model"] == "openrouter/deepseek/deepseek-v4-pro"
+      assert manifest["agent"]["model_routing"]["fallback"]["failed_candidate"]["model"] == "openai-codex/gpt-5.4-mini"
+      assert manifest["agent"]["model_routing"]["fallback"]["next_candidate"]["model"] == "openrouter/deepseek/deepseek-v4-pro"
+      assert manifest["agent"]["model_routing"]["fallback"]["failure_class"] == "usage_limit"
+      assert manifest["agent"]["model_routing"]["fallback"]["exhausted"] == false
+      assert Enum.count(manifest["checkpoints"], &(&1["kind"] == "model_routing_decision")) >= 2
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner falls back to the next configured model after an OpenRouter rate-limit failure" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-model-routing-openrouter-fallback-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        gates: nil,
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{
+            standard: [
+              %{model: "openrouter/deepseek/deepseek-v4-pro"},
+              %{model: "openrouter/moonshotai/kimi-k2.7-code"}
+            ]
+          }
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-routing-openrouter-fallback",
+        identifier: "MT-ROUTING-OPENROUTER-FALLBACK",
+        title: "Routing openrouter fallback",
+        description: "Exercise OpenRouter quota fallback",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = start_update_recorder(self())
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: RoutingFallbackAdapter,
+                 process_provider: FakeProcessProvider,
+                 run_ledger: ledger,
+                 failure_mode: :openrouter_rate_limit,
+                 test_pid: parent,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+               )
+
+      assert_receive {:routing_fallback_invoked, :openrouter_rate_limit, 1, "openrouter/deepseek/deepseek-v4-pro", _previous_run_ref}, 500
+      assert_receive {:routing_fallback_invoked, :openrouter_rate_limit, 2, "openrouter/moonshotai/kimi-k2.7-code", _previous_run_ref}, 500
+      refute_received {:routing_fallback_invoked, :openrouter_rate_limit, 3, _, _}
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "fallback"
+      assert manifest["agent"]["model_routing"]["resolved"]["model"] == "openrouter/moonshotai/kimi-k2.7-code"
+      assert manifest["agent"]["model_routing"]["fallback"]["failed_candidate"]["model"] == "openrouter/deepseek/deepseek-v4-pro"
+      assert manifest["agent"]["model_routing"]["fallback"]["next_candidate"]["model"] == "openrouter/moonshotai/kimi-k2.7-code"
+      assert manifest["agent"]["model_routing"]["fallback"]["failure_class"] == "rate_limit"
+      assert manifest["agent"]["model_routing"]["fallback"]["exhausted"] == false
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner does not fall back on ordinary implementation failures" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-model-routing-plain-failure-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        gates: nil,
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{
+            standard: [
+              %{model: "openai-codex/gpt-5.4-mini"},
+              %{model: "openrouter/deepseek/deepseek-v4-pro"}
+            ]
+          }
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-routing-plain-failure",
+        identifier: "MT-ROUTING-PLAIN-FAILURE",
+        title: "Routing plain failure",
+        description: "Ensure ordinary failures do not fallback",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = start_update_recorder(self())
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
+
+      assert_raise RuntimeError, ~r/Agent run failed/, fn ->
+        AgentRunner.run(issue, parent,
+          agent_adapter: RoutingFallbackAdapter,
+          process_provider: FakeProcessProvider,
+          run_ledger: ledger,
+          failure_mode: :plain_failure,
+          test_pid: parent,
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+        )
+      end
+
+      assert_receive {:routing_fallback_invoked, :plain_failure, 1, "openai-codex/gpt-5.4-mini", _previous_run_ref}, 500
+      refute_received {:routing_fallback_invoked, :plain_failure, 2, _, _}
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["status"] == "honored"
+      assert manifest["agent"]["model_routing"]["resolved"]["model"] == "openai-codex/gpt-5.4-mini"
+      refute Map.has_key?(manifest["agent"]["model_routing"], "fallback")
     after
       File.rm_rf(test_root)
     end

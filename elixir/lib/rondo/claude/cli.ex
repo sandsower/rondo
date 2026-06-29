@@ -77,7 +77,8 @@ defmodule Rondo.Claude.CLI do
           stream_loop(port, deadline, stall_deadline, stall_timeout_ms, on_event, %{
             session_id: nil,
             usage: nil,
-            buffer: ""
+            buffer: "",
+            failure_lines: []
           })
         catch
           :exit, reason ->
@@ -121,7 +122,7 @@ defmodule Rondo.Claude.CLI do
              }}
 
           {^port, {:exit_status, code}} ->
-            {:error, {:subprocess_exit, code}}
+            {:error, {:subprocess_exit, code, Enum.reverse(state.failure_lines)}}
         after
           remaining_ms ->
             safe_port_close(port)
@@ -150,8 +151,27 @@ defmodule Rondo.Claude.CLI do
       {:error, reason} ->
         Logger.debug("Unparseable stream line: #{inspect(reason)} line=#{String.slice(full_line, 0, @max_log_bytes)}")
 
-        state
+        %{state | failure_lines: record_failure_line(state.failure_lines, full_line)}
     end
+  end
+
+  defp record_failure_line(failure_lines, line) when is_list(failure_lines) and is_binary(line) do
+    if provider_failure_line?(line) do
+      [line | failure_lines] |> Enum.take(5)
+    else
+      failure_lines
+    end
+  end
+
+  defp record_failure_line(failure_lines, _line), do: failure_lines
+
+  defp provider_failure_line?(line) when is_binary(line) do
+    normalized = String.downcase(line)
+
+    Regex.match?(
+      ~r/(usage limit has been reached|usage limit exceeded|rate limit(?:ed| exceeded| exhausted)?|quota(?: exhausted| exceeded| reached)?|insufficient credits?|credit(?:s)?(?: exhausted| depleted| limit reached| limit has been reached)|subscription(?: expired| exhausted| limit reached)?)/i,
+      normalized
+    )
   end
 
   defp build_first_turn_args(prompt, _workspace, opts) do

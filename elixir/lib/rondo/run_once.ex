@@ -433,9 +433,25 @@ defmodule Rondo.RunOnce do
     end
 
     ledger
-    |> write_update_checkpoint(update)
+    |> record_update_checkpoint(update)
     |> link_gate_artifacts(update)
   end
+
+  defp record_update_checkpoint(ledger, %{event: :model_routing_decision, model_routing: routing} = update) when is_map(routing) do
+    case RunLedger.record_model_routing_decision(ledger, routing, source: Map.get(update, :source, %{})) do
+      {:ok, ledger} -> ledger
+      {:error, _reason} -> ledger
+    end
+  end
+
+  defp record_update_checkpoint(ledger, %{"event" => "model_routing_decision", "model_routing" => routing} = update) when is_map(routing) do
+    case RunLedger.record_model_routing_decision(ledger, routing, source: Map.get(update, "source", %{})) do
+      {:ok, ledger} -> ledger
+      {:error, _reason} -> ledger
+    end
+  end
+
+  defp record_update_checkpoint(ledger, update), do: write_update_checkpoint(ledger, update)
 
   defp update_session_id(update) do
     Map.get(update, :session_id) || Map.get(update, "session_id") || "unknown"

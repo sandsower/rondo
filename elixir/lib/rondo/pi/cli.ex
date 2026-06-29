@@ -65,6 +65,7 @@ defmodule Rondo.Pi.CLI do
             session_id: nil,
             usage: nil,
             buffer: "",
+            failure_lines: [],
             issue_id: Keyword.get(opts, :issue_id),
             issue_identifier: Keyword.get(opts, :issue_identifier)
           })
@@ -113,7 +114,7 @@ defmodule Rondo.Pi.CLI do
 
           {^port, {:exit_status, code}} ->
             _state = flush_buffer(on_event, drain_port_data(port, on_event, state))
-            {:error, {:subprocess_exit, code}}
+            {:error, {:subprocess_exit, code, Enum.reverse(state.failure_lines)}}
         after
           remaining_ms ->
             safe_port_close(port)
@@ -142,8 +143,27 @@ defmodule Rondo.Pi.CLI do
         Logger.metadata(parse_error_metadata(state))
         Logger.debug("Unparseable pi stream line: #{inspect(reason)} line=#{String.slice(full_line, 0, @max_log_bytes)}")
 
-        state
+        %{state | failure_lines: record_failure_line(state.failure_lines, full_line)}
     end
+  end
+
+  defp record_failure_line(failure_lines, line) when is_list(failure_lines) and is_binary(line) do
+    if provider_failure_line?(line) do
+      [line | failure_lines] |> Enum.take(5)
+    else
+      failure_lines
+    end
+  end
+
+  defp record_failure_line(failure_lines, _line), do: failure_lines
+
+  defp provider_failure_line?(line) when is_binary(line) do
+    normalized = String.downcase(line)
+
+    Regex.match?(
+      ~r/(usage limit has been reached|usage limit exceeded|rate limit(?:ed| exceeded| exhausted)?|quota(?: exhausted| exceeded| reached)?|insufficient credits?|credit(?:s)?(?: exhausted| depleted| limit reached| limit has been reached)|subscription(?: expired| exhausted| limit reached)?)/i,
+      normalized
+    )
   end
 
   defp parse_error_metadata(state) do

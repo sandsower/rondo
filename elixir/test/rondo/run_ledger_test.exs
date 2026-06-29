@@ -54,6 +54,47 @@ defmodule Rondo.RunLedgerTest do
     assert ledger.next_seq == 2
   end
 
+  test "record_model_routing_decision preserves fallback metadata in the manifest and checkpoint" do
+    workspace_root = tmp_dir("ledger-model-routing-fallback")
+    issue = issue_fixture()
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "f1f2f3f4"
+             )
+
+    routing = %{
+      status: :fallback,
+      mode: :prefer,
+      requested_tier: "standard",
+      candidates: [%{model: "openai-codex/gpt-5.4-mini"}, %{model: "openrouter/deepseek/deepseek-v4-pro"}],
+      resolved: %{model: "openrouter/deepseek/deepseek-v4-pro"},
+      reason: "fallback from openai-codex/gpt-5.4-mini to openrouter/deepseek/deepseek-v4-pro",
+      fallback: %{
+        failed_candidate: %{model: "openai-codex/gpt-5.4-mini"},
+        next_candidate: %{model: "openrouter/deepseek/deepseek-v4-pro"},
+        failed_attempt_number: 1,
+        attempt_number: 2,
+        failure_class: "usage_limit",
+        failure_reason: "Codex error: The usage limit has been reached",
+        turn_number: 1,
+        exhausted: false
+      }
+    }
+
+    assert {:ok, ledger} = RunLedger.record_model_routing_decision(ledger, routing, source: %{event: "test"})
+
+    manifest = decode_json!(ledger.manifest_path)
+    assert manifest["agent"]["model_routing"]["fallback"]["failure_class"] == "usage_limit"
+    assert manifest["agent"]["model_routing"]["fallback"]["next_candidate"]["model"] == "openrouter/deepseek/deepseek-v4-pro"
+
+    checkpoint = decode_json!(Path.join(ledger.run_dir, "checkpoints/0001-model_routing_decision.json"))
+    assert checkpoint["payload"]["fallback"]["failed_candidate"]["model"] == "openai-codex/gpt-5.4-mini"
+    assert checkpoint["payload"]["fallback"]["exhausted"] == false
+  end
+
   test "create_run records the run-start base commit and branch for git workspaces" do
     workspace_root = tmp_dir("ledger-git-base")
     workspace = Path.join(workspace_root, "MT-401")

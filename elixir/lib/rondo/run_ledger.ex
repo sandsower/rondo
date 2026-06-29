@@ -233,7 +233,7 @@ defmodule Rondo.RunLedger do
   defp do_record_model_routing_decision(%__MODULE__{} = ledger, routing, opts) when is_map(routing) do
     payload =
       routing
-      |> Map.take([:status, :mode, :requested_tier, :candidates, :resolved, :reason, :context, :profile])
+      |> Map.take([:status, :mode, :requested_tier, :candidates, :resolved, :reason, :context, :profile, :fallback])
       |> sanitize_value()
 
     agent_metadata = agent_metadata_for_agent_update(%{model_routing: routing})

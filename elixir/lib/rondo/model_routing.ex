@@ -484,6 +484,9 @@ defmodule Rondo.ModelRouting do
     Enum.join(parts, "/") <> " "
   end
 
-  defp candidate_label(%{adapter: adapter, model: model}) when is_binary(adapter), do: "#{adapter}/#{model}"
-  defp candidate_label(%{model: model}), do: model
+  @doc false
+  @spec candidate_label(candidate() | nil) :: String.t()
+  def candidate_label(%{adapter: adapter, model: model}) when is_binary(adapter) and is_binary(model), do: "#{adapter}/#{model}"
+  def candidate_label(%{model: model}) when is_binary(model), do: model
+  def candidate_label(_candidate), do: "unknown"
 end

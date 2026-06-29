@@ -149,6 +149,8 @@ defmodule RondoWeb.Presenter do
       started_at: iso8601(entry.started_at),
       last_event_at: iso8601(entry.last_claude_timestamp),
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
+      model_routing: Map.get(entry, :model_routing),
+      model_fallback: Map.get(entry, :model_fallback),
       tokens: %{
         input_tokens: entry.claude_input_tokens,
         output_tokens: entry.claude_output_tokens,
@@ -187,6 +189,8 @@ defmodule RondoWeb.Presenter do
       stale_reason: Map.get(entry, :stale_reason),
       revalidated_at: timestamp_payload(Map.get(entry, :revalidated_at)),
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
+      model_routing: Map.get(entry, :model_routing),
+      model_fallback: Map.get(entry, :model_fallback),
       interrupt: interrupt_payload(Map.get(entry, :interrupt)),
       tokens: %{
         input_tokens: Map.get(entry, :claude_input_tokens, 0),
@@ -239,6 +243,8 @@ defmodule RondoWeb.Presenter do
       last_message: summarize_message(running.last_claude_message),
       last_event_at: iso8601(running.last_claude_timestamp),
       latest_gate: gate_payload(Map.get(running, :latest_gate)),
+      model_routing: Map.get(running, :model_routing),
+      model_fallback: Map.get(running, :model_fallback),
       tokens: %{
         input_tokens: running.claude_input_tokens,
         output_tokens: running.claude_output_tokens,

@@ -343,6 +343,49 @@ defmodule Rondo.RunOnceTest do
     assert log =~ "run_dir="
   end
 
+  test "records model routing decisions in run-once manifest" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-model-routing")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    fallback = %{
+      failed_candidate: %{model: "openai-codex/gpt-5.4-mini"},
+      next_candidate: %{model: "openrouter/deepseek/deepseek-v4-pro"},
+      failure_class: "usage_limit",
+      failure_reason: "Codex error: The usage limit has been reached",
+      turn_number: 1,
+      attempt_number: 2,
+      exhausted: false
+    }
+
+    routing = %{
+      status: :fallback,
+      mode: :prefer,
+      candidates: [fallback.failed_candidate, fallback.next_candidate],
+      resolved: fallback.next_candidate,
+      reason: "fallback to OpenRouter",
+      fallback: fallback
+    }
+
+    agent_runner = fn issue, _agent_opts ->
+      send(self(), {:claude_worker_update, issue.id, %{event: :model_routing_decision, model_routing: routing, source: %{turn_number: 1}}})
+      :ok
+    end
+
+    assert :ok =
+             RunOnce.run("issue-1",
+               deps: deps(issue("issue-1", state: "In Progress"), parent, agent_runner: agent_runner)
+             )
+
+    assert_received {:agent_run, %Issue{id: "issue-1"}, agent_opts}
+    manifest = agent_opts |> Keyword.fetch!(:run_dir) |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
+    assert manifest["agent"]["model_routing"]["status"] == "fallback"
+    assert manifest["agent"]["model_routing"]["resolved"]["model"] == "openrouter/deepseek/deepseek-v4-pro"
+    assert manifest["agent"]["model_routing"]["fallback"]["failed_candidate"]["model"] == "openai-codex/gpt-5.4-mini"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "model_routing_decision"))
+  end
+
   test "passes agent opts through to the agent runner" do
     parent = self()
 
