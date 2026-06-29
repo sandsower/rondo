@@ -105,6 +105,10 @@ Linear issue to In Review/Human Review/Done unless a PR/diff URL or configured
 review artifact is attached; if implementation finishes without that evidence,
 leave the issue In Progress and record the missing handoff in the workpad.
 
+Claude Code sessions can load the repo-local project-scoped `.mcp.json` at the
+repository root; it exposes the `linear_graphql` tool via
+`./elixir/bin/linear_graphql_mcp` using Rondo's configured Linear auth.
+
 Issue context:
 Identifier: {{ issue.identifier }}
 Title: {{ issue.title }}

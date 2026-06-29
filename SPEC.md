@@ -1246,6 +1246,9 @@ Optional tool extensions:
 - For Linear access, an MCP server can be configured to provide `linear_graphql` or equivalent
   tooling directly to Claude Code, rather than requiring Rondo to proxy tool calls.
 - Claude Code's `--allowedTools` flag can restrict which tools are available to the agent.
+- In this repository, the recommended path is a project-scoped `.mcp.json` entry that launches
+  `./elixir/bin/linear_graphql_mcp` and exposes the `linear_graphql` tool through Claude Code's
+  MCP tool naming scheme.
 
 `linear_graphql` extension contract:
 
@@ -1253,7 +1256,8 @@ Optional tool extensions:
   tracker auth for the current session.
 - Availability: only meaningful when `tracker.kind == "linear"` and valid Linear auth is configured.
 - This can be provided via an MCP server configured in Claude Code's environment, or via any other
-  tool mechanism available to the agent.
+  tool mechanism available to the agent; in this repo, the local `.mcp.json` + Elixir server path is
+  the canonical implementation.
 - Preferred input shape:
 
   ```json
@@ -2281,7 +2285,8 @@ Use the same validation profiles as Section 17:
 - Optional HTTP server honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - Optional `linear_graphql` tool extension exposes raw Linear GraphQL access through the
-  Claude Code session using configured Rondo auth (via MCP server or other mechanism).
+  Claude Code session using configured Rondo auth (via MCP server or other mechanism);
+  this repository ships a project-scoped local MCP server for that path.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.

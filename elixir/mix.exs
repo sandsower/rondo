@@ -18,6 +18,7 @@ defmodule Rondo.MixProject do
           Rondo.GitHub.Client,
           Rondo.GitHub.PullRequest,
           Rondo.Linear.Client,
+          Rondo.Linear.MCPServer,
           Rondo.SpecsCheck,
           Rondo.Orchestrator,
           Rondo.Orchestrator.State,
