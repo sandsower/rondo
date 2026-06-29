@@ -122,7 +122,11 @@ defmodule Rondo.Escalation do
   @doc """
   Build a short evidence prompt to seed an escalated or repair attempt.
   """
-  @spec evidence_prompt([attempt_entry()], :escalate | :repair, tier() | nil) :: String.t()
+  @spec evidence_prompt([attempt_entry()], :escalate | :repair) :: String.t()
+  def evidence_prompt(chain, mode), do: evidence_prompt(chain, mode, nil)
+
+  @spec evidence_prompt([attempt_entry()], :escalate, tier() | nil) :: String.t()
+  @spec evidence_prompt([attempt_entry()], :repair, tier() | nil) :: String.t()
   def evidence_prompt(chain, :escalate, target_tier) when is_binary(target_tier) do
     latest = List.last(chain) || %{}
 
@@ -221,8 +225,6 @@ defmodule Rondo.Escalation do
     total >= budget
   end
 
-  defp exceeded_token_budget?(_chain, _budget), do: false
-
   defp handle_final_report(chain, config) do
     if repair_attempts_used(chain) < config.report_repair_attempts do
       {:repair, chain, evidence_prompt(chain, :repair, nil)}
@@ -236,7 +238,6 @@ defmodule Rondo.Escalation do
          {:ok, next_tier} <- next_tier(config.tiers, current_tier) do
       {:escalate, next_tier, chain, evidence_prompt(chain, :escalate, next_tier)}
     else
-      :none -> nil
       :top -> {:pause, "ladder_exhausted", chain}
     end
   end
@@ -245,21 +246,10 @@ defmodule Rondo.Escalation do
     if tier in ladder, do: {:ok, tier}, else: {:ok, List.first(ladder)}
   end
 
-  defp effective_tier(_entry, ladder) do
-    case List.first(ladder) do
-      nil -> :none
-      tier -> {:ok, tier}
-    end
-  end
+  defp effective_tier(_entry, ladder), do: {:ok, List.first(ladder)}
 
   defp next_tier(ladder, current_tier) do
     case Enum.find_index(ladder, &(&1 == current_tier)) do
-      nil ->
-        case List.first(ladder) do
-          nil -> :none
-          first -> {:ok, first}
-        end
-
       index ->
         case Enum.at(ladder, index + 1) do
           nil -> :top

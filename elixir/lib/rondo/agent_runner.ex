@@ -7,7 +7,20 @@ defmodule Rondo.AgentRunner do
   alias Rondo.Agent.Adapter
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.PiAdapter
-  alias Rondo.{Config, FinalReport, Gates, Interrupt, ModelRouting, ProcessProvider, Tracker, Workspace}
+
+  alias Rondo.{
+    Config,
+    FinalReport,
+    Gates,
+    Interrupt,
+    ModelRouting,
+    ProcessProvider,
+    RunDecision,
+    RunLedger,
+    Tracker,
+    Workspace
+  }
+
   alias Rondo.Linear.Issue
   alias Rondo.ProcessProvider.{Beislid, Native}
   alias Rondo.Tracker.UpdateDetector
@@ -27,18 +40,18 @@ defmodule Rondo.AgentRunner do
             case run_agent_turns(workspace, issue, claude_update_recipient, opts) do
               :ok -> :ok
               {:pause, interrupt} -> exit({:final_report_invalid, interrupt})
-              {:error, reason} -> handle_agent_run_error(issue, reason)
+              {:error, reason} -> handle_agent_run_error(issue, reason, claude_update_recipient, opts)
             end
           after
             Workspace.run_after_run_hook(workspace, issue, workspace_opts)
           end
         else
           {:error, reason} ->
-            handle_agent_run_error(issue, reason)
+            handle_agent_run_error(issue, reason, claude_update_recipient, opts)
         end
 
       {:error, reason} ->
-        handle_agent_run_error(issue, reason)
+        handle_agent_run_error(issue, reason, claude_update_recipient, opts)
     end
   end
 
@@ -86,12 +99,22 @@ defmodule Rondo.AgentRunner do
     end
   end
 
-  defp handle_agent_run_error(issue, {:action_policy_guidance_required, interrupt}) do
+  defp handle_agent_run_error(issue, {:action_policy_guidance_required, interrupt}, recipient, opts) do
     Logger.warning("Agent run needs guidance for #{issue_context(issue)}: #{inspect(interrupt["blocked_side_effect"])}")
+
+    dispatch_run_decision(
+      recipient,
+      issue,
+      :pause,
+      "action_policy_guidance_required",
+      "pause because action-policy guidance is required",
+      action_policy_guidance_run_decision_opts(issue, interrupt, opts)
+    )
+
     exit({:action_policy_guidance_required, interrupt})
   end
 
-  defp handle_agent_run_error(issue, {:workspace_not_ready, workspace}) do
+  defp handle_agent_run_error(issue, {:workspace_not_ready, workspace}, _recipient, _opts) do
     Logger.error("Agent run aborted for #{issue_context(issue)}: workspace not present at spawn boundary: #{workspace}")
 
     raise RuntimeError,
@@ -99,12 +122,22 @@ defmodule Rondo.AgentRunner do
             "(creation incomplete or workspace removed before launch)"
   end
 
-  defp handle_agent_run_error(issue, {:model_routing_exhausted, interrupt}) when is_map(interrupt) do
+  defp handle_agent_run_error(issue, {:model_routing_exhausted, interrupt}, recipient, opts) when is_map(interrupt) do
     Logger.warning("Agent run paused for #{issue_context(issue)}: model routing candidates exhausted")
+
+    dispatch_run_decision(
+      recipient,
+      issue,
+      :pause,
+      "model_routing_exhausted",
+      "pause because model routing candidates are exhausted",
+      model_routing_exhausted_run_decision_opts(issue, interrupt, opts)
+    )
+
     exit({:model_routing_exhausted, interrupt})
   end
 
-  defp handle_agent_run_error(issue, reason) do
+  defp handle_agent_run_error(issue, reason, _recipient, _opts) do
     Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
     raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
   end
@@ -138,6 +171,14 @@ defmodule Rondo.AgentRunner do
          session_id: session_id,
          usage: usage,
          message: Map.get(event, :message),
+         payload: Map.get(event, :payload),
+         decision_kind: Map.get(event, :decision_kind),
+         reason_code: Map.get(event, :reason_code),
+         summary: Map.get(event, :summary),
+         input_signals: Map.get(event, :input_signals),
+         evidence: Map.get(event, :evidence),
+         turn_number: Map.get(event, :turn_number),
+         retry_attempt: Map.get(event, :retry_attempt),
          capabilities: Map.get(event, :capabilities),
          final_report: Map.get(event, :final_report),
          diff_source: Map.get(event, :diff_source),
@@ -1140,6 +1181,17 @@ defmodule Rondo.AgentRunner do
         )
 
       {:continue, refreshed_issue, _current_final_report_fingerprint, _next_context} ->
+        dispatch_run_decision(
+          turn_context_recipient(context),
+          issue,
+          :stop,
+          "max_turns_reached",
+          "stop because agent.max_turns was reached",
+          run_decision_opts(context, refreshed_issue, turn_number, effective_run_ref, analysis, final_report, %{
+            "agent_max_turns" => context.max_turns
+          })
+        )
+
         Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with delivery still incomplete")
         :ok
 
@@ -1191,13 +1243,24 @@ defmodule Rondo.AgentRunner do
              final_report,
              effective_run_ref
            ) do
-      continuation_decision_by_status(context, issue, analysis)
+      continuation_decision_by_status(context, issue, analysis, turn_number, final_report, effective_run_ref)
     end
   end
 
   defp final_report_unparsed_pause(context, issue, analysis, turn_number, final_report, effective_run_ref) do
     case final_report_state_classification(analysis.next_state_hint) do
       :blocked when analysis.status != :valid ->
+        dispatch_run_decision(
+          turn_context_recipient(context),
+          issue,
+          :pause,
+          "blocked_state_unparsed",
+          "pause because final report is missing or invalid when required",
+          run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report, %{
+            "classification" => "blocked_state_unparsed"
+          })
+        )
+
         {:pause,
          final_report_interrupt(
            context,
@@ -1210,6 +1273,17 @@ defmodule Rondo.AgentRunner do
          ), clear_live_update_prompt(context)}
 
       :terminal when analysis.status != :valid ->
+        dispatch_run_decision(
+          turn_context_recipient(context),
+          issue,
+          :pause,
+          "terminal_state_unparsed",
+          "pause because final report is missing or invalid when required",
+          run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report, %{
+            "classification" => "terminal_state_unparsed"
+          })
+        )
+
         {:pause,
          final_report_interrupt(
            context,
@@ -1237,6 +1311,15 @@ defmodule Rondo.AgentRunner do
        ) do
     if analysis.status != :valid && previous_final_report_fingerprint && final_report_loop_guardable?(final_report) &&
          final_report_loop_guard?(analysis.fingerprint, previous_final_report_fingerprint) do
+      dispatch_run_decision(
+        turn_context_recipient(context),
+        issue,
+        :pause,
+        "repeated_final_report",
+        "pause because the assistant repeated the same final report",
+        run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report)
+      )
+
       {:pause,
        final_report_interrupt(
          context,
@@ -1252,38 +1335,255 @@ defmodule Rondo.AgentRunner do
     end
   end
 
-  defp continuation_decision_by_status(context, issue, analysis) do
+  defp continuation_decision_by_status(
+         context,
+         issue,
+         analysis,
+         turn_number,
+         final_report,
+         effective_run_ref
+       ) do
     case analysis.status do
-      :valid -> valid_final_report_continuation(context, issue, analysis)
-      _invalid_or_missing -> invalid_or_missing_final_report_continuation(context, issue, analysis)
+      :valid ->
+        valid_final_report_continuation(
+          context,
+          issue,
+          analysis,
+          turn_number,
+          final_report,
+          effective_run_ref
+        )
+
+      _invalid_or_missing ->
+        invalid_or_missing_final_report_continuation(
+          context,
+          issue,
+          analysis,
+          turn_number,
+          final_report,
+          effective_run_ref
+        )
     end
   end
 
-  defp valid_final_report_continuation(context, issue, analysis) do
+  defp valid_final_report_continuation(context, issue, analysis, turn_number, final_report, effective_run_ref) do
     if active_issue_state?(Map.get(analysis.report, "next_state")) do
       case maybe_continue_with_live_update(context, issue, :continue) do
-        {:continue, refreshed_issue, next_context} -> {:continue, refreshed_issue, analysis.fingerprint, next_context}
-        {:done, refreshed_issue, next_context} -> {:done, refreshed_issue, next_context}
-        {:pause, interrupt, next_context} -> {:pause, interrupt, next_context}
-        {:error, reason} -> {:error, reason}
+        {:continue, refreshed_issue, next_context} ->
+          dispatch_run_decision(
+            turn_context_recipient(context),
+            refreshed_issue,
+            :continue,
+            "final_report_active_or_incomplete",
+            "continue because final report says active/incomplete",
+            run_decision_opts(context, refreshed_issue, turn_number, effective_run_ref, analysis, final_report)
+          )
+
+          {:continue, refreshed_issue, analysis.fingerprint, next_context}
+
+        {:done, refreshed_issue, next_context} ->
+          dispatch_run_decision(
+            turn_context_recipient(context),
+            refreshed_issue,
+            :stop,
+            "final_report_terminal_or_complete",
+            "stop because final report says terminal/complete",
+            run_decision_opts(context, refreshed_issue, turn_number, effective_run_ref, analysis, final_report)
+          )
+
+          {:done, refreshed_issue, next_context}
+
+        {:pause, interrupt, next_context} ->
+          dispatch_run_decision(
+            turn_context_recipient(context),
+            issue,
+            :pause,
+            "tracker_update_requires_guidance",
+            "pause because tracker update requires guidance",
+            run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report, %{
+              "tracker_update" => Map.get(interrupt, "question")
+            })
+          )
+
+          {:pause, interrupt, next_context}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     else
+      dispatch_run_decision(
+        turn_context_recipient(context),
+        issue,
+        :stop,
+        "final_report_terminal_or_complete",
+        "stop because final report says terminal/complete",
+        run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report)
+      )
+
       {:done, issue, clear_live_update_prompt(context)}
     end
   end
 
-  defp invalid_or_missing_final_report_continuation(context, issue, analysis) do
+  defp invalid_or_missing_final_report_continuation(context, issue, analysis, turn_number, final_report, effective_run_ref) do
     if tracker_capable?(context) do
       case maybe_continue_with_live_update(context, issue, :continue) do
-        {:continue, refreshed_issue, next_context} -> {:continue, refreshed_issue, analysis.fingerprint, next_context}
-        {:done, refreshed_issue, next_context} -> {:done, refreshed_issue, next_context}
-        {:pause, interrupt, next_context} -> {:pause, interrupt, next_context}
-        {:error, reason} -> {:error, reason}
+        {:continue, refreshed_issue, next_context} ->
+          dispatch_run_decision(
+            turn_context_recipient(context),
+            refreshed_issue,
+            :continue,
+            "tracker_state_fallback",
+            "fallback to tracker-state continuation because no usable final report exists",
+            run_decision_opts(context, refreshed_issue, turn_number, effective_run_ref, analysis, final_report)
+          )
+
+          {:continue, refreshed_issue, analysis.fingerprint, next_context}
+
+        {:done, refreshed_issue, next_context} ->
+          dispatch_run_decision(
+            turn_context_recipient(context),
+            refreshed_issue,
+            :stop,
+            "tracker_state_terminal",
+            "stop because tracker-state no longer authorizes continuation",
+            run_decision_opts(context, refreshed_issue, turn_number, effective_run_ref, analysis, final_report)
+          )
+
+          {:done, refreshed_issue, next_context}
+
+        {:pause, interrupt, next_context} ->
+          dispatch_run_decision(
+            turn_context_recipient(context),
+            issue,
+            :pause,
+            "tracker_update_requires_guidance",
+            "pause because tracker update requires guidance",
+            run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report, %{
+              "tracker_update" => Map.get(interrupt, "question")
+            })
+          )
+
+          {:pause, interrupt, next_context}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     else
+      dispatch_run_decision(
+        turn_context_recipient(context),
+        issue,
+        :stop,
+        "tracker_less_no_continuation_authority",
+        "stop because tracker-less run has no continuation authority",
+        run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report)
+      )
+
       {:done, issue, clear_live_update_prompt(context)}
     end
   end
+
+  defp run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report, extra_input_signals \\ %{}) do
+    opts = Map.get(context, :opts, [])
+    retry_attempt = Keyword.get(opts, :retry_attempt) || Keyword.get(opts, :attempt)
+
+    [
+      issue: issue,
+      run_id: Map.get(context, :run_id),
+      run_dir: Map.get(context, :run_dir),
+      session_id: Map.get(effective_run_ref || %{}, :provider_ref),
+      run_ref: effective_run_ref,
+      turn_number: turn_number,
+      retry_attempt: retry_attempt,
+      input_signals:
+        Map.merge(
+          %{
+            "final_report_status" => Atom.to_string(analysis.status),
+            "final_report_next_state" => analysis.next_state_hint,
+            "final_report_fingerprint" => analysis.fingerprint,
+            "tracker_capable" => tracker_capable?(context),
+            "issue_state" => Map.get(issue, :state),
+            "continuation_count" => max(turn_number - 1, 0)
+          },
+          extra_input_signals
+        ),
+      evidence: run_decision_evidence(context, analysis, final_report)
+    ]
+  end
+
+  defp run_decision_evidence(context, analysis, final_report) do
+    evidence =
+      if analysis.status == :valid and is_binary(Map.get(context, :run_dir)) do
+        %{"final_report" => %{"path" => RunLedger.final_report_relative_path()}}
+      else
+        %{}
+      end
+
+    if is_binary(final_report) and String.trim(final_report) != "" do
+      Map.put(evidence, "final_report_excerpt", final_report_excerpt(final_report))
+    else
+      evidence
+    end
+  end
+
+  defp dispatch_run_decision(recipient, issue, decision_kind, reason_code, summary, opts) do
+    send_claude_update(recipient, issue, RunDecision.synthetic_update(decision_kind, reason_code, summary, opts))
+  end
+
+  defp turn_context_recipient(%{claude_update_recipient: recipient}), do: recipient
+  defp turn_context_recipient(_context), do: nil
+
+  defp action_policy_guidance_run_decision_opts(issue, interrupt, opts) do
+    run_ledger = Keyword.get(opts, :run_ledger)
+    resume = Map.get(interrupt, "resume", %{})
+
+    [
+      issue: issue,
+      run_id: run_ledger_run_id(run_ledger),
+      run_dir: run_ledger_run_dir(run_ledger),
+      session_id: Map.get(resume, "session_id"),
+      run_ref: Map.get(resume, "run_ref"),
+      retry_attempt: Map.get(resume, "retry_attempt"),
+      input_signals: %{
+        "guidance_severity" => Map.get(interrupt, "guidance_severity"),
+        "policy_decision" => get_in(interrupt, ["policy", "decision"]),
+        "blocked_side_effect" => get_in(interrupt, ["blocked_side_effect", "action"])
+      },
+      evidence: %{
+        "blocked_side_effect" => Map.get(interrupt, "blocked_side_effect"),
+        "policy" => Map.get(interrupt, "policy"),
+        "resume" => resume
+      }
+    ]
+  end
+
+  defp model_routing_exhausted_run_decision_opts(issue, interrupt, opts) do
+    run_ledger = Keyword.get(opts, :run_ledger)
+    resume = Map.get(interrupt, "resume", %{})
+    fallback = Map.get(interrupt, "model_fallback", %{})
+
+    [
+      issue: issue,
+      run_id: run_ledger_run_id(run_ledger),
+      run_dir: run_ledger_run_dir(run_ledger),
+      session_id: Map.get(resume, "session_id"),
+      run_ref: Map.get(resume, "run_ref"),
+      retry_attempt: Map.get(resume, "retry_attempt"),
+      input_signals: %{
+        "failed_candidate" => Map.get(fallback, "failed_candidate"),
+        "fallback_exhausted" => Map.get(fallback, "exhausted")
+      },
+      evidence: %{
+        "model_fallback" => fallback,
+        "resume" => resume
+      }
+    ]
+  end
+
+  defp run_ledger_run_id(%RunLedger{run_id: run_id}), do: run_id
+  defp run_ledger_run_id(_ledger), do: nil
+
+  defp run_ledger_run_dir(%RunLedger{run_dir: run_dir}), do: run_dir
+  defp run_ledger_run_dir(_ledger), do: nil
 
   defp final_report_interrupt(context, issue, effective_run_ref, analysis, final_report, turn_number, classification) do
     Interrupt.final_report_invalid(%{
