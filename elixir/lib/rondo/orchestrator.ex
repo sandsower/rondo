@@ -544,12 +544,12 @@ defmodule Rondo.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, true, issue.state)
+        terminate_running_issue(state, issue.id, true, issue.state, :terminated)
 
       !issue_routable_to_worker?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false, issue.state)
+        terminate_running_issue(state, issue.id, false, issue.state, :terminated)
 
       active_issue_state?(issue.state, active_states) ->
         refresh_running_issue_state(state, issue)
@@ -557,7 +557,7 @@ defmodule Rondo.Orchestrator do
       true ->
         Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false, issue.state)
+        terminate_running_issue(state, issue.id, false, issue.state, :handoff)
     end
   end
 
@@ -650,7 +650,7 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace, final_state \\ nil) do
+  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace, final_state \\ nil, reason \\ :terminated) do
     case Map.get(state.running, issue_id) do
       nil ->
         release_issue_claim(state, issue_id)
@@ -659,7 +659,7 @@ defmodule Rondo.Orchestrator do
         running_entry = set_running_entry_final_state(running_entry, final_state)
 
         state = record_session_completion_totals(state, running_entry)
-        state = archive_running_entry(state, running_entry, :terminated)
+        state = archive_running_entry(state, running_entry, reason)
 
         if cleanup_workspace do
           cleanup_issue_workspace(identifier, Map.get(running_entry, :ledger))
@@ -2541,23 +2541,25 @@ defmodule Rondo.Orchestrator do
     identifier = Map.get(running_entry, :identifier)
     finished_at = DateTime.utc_now()
 
-    archived_entry = %{
-      issue_id: issue && issue.id,
-      identifier: identifier,
-      session_id: Map.get(running_entry, :session_id),
-      state: issue && issue.state,
-      started_at: Map.get(running_entry, :started_at),
-      finished_at: finished_at,
-      exit_reason: archive_exit_reason(reason),
-      turn_count: Map.get(running_entry, :turn_count, 0),
-      tokens: %{
-        input_tokens: Map.get(running_entry, :claude_input_tokens, 0),
-        output_tokens: Map.get(running_entry, :claude_output_tokens, 0),
-        total_tokens: Map.get(running_entry, :claude_total_tokens, 0)
-      },
-      latest_gate: Map.get(running_entry, :latest_gate),
-      event_log: Map.get(running_entry, :event_log, [])
-    }
+    archived_entry =
+      %{
+        issue_id: issue && issue.id,
+        identifier: identifier,
+        session_id: Map.get(running_entry, :session_id),
+        state: issue && issue.state,
+        started_at: Map.get(running_entry, :started_at),
+        finished_at: finished_at,
+        exit_reason: archive_exit_reason(reason),
+        turn_count: Map.get(running_entry, :turn_count, 0),
+        tokens: %{
+          input_tokens: Map.get(running_entry, :claude_input_tokens, 0),
+          output_tokens: Map.get(running_entry, :claude_output_tokens, 0),
+          total_tokens: Map.get(running_entry, :claude_total_tokens, 0)
+        },
+        latest_gate: Map.get(running_entry, :latest_gate),
+        event_log: Map.get(running_entry, :event_log, [])
+      }
+      |> maybe_put_non_active_state(reason, issue)
 
     archive_path = persist_archived_run(archived_entry)
 
@@ -2568,6 +2570,7 @@ defmodule Rondo.Orchestrator do
     |> finalize_run_ledger_artifacts(ledger_status, Map.get(running_entry, :final_report))
     |> complete_run_ledger(ledger_status, %{
       exit_reason: archive_exit_reason(reason),
+      non_active_state: if(reason == :handoff, do: issue && issue.state, else: nil),
       session_id: Map.get(running_entry, :session_id),
       turn_count: Map.get(running_entry, :turn_count, 0)
     })
@@ -2583,11 +2586,21 @@ defmodule Rondo.Orchestrator do
 
   defp archive_exit_reason(:normal), do: "completed"
   defp archive_exit_reason(:terminated), do: "terminated"
+  defp archive_exit_reason(:handoff), do: "handed_off"
   defp archive_exit_reason(reason), do: "exited: #{inspect(reason)}"
 
   defp run_ledger_status(:normal), do: :completed
   defp run_ledger_status(:terminated), do: :terminated
+  defp run_ledger_status(:handoff), do: :handed_off
   defp run_ledger_status(_reason), do: :failed
+
+  defp maybe_put_non_active_state(entry, :handoff, %Issue{state: state}) when is_binary(state),
+    do: Map.put(entry, :non_active_state, state)
+
+  defp maybe_put_non_active_state(entry, :handoff, %{state: state}) when is_binary(state),
+    do: Map.put(entry, :non_active_state, state)
+
+  defp maybe_put_non_active_state(entry, _reason, _issue), do: entry
 
   # --- Per-run file persistence ---
   # Layout: <archive_root>/<IDENTIFIER>/<timestamp>.json
@@ -2788,7 +2801,7 @@ defmodule Rondo.Orchestrator do
     File.write!("/tmp/rondo_workspaces/rondo_debug.log", line, [:append])
   end
 
-  @archive_keys ~w(issue_id identifier session_id state started_at finished_at exit_reason turn_count tokens latest_gate event_log)
+  @archive_keys ~w(issue_id identifier session_id state started_at finished_at exit_reason non_active_state turn_count tokens latest_gate event_log)
   @token_keys ~w(input_tokens output_tokens total_tokens)
   @event_keys ~w(at event message tokens)
 

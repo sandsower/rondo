@@ -708,6 +708,7 @@ defmodule Rondo.RunLedger do
   end
 
   defp terminal_checkpoint_kind("completed"), do: :completed
+  defp terminal_checkpoint_kind("handed_off"), do: :handed_off
   defp terminal_checkpoint_kind("terminated"), do: :terminated
   defp terminal_checkpoint_kind(_status), do: :failed
 

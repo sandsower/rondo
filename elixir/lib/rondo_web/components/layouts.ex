@@ -234,7 +234,9 @@ defmodule RondoWeb.Layouts do
                   this.chart.data.datasets[0].data = payload.values;
                   var c = RondoTheme.colors();
                   this.chart.data.datasets[0].backgroundColor = payload.colors.map(function(t) {
-                    return t === 'completed' ? c.success + 'aa' : c.danger + 'aa';
+                    if (t === 'completed') return c.success + 'aa';
+                    if (t === 'handed_off') return c.accent + 'aa';
+                    return c.danger + 'aa';
                   });
                   this.chart.update('none');
                 });

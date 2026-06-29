@@ -134,6 +134,7 @@ body {
 .state-badge-active { background: var(--success-light); color: var(--success); }
 .state-badge-danger { background: var(--danger-light); color: var(--danger); }
 .state-badge-warning { background: var(--warning-light); color: var(--warning); }
+.state-badge-handoff { background: var(--accent-light); color: var(--accent); }
 
 .session-stack { display: flex; flex-direction: column; gap: 2px; }
 .subtle-button { background: none; border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 2px 8px; font-size: 11px; cursor: pointer; color: var(--text-secondary); }

@@ -256,6 +256,35 @@ defmodule Rondo.RunLedgerTest do
     assert Enum.any?(failed_manifest["checkpoints"], &(&1["kind"] == "failed"))
   end
 
+  test "complete_run(:handed_off) records handoff status and checkpoint" do
+    workspace_root = tmp_dir("ledger-handoff")
+    issue = issue_fixture()
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "cafe02"
+             )
+
+    assert {:ok, ledger} =
+             RunLedger.complete_run(
+               ledger,
+               :handed_off,
+               %{
+                 exit_reason: "handed_off",
+                 non_active_state: "In Review",
+                 session_id: "sess-1",
+                 turn_count: 3
+               },
+               timestamp: @now
+             )
+
+    manifest = decode_json!(ledger.manifest_path)
+    assert manifest["status"] == "handed_off"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "handed_off"))
+  end
+
   test "pause_run writes interrupt checkpoint and paused manifest state" do
     workspace_root = tmp_dir("ledger-pause")
     issue = issue_fixture()
