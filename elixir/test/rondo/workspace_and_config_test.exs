@@ -925,6 +925,32 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Config.claude_command() == "claude"
   end
 
+  test "config wires the owned-branch handoff policy file" do
+    expected_policy_file = Path.expand("../../..", __DIR__) |> Path.join(".beislid/action-policy.json")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      action_policy_policy_file: expected_policy_file
+    )
+
+    assert :ok = Config.validate!()
+    assert Config.action_policy_policy_file() == expected_policy_file
+    assert %{policy_file: ^expected_policy_file} = Config.action_policy()
+
+    sandbox_status = %{baseline: "none", default_branch: false, uncommitted_changes: false}
+
+    assert {:ok, %{"decision" => "allow"}} =
+             Rondo.ActionPolicy.evaluate("git.push", ["git-remote"],
+               policy_file: expected_policy_file,
+               sandbox_status: sandbox_status
+             )
+
+    assert {:ok, %{"decision" => "allow"}} =
+             Rondo.ActionPolicy.evaluate("gh.pr.create", ["git-remote"],
+               policy_file: expected_policy_file,
+               sandbox_status: sandbox_status
+             )
+  end
+
   test "config preserves model routing step hints" do
     write_workflow_file!(Workflow.workflow_file_path(),
       model_routing: %{

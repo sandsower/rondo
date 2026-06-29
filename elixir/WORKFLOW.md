@@ -78,6 +78,10 @@ process_provider:
   kind: native
   required: false
   artifact_path: null
+action_policy:
+  command: beislid
+  run_mode: unattended-auto
+  policy_file: ../.beislid/action-policy.json
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`
