@@ -3698,6 +3698,49 @@ defmodule Rondo.OrchestratorStatusTest do
     assert event.tokens.total_tokens == 150
   end
 
+  test "snapshot normalizes archived run timestamps" do
+    issue = %Issue{
+      id: "issue-archive-normalize-timestamps",
+      identifier: "MT-402",
+      title: "Archive timestamp normalization",
+      description: "Verify archived snapshot timestamps are normalized",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-402"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :ArchiveTimestampNormalizationOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: GenServer.stop(pid, :normal)
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    archived_entry = %{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      session_id: "sess-archive-string",
+      state: issue.state,
+      started_at: "2026-06-29T13:19:45.206052Z",
+      finished_at: "2026-06-29T13:20:45.206052Z",
+      exit_reason: "completed",
+      turn_count: 2,
+      tokens: %{input_tokens: 50, output_tokens: 100, total_tokens: 150},
+      event_log: []
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      Map.put(initial_state, :archived_runs, [archived_entry])
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+    [archived] = snapshot.archived
+
+    assert %DateTime{} = archived.started_at
+    assert %DateTime{} = archived.finished_at
+  end
+
   test "orchestrator pauses when the final report text reports blocked next_state without schema JSON" do
     workspace_root = tmp_dir("orchestrator-final-report-blocked")
 

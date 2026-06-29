@@ -2376,7 +2376,9 @@ defmodule Rondo.Orchestrator do
        running: running,
        retrying: retrying,
        paused: paused,
-       archived: Map.get(state, :archived_runs, []),
+       archived:
+         Map.get(state, :archived_runs, [])
+         |> Enum.map(&normalize_archived_run_snapshot/1),
        claude_totals: state.claude_totals,
        rate_limits: Map.get(state, :claude_rate_limits),
        polling: %{
@@ -3222,6 +3224,14 @@ defmodule Rondo.Orchestrator do
   end
 
   defp parse_datetime(other), do: other
+
+  defp normalize_archived_run_snapshot(entry) when is_map(entry) do
+    entry
+    |> Map.update(:started_at, nil, &parse_datetime/1)
+    |> Map.update(:finished_at, nil, &parse_datetime/1)
+  end
+
+  defp normalize_archived_run_snapshot(entry), do: entry
 
   defp deserialize_token_map(tokens) when is_map(tokens), do: atomize_allowed_keys(tokens, @token_keys)
   defp deserialize_token_map(tokens), do: tokens
