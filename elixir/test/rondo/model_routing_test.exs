@@ -292,6 +292,35 @@ defmodule Rondo.ModelRoutingTest do
              )
   end
 
+  test "repo step explicit model survives higher-precedence tier-only context" do
+    assert %{
+             status: :honored,
+             requested_tier: "heavy",
+             resolved: %{adapter: nil, model: "repo-step-model"},
+             context: %{stage: "initial_spawn", skill: "kickoff"}
+           } =
+             ModelRouting.resolve(
+               routing_context: %{stage: :initial_spawn},
+               source_contract: %{
+                 model_routing_hints: %{"initial" => %{"skill" => "kickoff", "tier" => "heavy"}}
+               },
+               repo_model_routing: %{
+                 defaults: %{tier: "standard", mode: "prefer"},
+                 step_hints: %{
+                   initial: %{
+                     skill: "kickoff",
+                     tier: "heavy",
+                     model: "repo-step-model"
+                   }
+                 },
+                 tiers: %{
+                   heavy: [%{adapter: "pi", model: "repo-step-model"}],
+                   standard: [%{adapter: "pi", model: "openai-codex/gpt-5.4-mini"}]
+                 }
+               }
+             )
+  end
+
   test "non-matching repo step hints fall back to defaults" do
     assert %{
              status: :honored,

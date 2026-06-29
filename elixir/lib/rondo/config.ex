@@ -1142,6 +1142,8 @@ defmodule Rondo.Config do
     hints
     |> Enum.reduce(%{}, fn {key, value}, acc ->
       case normalize_model_routing_step_hints_key(key) do
+        :initial -> Map.put_new(acc, :initial, value)
+        :initial_spawn -> Map.put(acc, :initial, value)
         nil -> acc
         normalized -> Map.put(acc, normalized, value)
       end
@@ -1150,7 +1152,8 @@ defmodule Rondo.Config do
 
   defp normalize_model_routing_step_hints(_hints), do: :omit
 
-  defp normalize_model_routing_step_hints_key(value) when value in ["initial", :initial, "initial_spawn", :initial_spawn], do: :initial
+  defp normalize_model_routing_step_hints_key(value) when value in ["initial", :initial], do: :initial
+  defp normalize_model_routing_step_hints_key(value) when value in ["initial_spawn", :initial_spawn], do: :initial_spawn
   defp normalize_model_routing_step_hints_key(value) when value in ["steps", :steps], do: :steps
   defp normalize_model_routing_step_hints_key(value) when value in ["phases", :phases], do: :phases
   defp normalize_model_routing_step_hints_key(_value), do: nil

@@ -66,9 +66,9 @@ defmodule Rondo.ModelRouting do
       repo_routing
       |> repo_default_hints()
       |> apply_hint_map(provider_hint_map)
+      |> maybe_clear_broad_model_for_context(context_hint_map)
       |> apply_hint_map(repo_step_context_hints || %{})
       |> apply_hint_map(provider_context_hints || %{})
-      |> maybe_clear_broad_model_for_context(context_hint_map)
       |> apply_hint_map(source_hint_map)
       |> apply_hint_map(source_context_hints || %{})
 
@@ -172,7 +172,7 @@ defmodule Rondo.ModelRouting do
   defp context_specific_hints(_hints, context) when map_size(context) == 0, do: nil
 
   defp context_specific_hints(hints, %{stage: "initial_spawn"} = context) when is_map(hints) do
-    direct_context_hints(hints, [:initial, :initial_spawn]) || matching_context_hints(hints, context) ||
+    direct_context_hints(hints, [:initial_spawn, :initial]) || matching_context_hints(hints, context) ||
       unambiguous_stage_less_context_hints(hints)
   end
 

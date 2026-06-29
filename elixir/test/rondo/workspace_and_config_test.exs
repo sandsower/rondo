@@ -925,6 +925,28 @@ defmodule Rondo.WorkspaceAndConfigTest do
            }
   end
 
+  test "config prefers initial_spawn over initial when both aliases are present" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      model_routing: %{
+        "step_hints" => %{
+          "initial" => %{"skill" => "kickoff", "tier" => "standard"},
+          "initial_spawn" => %{"skill" => "kickoff", "tier" => "frontier"}
+        }
+      }
+    )
+
+    assert :ok = Config.validate!()
+
+    assert Config.model_routing() == %{
+             tiers: %{},
+             floor: %{},
+             defaults: %{},
+             step_hints: %{
+               initial: %{"skill" => "kickoff", "tier" => "frontier"}
+             }
+           }
+  end
+
   test "config ignores malformed model routing step hints" do
     write_workflow_file!(Workflow.workflow_file_path(),
       model_routing: %{"step_hints" => "bad"}
