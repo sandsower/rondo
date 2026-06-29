@@ -680,8 +680,8 @@ defmodule Rondo.StatusDashboard do
 
   defp gate_status_color(%{latest_gate: %{status: status}}) when status in [:pass, "pass"], do: @ansi_green
   defp gate_status_color(%{latest_gate: %{status: status}}) when status in [:reused, "reused", :skipped, "skipped"], do: @ansi_gray
-  defp gate_status_color(%{latest_gate: %{status: status}}) when status in [:fail, "fail"], do: @ansi_red
-  defp gate_status_color(%{latest_gate: %{status: status}}) when status in [:error, "error", :timeout, "timeout"], do: @ansi_orange
+  defp gate_status_color(%{latest_gate: %{status: status}}) when status in [:policy_denied, "policy_denied", :fail, "fail"], do: @ansi_red
+  defp gate_status_color(%{latest_gate: %{status: status}}) when status in [:policy_blocked, "policy_blocked", :error, "error", :timeout, "timeout"], do: @ansi_orange
   defp gate_status_color(_running_entry), do: @ansi_blue
 
   defp format_retry_rows(retrying) do

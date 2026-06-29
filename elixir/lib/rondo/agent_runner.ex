@@ -17,6 +17,7 @@ defmodule Rondo.AgentRunner do
     ProcessProvider,
     RunDecision,
     RunLedger,
+    SideEffectPolicy,
     Tracker,
     Workspace
   }
@@ -112,6 +113,11 @@ defmodule Rondo.AgentRunner do
     )
 
     exit({:action_policy_guidance_required, interrupt})
+  end
+
+  defp handle_agent_run_error(issue, {:action_policy_denied, envelope}, _recipient, _opts) when is_map(envelope) do
+    Logger.warning("Agent run stopped for #{issue_context(issue)}: action policy denied")
+    exit({:action_policy_denied, envelope})
   end
 
   defp handle_agent_run_error(issue, {:workspace_not_ready, workspace}, _recipient, _opts) do
@@ -1017,7 +1023,7 @@ defmodule Rondo.AgentRunner do
 
       {:error, summary} when is_map(summary) ->
         send_gate_update(context.claude_update_recipient, issue, summary)
-        {:error, {:gate_failed, gate_error_summary(summary)}}
+        {:error, gate_failure_reason(summary)}
 
       {:error, reason} ->
         {:error, {:gate_error, reason}}
@@ -1153,6 +1159,55 @@ defmodule Rondo.AgentRunner do
     %{
       status: summary.status,
       failed: Enum.map(summary.results, &Map.take(&1, [:name, :status, :exit_status, :retryable, :environment_failure]))
+    }
+  end
+
+  defp gate_failure_reason(%{status: status} = summary) when status in [:policy_blocked, "policy_blocked"] do
+    case policy_gate_result(summary, [:policy_blocked, "policy_blocked"]) do
+      nil -> {:gate_failed, gate_error_summary(summary)}
+      result -> {:action_policy_guidance_required, gate_guidance_interrupt(result)}
+    end
+  end
+
+  defp gate_failure_reason(%{status: status} = summary) when status in [:policy_denied, "policy_denied"] do
+    case policy_gate_result(summary, [:policy_denied, "policy_denied"]) do
+      nil -> {:gate_failed, gate_error_summary(summary)}
+      result -> {:action_policy_denied, gate_policy_envelope(result)}
+    end
+  end
+
+  defp gate_failure_reason(summary), do: {:gate_failed, gate_error_summary(summary)}
+
+  defp policy_gate_result(summary, statuses) when is_list(statuses) do
+    Enum.find(List.wrap(summary.results), fn result ->
+      status = Map.get(result, :status)
+      status_text = if is_atom(status), do: Atom.to_string(status), else: status
+      status in statuses or status_text in statuses
+    end)
+  end
+
+  defp gate_guidance_interrupt(result) do
+    SideEffectPolicy.guidance_interrupt(gate_side_effect(result), gate_policy_envelope(result))
+  end
+
+  defp gate_policy_envelope(result), do: Map.get(result, :policy_decision) || %{}
+
+  defp gate_side_effect(result) do
+    policy_decision = gate_policy_envelope(result)
+    command = Map.get(result, :command)
+    action = Map.get(policy_decision, "action") || Map.get(result, :name) || "gate"
+    classes = Map.get(policy_decision, "classes") || []
+
+    %{
+      action: action,
+      classes: classes,
+      label: Map.get(result, :name) || action,
+      operation: command,
+      command: command,
+      required: true,
+      resume_safe: true,
+      skip_behavior: "block",
+      side_effect_id: "gate:#{Map.get(result, :name) || action}"
     }
   end
 

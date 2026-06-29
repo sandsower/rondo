@@ -2674,6 +2674,104 @@ gate
     end
   end
 
+  test "agent runner pauses when a configured gate asks for guidance" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-gate-ask-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-GATE-ASK/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        action_policy_command: fake_gate_action_policy("ask"),
+        gates: [%{name: "read proof", command: "touch should-not-run", timeout_ms: 1_000}]
+      )
+
+      parent = start_update_recorder(self())
+
+      issue = %Issue{
+        id: "issue-gate-ask",
+        identifier: "MT-GATE-ASK",
+        title: "Gate ask proof",
+        description: "Exercise gate guidance",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert {:action_policy_guidance_required, interrupt} =
+               catch_exit(
+                 AgentRunner.run(issue, parent,
+                   agent_adapter: FakeAdapter,
+                   issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                   run_dir: run_dir,
+                   test_pid: parent
+                 )
+               )
+
+      assert interrupt["reason"] == "action_policy_guidance_required"
+      assert interrupt["blocked_side_effect"]["action"] == "file.read"
+      assert interrupt["blocked_side_effect"]["command"] == "touch should-not-run"
+      assert interrupt["policy"]["decision"] == "ask"
+      assert Enum.any?(interrupt["suggested_responses"], &(&1["id"] == "approve_once"))
+
+      assert_receive {:claude_worker_update, "issue-gate-ask", %{event: :gates_completed, raw: raw}}, 500
+      assert raw.status == :policy_blocked
+      assert [%{status: :policy_blocked, policy_decision: %{"decision" => "ask", "side_effect_status" => "blocked"}}] = raw.results
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner stops with explicit policy-denied classification when a configured gate is denied" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-gate-deny-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-GATE-DENY/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        action_policy_command: fake_gate_action_policy("deny"),
+        gates: [%{name: "read proof", command: "touch should-not-run", timeout_ms: 1_000}]
+      )
+
+      parent = start_update_recorder(self())
+
+      issue = %Issue{
+        id: "issue-gate-deny",
+        identifier: "MT-GATE-DENY",
+        title: "Gate deny proof",
+        description: "Exercise policy denial",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert {:action_policy_denied, envelope} =
+               catch_exit(
+                 AgentRunner.run(issue, parent,
+                   agent_adapter: FakeAdapter,
+                   issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                   run_dir: run_dir,
+                   test_pid: parent
+                 )
+               )
+
+      assert envelope["decision"] == "deny"
+      assert envelope["action"] == "file.read"
+      assert envelope["classes"] == ["read"]
+
+      assert_receive {:claude_worker_update, "issue-gate-deny", %{event: :gates_completed, raw: raw}}, 500
+      assert raw.status == :policy_denied
+      assert [%{status: :policy_denied, policy_decision: %{"decision" => "deny", "side_effect_status" => "blocked"}}] = raw.results
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   defp fake_action_policy(decision) do
     path = Path.join(System.tmp_dir!(), "rondo-agent-adapter-policy-#{System.unique_integer([:positive])}")
     File.mkdir_p!(Path.dirname(path))
@@ -2690,6 +2788,33 @@ gate
       esac
     done
     printf '{"decision":"#{decision}","action":"%s","mode":"%s","classes":["read"]}' "$action" "$mode"
+    """)
+
+    File.chmod!(path, 0o755)
+    path
+  end
+
+  defp fake_gate_action_policy(decision) do
+    path = Path.join(System.tmp_dir!(), "rondo-agent-adapter-gate-policy-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.dirname(path))
+
+    File.write!(path, """
+    #!/bin/sh
+    action=""
+    mode=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --action) action="$2"; shift 2 ;;
+        --mode) mode="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ "$action" = "file.read" ]; then
+      final_decision="#{decision}"
+    else
+      final_decision="allow"
+    fi
+    printf '{"decision":"%s","action":"%s","mode":"%s","classes":["read"]}' "$final_decision" "$action" "$mode"
     """)
 
     File.chmod!(path, 0o755)

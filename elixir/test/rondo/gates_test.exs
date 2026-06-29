@@ -385,9 +385,11 @@ run
                action_policy_command: fake_action_policy("deny")
              )
 
+    assert denied_summary.status == :policy_denied
+
     assert [
              %{
-               status: :error,
+               status: :policy_denied,
                retryable: false,
                environment_failure: false,
                policy_decision: %{"decision" => "deny", "side_effect_status" => "blocked"}
@@ -404,7 +406,8 @@ run
                action_policy_command: fake_action_policy("ask")
              )
 
-    assert [%{policy_decision: %{"decision" => "ask", "side_effect_status" => "blocked"}}] = ask_summary.results
+    assert ask_summary.status == :policy_blocked
+    assert [%{policy_decision: %{"decision" => "ask", "side_effect_status" => "blocked"}, status: :policy_blocked}] = ask_summary.results
     refute File.exists?(Path.join(workspace, "should-not-run-either"))
   end
 
