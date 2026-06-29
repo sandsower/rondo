@@ -474,6 +474,46 @@ defmodule Rondo.Linear.Client do
     end
   end
 
+  @spec graphql_raw(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def graphql_raw(query, variables \\ %{}, opts \\ [])
+      when is_binary(query) and is_map(variables) and is_list(opts) do
+    payload = build_graphql_payload(query, variables, Keyword.get(opts, :operation_name))
+    request_fun = Keyword.get(opts, :request_fun, &post_graphql_request/2)
+
+    with {:ok, headers} <- graphql_headers(),
+         {:ok, response} <- request_fun.(payload, headers) do
+      case response do
+        %{status: 200, body: body} ->
+          {:ok, body}
+
+        %{status: status, body: body} ->
+          Logger.error(
+            "Linear GraphQL request failed status=#{status}" <>
+              linear_error_context(payload, response)
+          )
+
+          {:error, {:linear_api_status, status, body}}
+
+        other ->
+          Logger.error("Linear GraphQL request failed with malformed response=#{inspect(other)}")
+
+          {:error, {:linear_api_request, {:malformed_response, other}}}
+      end
+    else
+      {:ok, response} ->
+        Logger.error(
+          "Linear GraphQL request failed status=#{response.status}" <>
+            linear_error_context(payload, response)
+        )
+
+        {:error, {:linear_api_status, response.status, Map.get(response, :body) || Map.get(response, "body")}}
+
+      {:error, reason} ->
+        Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
+        {:error, {:linear_api_request, reason}}
+    end
+  end
+
   @doc false
   @spec normalize_issue_context_for_test(map(), String.t() | nil) :: map() | nil
   def normalize_issue_context_for_test(issue, assignee \\ nil) when is_map(issue) do
