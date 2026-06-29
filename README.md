@@ -38,7 +38,8 @@ See [elixir/README.md](elixir/README.md) for setup and usage.
 - **Continuations:** `claude --resume <session_id>` instead of Codex thread turns
 - **Permissions:** `--dangerously-skip-permissions` + `--allowedTools` instead of per-request approval cycles
 - **Config:** `claude.*` fields replace `codex.*` throughout WORKFLOW.md and the codebase
-- **Dashboard:** Real-time token tracking, phase display (hooks/claude), orphan process cleanup on shutdown
+- **Dashboard:** Phoenix LiveView/Bandit dashboard with real-time token tracking, phase display
+  (hooks/claude), orphan process cleanup on shutdown
 
 ## Releases
 
