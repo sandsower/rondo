@@ -7,7 +7,7 @@ defmodule Rondo.AgentRunner do
   alias Rondo.Agent.Adapter
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.PiAdapter
-  alias Rondo.{Config, FinalReport, Gates, Interrupt, ModelRouting, ProcessProvider, RunLedger, Tracker, Workspace}
+  alias Rondo.{Config, FinalReport, Gates, Interrupt, ModelRouting, ProcessProvider, Tracker, Workspace}
   alias Rondo.Linear.Issue
   alias Rondo.ProcessProvider.{Beislid, Native}
   alias Rondo.Tracker.UpdateDetector
@@ -128,6 +128,8 @@ defmodule Rondo.AgentRunner do
          capabilities: Map.get(event, :capabilities),
          final_report: Map.get(event, :final_report),
          diff_source: Map.get(event, :diff_source),
+         model_routing: Map.get(event, :model_routing),
+         source: Map.get(event, :source),
          raw: compatibility_raw(event)
        }}
     )
@@ -137,9 +139,27 @@ defmodule Rondo.AgentRunner do
 
   defp send_claude_update(_recipient, _issue, _event), do: :ok
 
-  defp compatibility_event_type(%{adapter: "claude_code", raw: %{event_type: event_type}}) when is_atom(event_type), do: event_type
-  defp compatibility_event_type(%{event_type: event_type}) when is_atom(event_type), do: event_type
-  defp compatibility_event_type(_event), do: :unknown
+  defp dispatch_model_routing_decision(recipient, issue, routing, source) do
+    send_claude_update(recipient, issue, %{
+      event: :model_routing_decision,
+      method: "model_routing_decision",
+      model_routing: routing,
+      source: source
+    })
+  end
+
+  defp compatibility_event_type(event) when is_map(event) do
+    raw_event_type = get_in(event, [:raw, :event_type])
+    event_type = Map.get(event, :event_type)
+    event_name = Map.get(event, :event)
+
+    cond do
+      is_atom(raw_event_type) and not is_nil(raw_event_type) -> raw_event_type
+      is_atom(event_type) and not is_nil(event_type) -> event_type
+      is_atom(event_name) and not is_nil(event_name) -> event_name
+      true -> :unknown
+    end
+  end
 
   defp compatibility_raw(%{adapter: "claude_code", raw: raw}) when is_map(raw), do: raw
   defp compatibility_raw(event), do: event
@@ -166,9 +186,9 @@ defmodule Rondo.AgentRunner do
   defp run_agent_turns(workspace, issue, claude_update_recipient, opts) do
     with {:ok, provider} <- process_provider_module(opts),
          :ok <- preflight_process_provider(provider, opts),
-         {:ok, opts} <- model_routing_opts(provider, nil, opts, 1),
+         {:ok, opts} <- model_routing_opts(provider, nil, issue, claude_update_recipient, opts, 1),
          {:ok, adapter} <- adapter_module(opts),
-         {:ok, opts} <- ensure_model_selection_supported(adapter, opts, 1) do
+         {:ok, opts} <- ensure_model_selection_supported(adapter, issue, claude_update_recipient, opts, 1) do
       issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
       issue_context_fetcher = Keyword.get(opts, :issue_context_fetcher, &Tracker.fetch_issue_contexts_by_ids/1)
       issue_context_snapshot = initial_issue_context_snapshot(issue, issue_context_fetcher)
@@ -191,7 +211,7 @@ defmodule Rondo.AgentRunner do
     end
   end
 
-  defp model_routing_opts(provider, current_adapter, opts, turn_number) do
+  defp model_routing_opts(provider, current_adapter, issue, claude_update_recipient, opts, turn_number) do
     routing_context = model_routing_context_for_turn(opts, turn_number)
     base_opts = model_routing_base_opts(opts, routing_context)
     routing = resolve_model_routing(provider, base_opts)
@@ -199,23 +219,22 @@ defmodule Rondo.AgentRunner do
     source = model_routing_source(provider_id(provider), routing_context, turn_number)
 
     if routing.status == :blocked do
-      with {:ok, _opts} <- maybe_record_model_routing(Keyword.put(base_opts, :model_routing, routing), routing, source) do
-        {:error, {:model_routing_blocked, routing}}
-      end
+      dispatch_model_routing_decision(claude_update_recipient, issue, routing, source)
+      {:error, {:model_routing_blocked, routing}}
     else
       {:ok, apply_model_routing_opts(base_opts, routing)}
     end
   end
 
-  defp ensure_model_selection_supported(adapter, opts, turn_number) do
+  defp ensure_model_selection_supported(adapter, issue, claude_update_recipient, opts, turn_number) do
     routing = Keyword.get(opts, :model_routing)
     routing_context = Keyword.get(opts, :model_routing_context, %{})
     source = model_routing_source(provider_id(adapter), routing_context, turn_number)
 
     if Keyword.has_key?(opts, :model) and model_selection_unsupported?(adapter, opts) do
-      handle_unsupported_model_selection(opts, routing, adapter, source)
+      handle_unsupported_model_selection(opts, routing, adapter, claude_update_recipient, issue, source)
     else
-      maybe_record_model_routing(opts, routing, source)
+      {:ok, opts}
     end
   end
 
@@ -234,21 +253,19 @@ defmodule Rondo.AgentRunner do
     error -> {:error, error}
   end
 
-  defp handle_unsupported_model_selection(opts, %{mode: :require} = routing, adapter, source) do
+  defp handle_unsupported_model_selection(_opts, %{mode: :require} = routing, adapter, claude_update_recipient, issue, source) do
     routing = unsupported_model_selection_routing(routing, adapter, :blocked)
-
-    with {:ok, _opts} <- maybe_record_model_routing(Keyword.put(opts, :model_routing, routing), routing, source) do
-      {:error, {:model_routing_blocked, routing}}
-    end
+    dispatch_model_routing_decision(claude_update_recipient, issue, routing, source)
+    {:error, {:model_routing_blocked, routing}}
   end
 
-  defp handle_unsupported_model_selection(opts, routing, adapter, source) when is_map(routing) do
+  defp handle_unsupported_model_selection(opts, routing, adapter, _claude_update_recipient, _issue, _source) when is_map(routing) do
     routing = unsupported_model_selection_routing(routing, adapter, :fallback)
-    opts = opts |> Keyword.delete(:model) |> Keyword.put(:model_routing, routing)
-    maybe_record_model_routing(opts, routing, source)
+    opts = opts |> Keyword.delete(:model) |> Keyword.delete(:agent_adapter) |> Keyword.put(:model_routing, routing)
+    {:ok, opts}
   end
 
-  defp handle_unsupported_model_selection(opts, _routing, _adapter, _source), do: {:ok, opts}
+  defp handle_unsupported_model_selection(opts, _routing, _adapter, _claude_update_recipient, _issue, _source), do: {:ok, opts}
 
   defp unsupported_model_selection_routing(routing, adapter, status) do
     %{routing | status: status, resolved: nil, reason: "adapter #{adapter.id()} does not support per-run model selection"}
@@ -298,7 +315,9 @@ defmodule Rondo.AgentRunner do
   end
 
   defp model_routing_base_opts(opts, routing_context) do
-    Keyword.put(opts, :model_routing_context, routing_context)
+    opts
+    |> maybe_clear_routed_model_state()
+    |> Keyword.put(:model_routing_context, routing_context)
   end
 
   defp maybe_bound_model_routing_to_adapter(%{resolved: %{adapter: desired_adapter}} = routing, current_adapter)
@@ -334,24 +353,45 @@ defmodule Rondo.AgentRunner do
   defp maybe_put_routed_adapter(opts, %{resolved: %{adapter: adapter}}) when is_binary(adapter), do: Keyword.put(opts, :agent_adapter, adapter)
   defp maybe_put_routed_adapter(opts, _routing), do: opts
 
-  defp maybe_record_model_routing(opts, routing, _source) when not is_map(routing), do: {:ok, opts}
-
-  defp maybe_record_model_routing(opts, routing, source) do
-    case Keyword.get(opts, :run_ledger) do
-      %RunLedger{} = ledger ->
-        with {:ok, ledger} <- RunLedger.record_model_routing_decision(ledger, routing, source: source) do
-          {:ok, Keyword.put(opts, :run_ledger, ledger)}
-        end
-
-      _ledger ->
-        {:ok, opts}
+  defp maybe_clear_routed_model_state(opts) do
+    if Keyword.has_key?(opts, :model_routing) do
+      opts
+      |> Keyword.delete(:model)
+      |> Keyword.delete(:agent_adapter)
+    else
+      opts
     end
   end
 
   defp do_run_agent_turns(context, issue, turn_number, run_ref, previous_final_report_fingerprint \\ nil) do
-    with {:ok, turn_opts} <- model_routing_opts(context.process_provider, context.adapter, context.opts, turn_number),
-         {:ok, turn_opts} <- ensure_model_selection_supported(context.adapter, turn_opts, turn_number) do
+    with {:ok, turn_opts} <-
+           model_routing_opts(
+             context.process_provider,
+             context.adapter,
+             issue,
+             context.claude_update_recipient,
+             context.opts,
+             turn_number
+           ),
+         {:ok, turn_opts} <-
+           ensure_model_selection_supported(
+             context.adapter,
+             issue,
+             context.claude_update_recipient,
+             turn_opts,
+             turn_number
+           ) do
       turn_context = %{context | opts: turn_opts}
+      routing = Keyword.get(turn_context.opts, :model_routing)
+
+      routing_source =
+        model_routing_source(
+          provider_id(turn_context.adapter),
+          Keyword.get(turn_context.opts, :model_routing_context, %{}),
+          turn_number
+        )
+
+      :ok = dispatch_model_routing_decision(turn_context.claude_update_recipient, issue, routing, routing_source)
       prompt = build_turn_prompt(turn_context.process_provider, issue, turn_context.opts, turn_number, turn_context.max_turns)
 
       completion_ref = make_ref()

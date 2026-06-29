@@ -312,6 +312,7 @@ defmodule Rondo.RunLedger do
       capabilities: sanitize_value(agent_update_value(update, :capabilities)),
       final_report: sanitize_value(agent_update_value(update, :final_report)),
       diff_source: sanitize_value(agent_update_value(update, :diff_source)),
+      model_routing: sanitize_value(agent_update_value(update, :model_routing)),
       raw: sanitize_agent_raw(Map.get(update, :raw, Map.get(update, "raw", %{})))
     }
     |> drop_nil_values()
@@ -357,6 +358,7 @@ defmodule Rondo.RunLedger do
   defp checkpoint_kind_for_method("turn/failed"), do: "turn_failed"
   defp checkpoint_kind_for_method("turn/cancelled"), do: "turn_cancelled"
   defp checkpoint_kind_for_method("turn/diff/updated"), do: "edit_batch"
+  defp checkpoint_kind_for_method("model_routing_decision"), do: "model_routing_decision"
   defp checkpoint_kind_for_method(_method), do: nil
 
   defp checkpoint_kind_for_event(:claude_starting), do: "workspace_ready"
@@ -375,6 +377,8 @@ defmodule Rondo.RunLedger do
   defp checkpoint_kind_for_event("gates_reused"), do: "gates_reused"
   defp checkpoint_kind_for_event(:tracker_update_detected), do: "tracker_update_detected"
   defp checkpoint_kind_for_event("tracker_update_detected"), do: "tracker_update_detected"
+  defp checkpoint_kind_for_event(:model_routing_decision), do: "model_routing_decision"
+  defp checkpoint_kind_for_event("model_routing_decision"), do: "model_routing_decision"
   defp checkpoint_kind_for_event(_event), do: nil
 
   @doc "Returns the normalized agent event JSONL schema identifier."

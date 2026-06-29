@@ -1132,6 +1132,7 @@ defmodule Rondo.Orchestrator do
             retry_failure_reason: Keyword.get(attempt_metadata, :failure_reason),
             started_at: DateTime.utc_now(),
             latest_gate: nil,
+            model_routing_context: Keyword.get(agent_opts, :model_routing_context),
             event_log: []
           })
 
@@ -1376,7 +1377,8 @@ defmodule Rondo.Orchestrator do
       workspace: running_entry_workspace(running_entry),
       session_id: Map.get(running_entry, :session_id),
       run_ref: running_entry_run_ref(running_entry),
-      retry_attempt: Map.get(running_entry, :retry_attempt)
+      retry_attempt: Map.get(running_entry, :retry_attempt),
+      model_routing_context: Map.get(running_entry, :model_routing_context)
     }
   end
 
@@ -1402,6 +1404,7 @@ defmodule Rondo.Orchestrator do
       turn_count: Map.get(running_entry, :turn_count, 0),
       continuation_count: get_in(interrupt, ["final_report", "continuation_count"]) || 0,
       latest_gate: Map.get(running_entry, :latest_gate),
+      model_routing_context: Map.get(running_entry, :model_routing_context) || get_in(interrupt, ["resume", "model_routing_context"]),
       interrupt: interrupt,
       tracker_visibility: "known",
       ledger: ledger
@@ -1454,7 +1457,8 @@ defmodule Rondo.Orchestrator do
       state =
         start_agent_for_issue(state, issue, Map.get(paused_entry, :retry_attempt, 0), [], self(), ledger,
           initial_run_ref: run_ref,
-          operator_guidance: guidance
+          operator_guidance: guidance,
+          model_routing_context: Map.get(paused_entry, :model_routing_context)
         )
 
       {{:ok, %{status: :resumed, issue_id: issue_id}}, state}
@@ -1588,6 +1592,7 @@ defmodule Rondo.Orchestrator do
       turn_count: 0,
       continuation_count: 0,
       latest_gate: nil,
+      model_routing_context: get_in(interrupt, ["resume", "model_routing_context"]),
       interrupt: interrupt,
       tracker_visibility: "known",
       event_log: [],
