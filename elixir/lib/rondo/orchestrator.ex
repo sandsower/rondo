@@ -2021,6 +2021,8 @@ defmodule Rondo.Orchestrator do
           last_claude_message: metadata.last_claude_message,
           last_claude_event: metadata.last_claude_event,
           latest_gate: Map.get(metadata, :latest_gate),
+          model_routing: Map.get(metadata, :model_routing),
+          adapter: Map.get(metadata, :adapter),
           runtime_seconds: running_seconds(metadata.started_at, now),
           event_log: Map.get(metadata, :event_log, [])
         }
@@ -2127,6 +2129,7 @@ defmodule Rondo.Orchestrator do
         session_id: session_id_for_update(running_entry.session_id, update),
         run_ref: run_ref_for_update(Map.get(running_entry, :run_ref), update),
         final_report: final_report_for_update(Map.get(running_entry, :final_report), update),
+        model_routing: model_routing_for_update(Map.get(running_entry, :model_routing), update),
         last_claude_event: event,
         claude_input_tokens: claude_input_tokens + token_delta.input_tokens,
         claude_output_tokens: claude_output_tokens + token_delta.output_tokens,
@@ -2202,6 +2205,14 @@ defmodule Rondo.Orchestrator do
   defp adapter_for_update(_existing, %{adapter: adapter}) when is_binary(adapter), do: adapter
   defp adapter_for_update(_existing, %{"adapter" => adapter}) when is_binary(adapter), do: adapter
   defp adapter_for_update(existing, _update), do: existing
+
+  defp model_routing_for_update(existing, %{model_routing: routing}) when is_map(routing) and map_size(routing) > 0,
+    do: routing
+
+  defp model_routing_for_update(existing, %{"model_routing" => routing}) when is_map(routing) and map_size(routing) > 0,
+    do: routing
+
+  defp model_routing_for_update(existing, _update), do: existing
 
   defp final_report_for_update(existing, update) do
     case Map.get(update, :final_report) || Map.get(update, "final_report") do
@@ -2550,6 +2561,8 @@ defmodule Rondo.Orchestrator do
       finished_at: finished_at,
       exit_reason: archive_exit_reason(reason),
       turn_count: Map.get(running_entry, :turn_count, 0),
+      model_routing: Map.get(running_entry, :model_routing),
+      adapter: Map.get(running_entry, :adapter),
       tokens: %{
         input_tokens: Map.get(running_entry, :claude_input_tokens, 0),
         output_tokens: Map.get(running_entry, :claude_output_tokens, 0),
@@ -2788,7 +2801,7 @@ defmodule Rondo.Orchestrator do
     File.write!("/tmp/rondo_workspaces/rondo_debug.log", line, [:append])
   end
 
-  @archive_keys ~w(issue_id identifier session_id state started_at finished_at exit_reason turn_count tokens latest_gate event_log)
+  @archive_keys ~w(issue_id identifier session_id state started_at finished_at exit_reason turn_count tokens latest_gate event_log model_routing adapter)
   @token_keys ~w(input_tokens output_tokens total_tokens)
   @event_keys ~w(at event message tokens)
 

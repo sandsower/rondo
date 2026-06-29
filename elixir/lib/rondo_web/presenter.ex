@@ -3,7 +3,7 @@ defmodule RondoWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias Rondo.{Config, Orchestrator}
+  alias Rondo.{Config, ModelUsage, Orchestrator}
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
@@ -30,6 +30,7 @@ defmodule RondoWeb.Presenter do
           needs_guidance: Enum.map(needs_guidance, &needs_guidance_entry_payload/1),
           paused: Enum.map(paused, &paused_entry_payload/1),
           archived: group_archived_by_ticket(archived),
+          model_usage: ModelUsage.aggregate(running, archived),
           claude_totals: Map.get(snapshot, :claude_totals, %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}),
           rate_limits: Map.get(snapshot, :rate_limits)
         }
@@ -153,6 +154,8 @@ defmodule RondoWeb.Presenter do
         output_tokens: entry.claude_output_tokens,
         total_tokens: entry.claude_total_tokens
       },
+      model_routing: Map.get(entry, :model_routing),
+      adapter: Map.get(entry, :adapter),
       event_log: format_event_log(Map.get(entry, :event_log, []))
     }
   end
@@ -404,6 +407,8 @@ defmodule RondoWeb.Presenter do
       turn_count: entry.turn_count,
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       tokens: entry.tokens,
+      model_routing: Map.get(entry, :model_routing),
+      adapter: Map.get(entry, :adapter),
       filename: run_filename(entry.started_at)
     }
   end
