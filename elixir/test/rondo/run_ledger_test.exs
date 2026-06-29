@@ -284,6 +284,19 @@ defmodule Rondo.RunLedgerTest do
     assert {:ok, ledger} = RunLedger.link_artifacts(ledger, [%{kind: "invalid"}])
     assert ledger.manifest == artifact_manifest
 
+    assert {:error, {:lock_failed, :enoent}} =
+             RunLedger.link_artifacts(
+               %RunLedger{
+                 run_id: "run-missing",
+                 run_dir: Path.join([workspace_root, "missing", "run"]),
+                 manifest_path: Path.join([workspace_root, "missing", "run", "manifest.json"]),
+                 next_seq: 1,
+                 manifest: %{},
+                 policy_file: nil
+               },
+               [%{kind: "archive", path: "artifacts/report.json"}]
+             )
+
     assert {:ok, failed_ledger} =
              RunLedger.create_run(issue,
                workspace_root: workspace_root,
@@ -436,6 +449,25 @@ defmodule Rondo.RunLedgerTest do
            }
 
     assert RunLedger.agent_metadata_for_agent_update(%{adapter: "atom-key-adapter"}) == %{"adapter" => "atom-key-adapter"}
+  end
+
+  test "checkpoint_payload_for_agent_update preserves safe raw counters when they arrive as strings" do
+    payload =
+      RunLedger.checkpoint_payload_for_agent_update(%{
+        "raw" => %{
+          "method" => "turn/completed",
+          "result" => "private result",
+          "turn_number" => "4",
+          "retry_attempt" => "1"
+        }
+      })
+
+    assert payload.raw == %{
+             "method" => "turn/completed",
+             "result" => "[REDACTED]",
+             "turn_number" => "4",
+             "retry_attempt" => "1"
+           }
   end
 
   test "record_attempt_chain persists escalation chain checkpoints" do
