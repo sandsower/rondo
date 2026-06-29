@@ -29,6 +29,7 @@ defmodule RondoWeb.Router do
     get("/refresh", ObservabilityApiController, :method_not_allowed)
     post("/refresh", ObservabilityApiController, :refresh)
     post("/guidance", ObservabilityApiController, :submit_guidance)
+    get("/models", ObservabilityApiController, :models)
     get("/:issue_identifier", ObservabilityApiController, :issue)
   end
 

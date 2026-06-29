@@ -222,6 +222,38 @@ defmodule RondoWeb.DashboardLive do
 
         <div class="chart-grid">
           <div class="chart-card">
+            <p class="chart-card-title">Model usage</p>
+            <div class="model-usage-grid">
+              <div class="model-usage-item">
+                <span class="model-usage-provider">Codex</span>
+                <span class="model-usage-pct"><%= format_model_pct(@payload.model_usage.codex_pct) %></span>
+                <span class="model-usage-detail"><%= model_usage_run_count(@payload.model_usage, "codex") %> runs</span>
+              </div>
+              <div class="model-usage-item">
+                <span class="model-usage-provider">OpenRouter</span>
+                <span class="model-usage-pct"><%= format_model_pct(@payload.model_usage.openrouter_pct) %></span>
+                <span class="model-usage-detail"><%= model_usage_run_count(@payload.model_usage, "openrouter") %> runs</span>
+              </div>
+            </div>
+            <%= if Map.get(@payload.model_usage, :by_provider) |> Map.keys() |> Enum.reject(&(&1 in ["codex", "openrouter"])) != [] do %>
+              <div class="model-usage-others" style="margin-top: 8px;">
+                <span class="muted" style="font-size: 11px;">
+                  Other: <%= @payload.model_usage.by_provider |> Map.keys() |> Enum.reject(&(&1 in ["codex", "openrouter"])) |> Enum.map_join(", ", &("#{&1} #{format_model_pct(Map.get(@payload.model_usage.by_provider, &1).run_pct)}")) %>
+                </span>
+              </div>
+            <% end %>
+            <%= if Map.get(@payload.model_usage, :by_model) |> map_size() > 0 do %>
+              <details style="margin-top: 8px; font-size: 11px;">
+                <summary style="cursor: pointer; color: var(--text-muted);">By model (<%= map_size(@payload.model_usage.by_model) %> models)</summary>
+                <div style="margin-top: 6px; display: flex; flex-direction: column; gap: 2px;">
+                  <%= for {model, info} <- @payload.model_usage.by_model |> Enum.sort_by(&elem(&1, 1).run_count, :desc) do %>
+                    <span class="muted"><%= model %>: <%= info.run_count %> run<%= if info.run_count != 1, do: "s" %> (<%= format_model_pct(pct_of(info.run_count, @payload.model_usage.total_runs)) %>)</span>
+                  <% end %>
+                </div>
+              </details>
+            <% end %>
+          </div>
+          <div class="chart-card">
             <p class="chart-card-title">Token usage</p>
             <div class="chart-wrap">
               <canvas id="token-chart" phx-hook="TokenChart" phx-update="ignore"></canvas>
@@ -575,6 +607,13 @@ defmodule RondoWeb.DashboardLive do
                   <canvas id="run-duration-chart" phx-hook="RunDurationChart" phx-update="ignore"></canvas>
                 </div>
               </div>
+            </div>
+          <% end %>
+
+          <%= if model_routing_section(@selected_issue_data, @selected_runs) do %>
+            <div class="section-card" style="margin-bottom: 16px; padding: 16px;">
+              <p class="panel-metric-label">Model routing</p>
+              <%= render_model_routing(@selected_issue_data, @selected_runs) %>
             </div>
           <% end %>
 
@@ -946,4 +985,117 @@ defmodule RondoWeb.DashboardLive do
 
   defp pretty_value(nil), do: "n/a"
   defp pretty_value(value), do: inspect(value, pretty: true, limit: :infinity)
+
+  defp format_model_pct(pct) when is_float(pct), do: "#{Float.round(pct, 1)}%"
+  defp format_model_pct(pct) when is_number(pct), do: "#{pct}%"
+  defp format_model_pct(_), do: "n/a"
+
+  defp model_usage_run_count(usage, provider) do
+    case Map.get(usage.by_provider, provider) do
+      %{run_count: count} -> count
+      _ -> 0
+    end
+  end
+
+  defp pct_of(part, total) when total > 0, do: Float.round(part / total * 100.0, 1)
+  defp pct_of(_part, 0), do: 0.0
+
+  # --- Model routing section ---
+
+  alias Rondo.ModelUsage
+
+  defp model_routing_section(selected_issue_data, nil) do
+    model_routing = selected_issue_data[:model_routing]
+    adapter = selected_issue_data[:adapter]
+    is_map(model_routing) or is_binary(adapter)
+  end
+
+  defp model_routing_section(selected_issue_data, selected_runs) when is_list(selected_runs) do
+    model_routing = selected_issue_data[:model_routing]
+    adapter = selected_issue_data[:adapter]
+    has_mr = is_map(model_routing) or is_binary(adapter)
+    has_mr or any_run_has_routing?(selected_runs)
+  end
+
+  defp any_run_has_routing?(selected_runs) do
+    selected_runs != [] and
+      Enum.any?(selected_runs, fn r ->
+        mr = r[:model_routing] || r["model_routing"]
+        is_map(mr) and map_size(mr) > 0
+      end)
+  end
+
+  defp routing_status(run) when is_map(run) do
+    routing = run[:model_routing] || run["model_routing"] || %{}
+    routing[:status] || routing["status"]
+  end
+
+  defp render_model_routing(selected_issue_data, selected_runs) do
+    assigns = %{data: selected_issue_data, runs: selected_runs}
+
+    ~H"""
+    <%= if @runs && length(@runs) > 0 do %>
+      <div style="margin-bottom: 10px;">
+        <%= for {run, idx} <- Enum.with_index(@runs) do %>
+          <% model_info = run_model_info(run) %>
+          <div style="display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12px;">
+            <span class="muted" style="min-width: 48px;">Run <%= idx + 1 %></span>
+            <span class={provider_badge_class(model_info.provider)} style="font-size: 10px; padding: 1px 6px; border-radius: 8px;">
+              <%= model_info.provider || "unknown" %>
+            </span>
+            <span class="mono" style="font-size: 11px;"><%= model_info.model || "unknown" %></span>
+            <%= if status = routing_status(run) do %>
+              <span class="muted" style="font-size: 10px;">(<%= status %>)</span>
+            <% end %>
+          </div>
+        <% end %>
+      </div>
+      <% active = List.last(@runs) |> run_model_info() %>
+      <% past = Enum.drop(@runs, -1) |> Enum.map(&run_model_info/1) |> Enum.uniq_by(& &1.model) %>
+      <%= if past != [] do %>
+        <div style="margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 11px;">
+          <span class="muted">Historical: </span>
+          <%= Enum.map_join(past, ", ", fn mi -> "#{mi.model}" end) %>
+        </div>
+      <% end %>
+      <%= if active.model && Map.has_key?(active, :model) do %>
+        <div style="margin-top: 4px; font-size: 11px;">
+          <span class="muted">Active: </span>
+          <span class={provider_badge_class(active.provider)} style="font-size: 10px; padding: 1px 6px; border-radius: 8px;">
+            <%= active.provider || "unknown" %>
+          </span>
+          <span class="mono" style="font-size: 11px;"><%= active.model %></span>
+        </div>
+      <% end %>
+    <% else %>
+      <% model_info = run_model_info(@data) %>
+      <div style="display: flex; align-items: center; gap: 8px; font-size: 12px;">
+        <span class={provider_badge_class(model_info.provider)} style="font-size: 10px; padding: 1px 6px; border-radius: 8px;">
+          <%= model_info.provider || "unknown" %>
+        </span>
+        <span class="mono" style="font-size: 11px;"><%= model_info.model || model_info.adapter || "unknown" %></span>
+        <%= if status = routing_status(@data) do %>
+          <span class="muted" style="font-size: 10px;">(<%= status %>)</span>
+        <% end %>
+      </div>
+    <% end %>
+    """
+  end
+
+  defp run_model_info(run) when is_map(run) do
+    mr = run[:model_routing] || run["model_routing"]
+    resolved = (is_map(mr) && (mr[:resolved] || mr["resolved"])) || %{}
+    model = resolved[:model] || resolved["model"]
+    adapter = resolved[:adapter] || resolved["adapter"] || run[:adapter] || run["adapter"]
+
+    %{
+      model: model,
+      adapter: adapter,
+      provider: ModelUsage.provider_from_model(model)
+    }
+  end
+
+  defp provider_badge_class("codex"), do: "state-badge state-badge-active"
+  defp provider_badge_class("openrouter"), do: "state-badge state-badge-warning"
+  defp provider_badge_class(_), do: "state-badge"
 end
