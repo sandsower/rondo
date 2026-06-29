@@ -19,7 +19,7 @@ defmodule Rondo.PatchArtifact do
   patch would no longer apply for clean evaluation.
   """
 
-  alias Rondo.RunLedger
+  alias Rondo.{Redaction, RunLedger}
 
   @schema "rondo.patch/v0"
   @patch_relative_path "artifacts/changes.patch"
@@ -135,16 +135,41 @@ defmodule Rondo.PatchArtifact do
   end
 
   defp persist_patch(ledger, diff, metadata) do
+    patch_contains_secret? = Redaction.contains_secret?(diff)
+
     with :ok <- write_artifact(ledger, @patch_relative_path, diff),
          {:ok, metadata_json} <- Jason.encode(metadata),
          :ok <- write_artifact(ledger, @metadata_relative_path, metadata_json),
          {:ok, ledger} <-
            RunLedger.link_artifacts(ledger, [
-             %{"kind" => "patch", "path" => @patch_relative_path},
+             patch_artifact_link(patch_contains_secret?),
              %{"kind" => "patch_metadata", "path" => @metadata_relative_path}
-           ]) do
+           ]),
+         {:ok, ledger} <- maybe_record_patch_secret_scan(ledger, patch_contains_secret?) do
       {:ok, ledger, :captured}
     end
+  end
+
+  defp patch_artifact_link(false), do: %{"kind" => "patch", "path" => @patch_relative_path}
+
+  defp patch_artifact_link(true) do
+    %{
+      "kind" => "patch",
+      "path" => @patch_relative_path,
+      "exportable" => false,
+      "blocked_reason" => "patch_contains_secret"
+    }
+  end
+
+  defp maybe_record_patch_secret_scan(ledger, false), do: {:ok, ledger}
+
+  defp maybe_record_patch_secret_scan(ledger, true) do
+    RunLedger.record_patch_secret_scan(ledger, :fail, %{
+      "scanner" => "rondo.redaction/v0",
+      "failure_classification" => "patch_contains_secret",
+      "patch_path" => @patch_relative_path,
+      "notes" => "Patch bytes were preserved for local clean-eval, but delivery/export inclusion is blocked."
+    })
   end
 
   defp metadata(base_ref, head_ref, base_branch, now, changed_paths) do

@@ -1052,6 +1052,46 @@ defmodule Rondo.RunLedgerTest do
     assert {:ok, override_ledger} = RunLedger.complete_run(override_ledger, :failed, %{reason: "boom"}, override_opts)
 
     assert decode_json!(override_ledger.manifest_path)["failure_classification"] == "task_failure"
+
+    assert {:ok, scan_ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "5ca55ca5"
+             )
+
+    assert {:ok, scan_ledger} = RunLedger.record_patch_secret_scan(scan_ledger, :pass)
+    assert decode_json!(scan_ledger.manifest_path)["patch_secret_scan"]["status"] == "pass"
+  end
+
+  test "delivery artifact write failures surface from completed ledgers" do
+    workspace_root = tmp_dir("ledger-delivery-errors")
+
+    assert {:ok, blocked_artifact_dir_ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "de1e0001"
+             )
+
+    File.rm_rf!(Path.join(blocked_artifact_dir_ledger.run_dir, "artifacts"))
+    File.write!(Path.join(blocked_artifact_dir_ledger.run_dir, "artifacts"), "blocking file")
+
+    assert {:error, _reason} =
+             RunLedger.complete_run(blocked_artifact_dir_ledger, :completed, %{mode: "test"}, timestamp: @now)
+
+    assert {:ok, refresh_ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "de1e0002"
+             )
+
+    assert {:ok, refresh_ledger} = RunLedger.complete_run(refresh_ledger, :completed, %{mode: "test"}, timestamp: @now)
+    File.rm_rf!(Path.join(refresh_ledger.run_dir, "artifacts"))
+    File.write!(Path.join(refresh_ledger.run_dir, "artifacts"), "blocking file")
+
+    assert {:error, _reason} = RunLedger.link_archive(refresh_ledger, "artifacts/archive/run.json")
   end
 
   defp issue_fixture do
