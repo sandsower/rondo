@@ -1175,14 +1175,11 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  defp handle_normal_completion(%State{} = state, issue_id, running_entry, session_id, has_ledger?) do
+  defp handle_normal_completion(%State{} = state, issue_id, running_entry, session_id, _has_ledger?) do
     Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
-    if has_ledger? do
-      archive_running_entry(state, running_entry, :normal)
-    else
-      state
-    end
+    state
+    |> archive_running_entry(running_entry, :normal)
     |> complete_issue(issue_id)
     |> schedule_issue_retry(issue_id, 1, %{
       identifier: running_entry.identifier,
@@ -3006,7 +3003,20 @@ defmodule Rondo.Orchestrator do
     |> atomize_allowed_keys(@archive_keys)
     |> Map.update(:tokens, %{}, &deserialize_token_map/1)
     |> Map.update(:event_log, [], &deserialize_event_log/1)
+    |> Map.update(:started_at, nil, &parse_datetime/1)
+    |> Map.update(:finished_at, nil, &parse_datetime/1)
   end
+
+  defp parse_datetime(%DateTime{} = dt), do: dt
+
+  defp parse_datetime(ts) when is_binary(ts) do
+    case DateTime.from_iso8601(ts) do
+      {:ok, dt, _offset} -> dt
+      _ -> ts
+    end
+  end
+
+  defp parse_datetime(other), do: other
 
   defp deserialize_token_map(tokens) when is_map(tokens), do: atomize_allowed_keys(tokens, @token_keys)
   defp deserialize_token_map(tokens), do: tokens

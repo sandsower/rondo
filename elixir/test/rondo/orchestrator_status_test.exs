@@ -3568,7 +3568,7 @@ defmodule Rondo.OrchestratorStatusTest do
     assert snapshot.running == []
     assert snapshot.archived != []
 
-    archived = Enum.find(snapshot.archived, &(&1.identifier == "MT-401"))
+    archived = Enum.find(snapshot.archived, &(&1.identifier == "MT-401" and &1.session_id == "sess-archive"))
     assert archived != nil
     assert archived.identifier == "MT-401"
     assert archived.session_id == "sess-archive"
