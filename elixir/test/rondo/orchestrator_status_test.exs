@@ -2919,7 +2919,7 @@ defmodule Rondo.OrchestratorStatusTest do
     assert run_decision["payload"]["reason_code"] == "repeated_gate_failure"
   end
 
-  test "orchestrator loads paused ledgers on startup and excludes them from redispatch" do
+  test "orchestrator loads paused ledgers on startup and exposes tracker-state mismatches" do
     workspace_root = tmp_dir("orchestrator-paused-startup")
     claude_bin = fake_claude_script(workspace_root, "paused-startup-session", 0)
 
@@ -2956,7 +2956,7 @@ defmodule Rondo.OrchestratorStatusTest do
 
     assert {:ok, _ledger} = Rondo.RunLedger.pause_run(ledger, interrupt, timestamp: ~U[2026-05-28 10:00:00Z])
 
-    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+    Application.put_env(:rondo, :memory_tracker_issues, [%{issue | state: "Todo"}])
 
     orchestrator_name = Module.concat(__MODULE__, :PausedStartupOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -2967,11 +2967,6 @@ defmodule Rondo.OrchestratorStatusTest do
       File.rm_rf(workspace_root)
     end)
 
-    snapshot = GenServer.call(pid, :snapshot)
-    assert [%{issue_id: "issue-paused-startup", identifier: "MT-PAUSED-STARTUP"} = paused_entry] = snapshot.paused
-    assert paused_entry.interrupt["reason"] == "repeated_gate_failure"
-    assert paused_entry.tracker_visibility == "unknown"
-
     state = :sys.get_state(pid)
     assert state.paused_interrupts[issue.id].model_routing_context == %{"skill" => "review-response", "phase" => "fix", "stage" => "turn"}
     assert MapSet.member?(state.claimed, issue.id)
@@ -2981,7 +2976,30 @@ defmodule Rondo.OrchestratorStatusTest do
     assert state.paused_interrupts[issue.id].ledger.next_seq == 2
 
     send(pid, {:tick, state.tick_token})
-    Process.sleep(100)
+
+    paused_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).paused do
+          [
+            %{
+              issue_id: "issue-paused-startup",
+              identifier: "MT-PAUSED-STARTUP",
+              state: "Todo",
+              paused_state: "In Progress",
+              tracker_state: "Todo",
+              tracker_state_mismatch: true
+            } = paused_entry
+          ] ->
+            paused_entry
+
+          _ ->
+            nil
+        end
+      end)
+
+    assert paused_entry.interrupt["reason"] == "repeated_gate_failure"
+    assert paused_entry.tracker_visibility == "known"
+    assert paused_entry.blocks_dispatch == true
 
     state = :sys.get_state(pid)
     assert state.running == %{}
@@ -3394,7 +3412,9 @@ defmodule Rondo.OrchestratorStatusTest do
       url: "https://example.org/issues/MT-OP-GUIDE"
     }
 
-    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+    # Keep the tracker empty until the paused claim is injected so startup cannot
+    # race this resume-path test by dispatching a fresh run first.
+    Application.put_env(:rondo, :memory_tracker_issues, [])
 
     orchestrator_name = Module.concat(__MODULE__, :OperatorGuidanceOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)

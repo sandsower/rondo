@@ -19,7 +19,7 @@ defmodule Rondo.Interrupt do
       "question" => "Configured gates failed repeatedly. How should Rondo proceed?",
       "options" => [
         %{"id" => "resume", "label" => "Resume with operator guidance"},
-        %{"id" => "abort", "label" => "Abort this run"},
+        %{"id" => "abort_run", "label" => "Abort this run"},
         %{"id" => "defer", "label" => "Keep paused and decide later"}
       ],
       "recommendation" => "Review the gate artifacts, then resume with operator guidance.",
@@ -78,7 +78,7 @@ defmodule Rondo.Interrupt do
       "question" => "Escalation policy exhausted (#{reason}). A human must decide how to proceed.",
       "options" => [
         %{"id" => "resume", "label" => "Resume with operator guidance"},
-        %{"id" => "abort", "label" => "Abort this run"},
+        %{"id" => "abort_run", "label" => "Abort this run"},
         %{"id" => "defer", "label" => "Keep paused and decide later"}
       ],
       "recommendation" => "Review the attempt chain and token spend, then resume or abort.",

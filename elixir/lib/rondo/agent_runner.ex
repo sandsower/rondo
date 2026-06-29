@@ -1868,7 +1868,7 @@ defmodule Rondo.AgentRunner do
   defp tracker_update_suggested_responses(%{action: :pause}) do
     [
       %{"id" => "resume", "label" => "Pause and review the live update before continuing"},
-      %{"id" => "abort", "label" => "Abort this run"}
+      %{"id" => "abort_run", "label" => "Abort this run"}
     ]
   end
 

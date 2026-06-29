@@ -567,7 +567,12 @@ defmodule RondoWeb.DashboardLive do
           <div class="panel-metrics">
             <div class="panel-metric">
               <span class="panel-metric-label">State</span>
-              <span class={state_badge_class(@selected_issue_data[:state] || "n/a")}><%= @selected_issue_data[:state] || "n/a" %></span>
+              <div class="detail-stack">
+                <span class={state_badge_class(tracker_state(@selected_issue_data) || "n/a")}><%= tracker_state(@selected_issue_data) || "n/a" %></span>
+                <%= if paused_state_summary(@selected_issue_data) do %>
+                  <span class="muted" style="font-size: 11px;"><%= paused_state_summary(@selected_issue_data) %></span>
+                <% end %>
+              </div>
             </div>
             <div class="panel-metric">
               <span class="panel-metric-label"><%= selected_time_label(@selected_issue_data) %></span>
@@ -643,15 +648,15 @@ defmodule RondoWeb.DashboardLive do
                 ></textarea>
                 <div style="margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap;">
                   <button type="submit" class="subtle-button">Resume with guidance</button>
-                  <%= if quick_guidance_response(@selected_issue_data) do %>
+                  <%= for response <- guidance_responses(@selected_issue_data) do %>
                     <button
                       type="button"
                       class="subtle-button"
                       phx-click="submit_guidance"
                       phx-value-issue-id={@selected_issue_data[:issue_id]}
-                      phx-value-guidance={quick_guidance_response(@selected_issue_data).guidance || quick_guidance_response(@selected_issue_data).id}
+                      phx-value-guidance={response.guidance || response.id}
                     >
-                      <%= quick_guidance_response(@selected_issue_data).label || quick_guidance_response(@selected_issue_data).id %>
+                      <%= response.label || response.id %>
                     </button>
                   <% end %>
                 </div>
@@ -812,9 +817,13 @@ defmodule RondoWeb.DashboardLive do
 
   defp quick_guidance_response(entry) do
     entry
-    |> Map.get(:suggested_responses, [])
+    |> guidance_responses()
     |> Enum.find(fn response -> Map.get(response, :quick) == true end)
   end
+
+  defp guidance_responses(%{paused: paused}) when is_map(paused), do: guidance_responses(paused)
+  defp guidance_responses(entry) when is_map(entry), do: Map.get(entry, :suggested_responses, []) || []
+  defp guidance_responses(_entry), do: []
 
   defp guidance_waiting_label(entry) do
     Map.get(entry.blocked_side_effect || %{}, :label) ||
@@ -861,17 +870,48 @@ defmodule RondoWeb.DashboardLive do
     Map.get(final_report, key) || Map.get(final_report, Atom.to_string(key)) || default
   end
 
-  defp paused_claim_status(%{blocks_dispatch: true} = entry) do
-    reason = Map.get(entry, :blocked_dispatch_reason) || "paused_claim"
-    stale = Map.get(entry, :stale_reason)
-    revalidated = Map.get(entry, :revalidated_at)
+  defp paused_claim_status(entry) do
+    entry = paused_entry(entry)
 
-    ["Blocks dispatch: #{reason}", stale && "stale: #{stale}", revalidated && "revalidated: #{revalidated}"]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.join(" · ")
+    if Map.get(entry, :blocks_dispatch) do
+      reason = Map.get(entry, :blocked_dispatch_reason) || "paused_claim"
+      state_summary = paused_state_summary(entry)
+      stale = Map.get(entry, :stale_reason)
+      revalidated = Map.get(entry, :revalidated_at)
+
+      ["Blocks dispatch: #{reason}", state_summary, stale && "stale: #{stale}", revalidated && "revalidated: #{revalidated}"]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join(" · ")
+    end
   end
 
-  defp paused_claim_status(_entry), do: nil
+  defp paused_state_summary(entry) do
+    paused_entry = paused_entry(entry)
+
+    if Map.has_key?(paused_entry, :paused_state) do
+      paused_state = Map.get(paused_entry, :paused_state) || Map.get(paused_entry, :state)
+      tracker_state = tracker_state(entry)
+
+      if paused_state == tracker_state do
+        "paused_state=#{paused_state || "n/a"}"
+      else
+        "paused_state=#{paused_state || "n/a"} · tracker_state=#{tracker_state || "n/a"} · tracker-state mismatch"
+      end
+    end
+  end
+
+  defp tracker_state(%{paused: paused}) when is_map(paused), do: Map.get(paused, :tracker_state) || Map.get(paused, :state)
+  defp tracker_state(%{running: running}) when is_map(running), do: Map.get(running, :state)
+  defp tracker_state(%{retry: retry}) when is_map(retry), do: Map.get(retry, :state) || Map.get(retry, :status)
+  defp tracker_state(%{tracker_state: tracker_state, state: state, status: status}), do: tracker_state || state || status
+  defp tracker_state(%{tracker_state: tracker_state, state: state}), do: tracker_state || state
+  defp tracker_state(%{tracker_state: tracker_state, status: status}), do: tracker_state || status
+  defp tracker_state(%{state: state}), do: state
+  defp tracker_state(%{status: status}), do: status
+  defp tracker_state(_), do: nil
+
+  defp paused_entry(%{paused: paused}) when is_map(paused), do: paused
+  defp paused_entry(entry), do: entry
 
   defp humanize_interrupt_reason("repeated_gate_failure"), do: "Gate failure"
   defp humanize_interrupt_reason("action_policy_guidance_required"), do: "Action policy"
