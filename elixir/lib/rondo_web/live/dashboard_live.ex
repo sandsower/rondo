@@ -983,9 +983,6 @@ defmodule RondoWeb.DashboardLive do
 
   defp push_run_charts(socket, _), do: socket
 
-  defp pretty_value(nil), do: "n/a"
-  defp pretty_value(value), do: inspect(value, pretty: true, limit: :infinity)
-
   defp format_model_pct(pct) when is_float(pct), do: "#{Float.round(pct, 1)}%"
   defp format_model_pct(pct) when is_number(pct), do: "#{pct}%"
   defp format_model_pct(_), do: "n/a"

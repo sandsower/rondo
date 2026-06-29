@@ -2386,10 +2386,10 @@ defmodule Rondo.Orchestrator do
   defp adapter_for_update(_existing, %{"adapter" => adapter}) when is_binary(adapter), do: adapter
   defp adapter_for_update(existing, _update), do: existing
 
-  defp model_routing_for_update(existing, %{model_routing: routing}) when is_map(routing) and map_size(routing) > 0,
+  defp model_routing_for_update(_existing, %{model_routing: routing}) when is_map(routing) and map_size(routing) > 0,
     do: routing
 
-  defp model_routing_for_update(existing, %{"model_routing" => routing}) when is_map(routing) and map_size(routing) > 0,
+  defp model_routing_for_update(_existing, %{"model_routing" => routing}) when is_map(routing) and map_size(routing) > 0,
     do: routing
 
   defp model_routing_for_update(existing, _update), do: existing
