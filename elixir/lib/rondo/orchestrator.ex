@@ -1534,6 +1534,7 @@ defmodule Rondo.Orchestrator do
 
   defp pause_interrupt_for_reason(_running_entry, {:action_policy_guidance_required, interrupt}) when is_map(interrupt), do: interrupt
   defp pause_interrupt_for_reason(_running_entry, {:final_report_invalid, interrupt}) when is_map(interrupt), do: interrupt
+
   defp pause_interrupt_for_reason(running_entry, {:escalation_paused, reason, chain}) do
     Interrupt.escalation_paused(
       Map.merge(interrupt_context(running_entry), %{
@@ -2339,7 +2340,6 @@ defmodule Rondo.Orchestrator do
         session_id: session_id_for_update(running_entry.session_id, update),
         run_ref: run_ref_for_update(Map.get(running_entry, :run_ref), update),
         final_report: final_report_for_update(Map.get(running_entry, :final_report), update),
-        model_routing: model_routing_for_update(Map.get(running_entry, :model_routing), update),
         last_claude_event: event,
         claude_input_tokens: claude_input_tokens + token_delta.input_tokens,
         claude_output_tokens: claude_output_tokens + token_delta.output_tokens,
@@ -2447,10 +2447,6 @@ defmodule Rondo.Orchestrator do
   end
 
   defp latest_gate_for_update(running_entry, _update), do: Map.get(running_entry, :latest_gate)
-
-  defp model_routing_for_update(_existing, %{model_routing: model_routing}) when is_map(model_routing), do: model_routing
-  defp model_routing_for_update(_existing, %{"model_routing" => model_routing}) when is_map(model_routing), do: model_routing
-  defp model_routing_for_update(existing, _update), do: existing
 
   defp model_fallback_for_update(_existing, %{model_routing: %{fallback: fallback}}) when is_map(fallback), do: fallback
   defp model_fallback_for_update(_existing, %{"model_routing" => %{"fallback" => fallback}}) when is_map(fallback), do: fallback

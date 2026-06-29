@@ -156,7 +156,6 @@ defmodule RondoWeb.Presenter do
         output_tokens: entry.claude_output_tokens,
         total_tokens: entry.claude_total_tokens
       },
-      model_routing: Map.get(entry, :model_routing),
       adapter: Map.get(entry, :adapter),
       event_log: format_event_log(Map.get(entry, :event_log, []))
     }
