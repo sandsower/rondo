@@ -2699,6 +2699,7 @@ defmodule Rondo.Orchestrator do
       paused_at: get_in(manifest, ["timestamps", "paused_at"]),
       retry_attempt: get_in(interrupt, ["resume", "retry_attempt"]),
       latest_gate: Map.get(interrupt, "gate"),
+      model_routing_context: get_in(interrupt, ["resume", "model_routing_context"]),
       interrupt: interrupt,
       tracker_visibility: "unknown",
       ledger: ledger

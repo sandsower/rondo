@@ -148,7 +148,8 @@ defmodule Rondo.Interrupt do
       "workspace" => value(context, :workspace),
       "session_id" => value(context, :session_id),
       "run_ref" => normalize_value(value(context, :run_ref)),
-      "retry_attempt" => value(context, :retry_attempt)
+      "retry_attempt" => value(context, :retry_attempt),
+      "model_routing_context" => normalize_value(value(context, :model_routing_context))
     }
     |> drop_nil_values()
   end
