@@ -279,6 +279,19 @@ defmodule Rondo.LiveE2ESupportTest do
       assert log =~ "RONDO_E2E_AGENT_COMMAND"
     end
 
+    test "codex adapter ignores deprecated RONDO_E2E_CLAUDE_COMMAND" do
+      overrides = %{
+        "RONDO_E2E_AGENT_ADAPTER" => "codex",
+        "RONDO_E2E_CLAUDE_COMMAND" => "/usr/local/bin/claude-beta"
+      }
+
+      assert {:ok, context} =
+               LiveE2E.load_context(env(full_env(overrides)), &find_executable_found/1)
+
+      assert context.agent_adapter == "codex"
+      assert context.agent_command == "codex"
+    end
+
     test "RONDO_E2E_CLAUDE_MAX_TURNS still works as deprecated alias and logs a warning" do
       overrides = %{"RONDO_E2E_CLAUDE_MAX_TURNS" => "15"}
 

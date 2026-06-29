@@ -339,10 +339,12 @@ defmodule Rondo.Agent.CodexAdapter do
   defp invoke_cli(
          prompt,
          workspace,
-         %{provider_ref_kind: provider_ref_kind, provider_ref: thread_id, resumable?: true},
+         %{adapter: adapter, provider_ref_kind: provider_ref_kind, provider_ref: thread_id, resumable?: true},
          cli_opts
        )
-       when provider_ref_kind in ["thread_id", :thread_id, "session_id", :session_id] and is_binary(thread_id) do
+       when adapter in [@id, :codex] and
+              provider_ref_kind in ["thread_id", :thread_id, "session_id", :session_id] and
+              is_binary(thread_id) do
     CLI.resume(thread_id, prompt, workspace, cli_opts)
   end
 
@@ -513,6 +515,10 @@ defmodule Rondo.Agent.CodexAdapter do
   defp error_message(_payload), do: "codex error"
 
   defp map_get_any(map, keys) when is_list(keys) do
-    Enum.find_value(keys, fn key -> if is_binary(key), do: Map.get(map, key), else: nil end)
+    Enum.find_value(keys, fn
+      key when is_binary(key) -> Map.get(map, key)
+      key when is_atom(key) -> Map.get(map, key)
+      _other -> nil
+    end)
   end
 end

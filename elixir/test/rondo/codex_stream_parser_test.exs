@@ -118,9 +118,49 @@ defmodule Rondo.Codex.StreamParserTest do
     assert StreamParser.item_message(%{"type" => "file_change", "changes" => [%{"kind" => "update"}]}) == nil
     assert StreamParser.item_message(%{"type" => "file_change", "changes" => [%{path: "lib/rondo.ex"}]}) == "lib/rondo.ex"
 
-    assert StreamParser.extract_usage(%{
-             usage: %{input_tokens: 1, output_tokens: 2, cached_input_tokens: 3, total_tokens: 4}
-           }) == %{
+    atom_keyed_summary =
+      StreamParser.item_message(%{
+        "type" => "mcp_tool_call",
+        server: "mcp",
+        tool: "search",
+        arguments: %{query: "codex"}
+      })
+
+    assert atom_keyed_summary == "mcp/search: query=codex"
+
+    long_query = String.duplicate("é", 80)
+
+    long_message =
+      StreamParser.item_message(%{
+        "type" => "mcp_tool_call",
+        "server" => "mcp",
+        "tool" => "search",
+        "arguments" => %{query: long_query}
+      })
+
+    assert String.valid?(long_message)
+    assert String.ends_with?(long_message, "…")
+
+    assert StreamParser.extract_usage(%{usage: %{}}) == nil
+
+    empty_usage = %{
+      input_tokens: nil,
+      output_tokens: nil,
+      cached_input_tokens: nil,
+      total_tokens: nil,
+      reasoning_output_tokens: nil
+    }
+
+    assert StreamParser.extract_usage(%{usage: empty_usage}) == nil
+
+    usage = %{
+      input_tokens: 1,
+      output_tokens: 2,
+      cached_input_tokens: 3,
+      total_tokens: 4
+    }
+
+    assert StreamParser.extract_usage(%{usage: usage}) == %{
              input_tokens: 1,
              output_tokens: 2,
              cache_read_tokens: 3,

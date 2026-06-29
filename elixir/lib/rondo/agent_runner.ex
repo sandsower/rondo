@@ -1881,13 +1881,13 @@ defmodule Rondo.AgentRunner do
     |> resolve_adapter_module()
   end
 
-  defp resolve_adapter_module(module) when is_atom(module), do: {:ok, module}
   defp resolve_adapter_module("claude_code"), do: {:ok, ClaudeCodeAdapter}
   defp resolve_adapter_module(:claude_code), do: {:ok, ClaudeCodeAdapter}
   defp resolve_adapter_module("pi"), do: {:ok, PiAdapter}
   defp resolve_adapter_module(:pi), do: {:ok, PiAdapter}
   defp resolve_adapter_module("codex"), do: {:ok, CodexAdapter}
   defp resolve_adapter_module(:codex), do: {:ok, CodexAdapter}
+  defp resolve_adapter_module(module) when is_atom(module), do: {:ok, module}
   defp resolve_adapter_module(other), do: {:error, {:unsupported_agent_adapter, other}}
 
   defp process_provider_module(opts) do

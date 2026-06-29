@@ -252,7 +252,7 @@ defmodule Rondo.LiveE2E do
 
   defp resolve_agent_command(adapter, env, find_executable) do
     canonical = normalize_blank(env.(@agent_command_var))
-    deprecated = normalize_blank(env.(@deprecated_command_var))
+    deprecated = if adapter == "claude_code", do: normalize_blank(env.(@deprecated_command_var)), else: nil
     explicit = canonical || deprecated
 
     if explicit do

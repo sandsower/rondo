@@ -9,7 +9,6 @@ defmodule Rondo.Codex.CLI do
   alias Rondo.PathSafety
 
   @port_line_bytes 1_048_576
-  @max_log_bytes 1_000
 
   @type run_result :: %{
           thread_id: String.t() | nil,
@@ -70,6 +69,10 @@ defmodule Rondo.Codex.CLI do
             failure_lines: [],
             final_report: nil
           })
+        rescue
+          exception ->
+            safe_port_close(port)
+            reraise exception, __STACKTRACE__
         catch
           :exit, reason ->
             safe_port_close(port)
@@ -115,7 +118,7 @@ defmodule Rondo.Codex.CLI do
              }}
 
           {^port, {:exit_status, code}} ->
-            _state = flush_buffer(on_event, drain_port_data(port, on_event, state))
+            state = flush_buffer(on_event, drain_port_data(port, on_event, state))
             {:error, {:subprocess_exit, code, Enum.reverse(state.failure_lines)}}
         after
           remaining_ms ->
@@ -148,7 +151,7 @@ defmodule Rondo.Codex.CLI do
 
       {:error, reason} ->
         Logger.metadata(parse_error_metadata(state))
-        Logger.debug("Unparseable codex stream line: #{inspect(reason)} line=#{String.slice(full_line, 0, @max_log_bytes)}")
+        Logger.debug("Unparseable codex stream line: reason=#{inspect(reason)} bytes=#{byte_size(full_line)}")
 
         %{state | failure_lines: record_failure_line(state.failure_lines, full_line)}
     end

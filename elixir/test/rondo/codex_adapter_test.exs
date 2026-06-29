@@ -148,11 +148,32 @@ defmodule Rondo.CodexAdapterTest do
                  opts: []
                })
 
-      assert {:error, {:invalid_resume_ref, %{provider_ref_kind: "other", provider_ref: "missing", resumable?: true}}} =
+      assert {:error, {:invalid_resume_ref, _other_resume_ref}} =
                CodexAdapter.invoke(%{
                  prompt: "Continue",
                  workspace: workspace,
-                 previous_run_ref: %{provider_ref_kind: "other", provider_ref: "missing", resumable?: true, extra: true},
+                 previous_run_ref: %{
+                   provider_ref_kind: "other",
+                   provider_ref: "missing",
+                   resumable?: true,
+                   extra: true
+                 },
+                 on_event: fn _event -> :ok end,
+                 opts: []
+               })
+
+      pi_resume_ref = %{
+        adapter: "pi",
+        provider_ref_kind: "thread_id",
+        provider_ref: "pi-thread",
+        resumable?: true
+      }
+
+      assert {:error, {:invalid_resume_ref, ^pi_resume_ref}} =
+               CodexAdapter.invoke(%{
+                 prompt: "Continue",
+                 workspace: workspace,
+                 previous_run_ref: pi_resume_ref,
                  on_event: fn _event -> :ok end,
                  opts: []
                })

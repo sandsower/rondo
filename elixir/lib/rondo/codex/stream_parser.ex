@@ -131,34 +131,44 @@ defmodule Rondo.Codex.StreamParser do
   defp usage_payload(_event), do: nil
 
   defp normalize_usage(%{} = usage) do
-    usage_fields = %{
-      input_tokens: integer_field(usage, ["input_tokens", :input_tokens]),
-      output_tokens:
-        (integer_field(usage, ["output_tokens", :output_tokens]) || 0) +
-          (integer_field(usage, ["reasoning_output_tokens", :reasoning_output_tokens]) || 0),
-      cache_read_tokens: integer_field(usage, ["cached_input_tokens", :cached_input_tokens]),
-      cache_write_tokens: 0,
-      total_tokens:
-        integer_field(usage, ["total_tokens", :total_tokens]) ||
-          Enum.sum([
-            integer_field(usage, ["input_tokens", :input_tokens]) || 0,
-            integer_field(usage, ["output_tokens", :output_tokens]) || 0,
-            integer_field(usage, ["cached_input_tokens", :cached_input_tokens]) || 0,
-            integer_field(usage, ["reasoning_output_tokens", :reasoning_output_tokens]) || 0
-          ]),
-      cost: nil
-    }
+    input_tokens = integer_field(usage, ["input_tokens", :input_tokens])
+    output_tokens = integer_field(usage, ["output_tokens", :output_tokens])
+    cached_input_tokens = integer_field(usage, ["cached_input_tokens", :cached_input_tokens])
+    reasoning_output_tokens = integer_field(usage, ["reasoning_output_tokens", :reasoning_output_tokens])
+    total_tokens = integer_field(usage, ["total_tokens", :total_tokens])
 
-    if usage_fields_present?(usage_fields), do: usage_fields
+    usage_present? =
+      usage_fields_present?([
+        input_tokens,
+        output_tokens,
+        cached_input_tokens,
+        reasoning_output_tokens,
+        total_tokens
+      ])
+
+    if usage_present? do
+      %{
+        input_tokens: input_tokens,
+        output_tokens: (output_tokens || 0) + (reasoning_output_tokens || 0),
+        cache_read_tokens: cached_input_tokens,
+        cache_write_tokens: 0,
+        total_tokens:
+          total_tokens ||
+            Enum.sum([
+              input_tokens || 0,
+              output_tokens || 0,
+              cached_input_tokens || 0,
+              reasoning_output_tokens || 0
+            ]),
+        cost: nil
+      }
+    end
   end
 
   defp normalize_usage(_usage), do: nil
 
-  defp usage_fields_present?(usage_fields) do
-    usage_fields
-    |> Map.drop([:cost])
-    |> Map.values()
-    |> Enum.any?(&(!is_nil(&1)))
+  defp usage_fields_present?(usage_values) when is_list(usage_values) do
+    Enum.any?(usage_values, &(!is_nil(&1)))
   end
 
   defp integer_field(map, keys) when is_list(keys) do
@@ -171,7 +181,11 @@ defmodule Rondo.Codex.StreamParser do
   end
 
   defp map_get_any(map, keys) when is_list(keys) do
-    Enum.find_value(keys, fn key -> if is_binary(key), do: Map.get(map, key), else: nil end)
+    Enum.find_value(keys, fn
+      key when is_binary(key) -> Map.get(map, key)
+      key when is_atom(key) -> Map.get(map, key)
+      _other -> nil
+    end)
   end
 
   defp blank_to_nil(text) when is_binary(text) do
@@ -271,9 +285,28 @@ defmodule Rondo.Codex.StreamParser do
     if byte_size(value) <= max_bytes do
       value
     else
-      binary_part(value, 0, max_bytes) <> "…"
+      value
+      |> String.graphemes()
+      |> take_graphemes(max_bytes)
+      |> IO.iodata_to_binary()
+      |> Kernel.<>("…")
     end
   end
 
   defp truncate(value, _max_bytes), do: to_string(value)
+
+  defp take_graphemes(graphemes, max_bytes) do
+    {_bytes, reversed_graphemes} =
+      Enum.reduce_while(graphemes, {0, []}, fn grapheme, {bytes, acc} ->
+        grapheme_bytes = byte_size(grapheme)
+
+        if bytes + grapheme_bytes > max_bytes do
+          {:halt, {bytes, acc}}
+        else
+          {:cont, {bytes + grapheme_bytes, [grapheme | acc]}}
+        end
+      end)
+
+    Enum.reverse(reversed_graphemes)
+  end
 end
