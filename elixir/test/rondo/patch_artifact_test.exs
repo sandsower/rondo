@@ -39,8 +39,18 @@ defmodule Rondo.PatchArtifactTest do
     assert metadata["patch_path"] == "artifacts/changes.patch"
 
     manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
-    assert %{"kind" => "patch", "path" => "artifacts/changes.patch"} in manifest["artifacts"]
-    assert %{"kind" => "patch_metadata", "path" => "artifacts/patch.json"} in manifest["artifacts"]
+
+    assert %{
+             "kind" => "patch",
+             "path" => "artifacts/changes.patch",
+             "status" => "present"
+           } in manifest["artifacts"]
+
+    assert %{
+             "kind" => "patch_metadata",
+             "path" => "artifacts/patch.json",
+             "status" => "present"
+           } in manifest["artifacts"]
 
     # the patch applies cleanly to a fresh checkout of the recorded base ref
     eval_dir = Path.join(workspace_root, "clean-eval")
@@ -136,7 +146,8 @@ defmodule Rondo.PatchArtifactTest do
              "kind" => "patch",
              "path" => "artifacts/changes.patch",
              "exportable" => false,
-             "blocked_reason" => "patch_contains_secret"
+             "blocked_reason" => "patch_contains_secret",
+             "status" => "present"
            } in manifest["artifacts"]
 
     assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "patch_secret_scan"))

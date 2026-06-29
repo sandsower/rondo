@@ -5,6 +5,11 @@ defmodule Rondo.RunLedger do
   The ledger is local diagnostic state. It stores a manifest, small curated
   checkpoint JSON files, and sanitized agent event artifacts under the configured
   workspace root.
+
+  Checkpoint writes are serialized per run with a file-system lock and derive
+  their sequence number from disk plus the manifest index. This prevents the
+  duplicate checkpoint filenames and stale `next_seq` races that can happen when
+  the orchestrator and a worker task both hold ledger copies.
   """
 
   alias Rondo.{Config, DeliveryArtifact, FinalReport, Linear.Issue, ProcessProvider, Redaction}
@@ -17,6 +22,9 @@ defmodule Rondo.RunLedger do
   @max_list_entries 50
   @secret_key_pattern ~r/(api[_-]?key|authorization|cookie|password|secret|token)/i
   @content_key_pattern ~r/(command|content|delta|diff|file[_-]?content|input|message|new_string|old_string|output|prompt|result|stderr|stdout|summary[_-]?text|text[_-]?delta)/i
+  @lock_stale_seconds 60
+  @lock_acquire_attempts 200
+  @lock_retry_ms 10
 
   defstruct [:run_id, :run_dir, :manifest_path, :next_seq, :manifest, :policy_file]
 
@@ -85,9 +93,21 @@ defmodule Rondo.RunLedger do
 
   @spec write_checkpoint(t(), atom() | String.t(), map(), keyword()) :: {:ok, t()} | {:error, term()}
   def write_checkpoint(%__MODULE__{} = ledger, kind, payload, opts \\ []) when is_map(payload) do
+    with_run_lock(ledger.run_dir, fn ->
+      do_write_checkpoint(ledger, kind, payload, opts)
+    end)
+  end
+
+  defp do_write_checkpoint(%__MODULE__{} = ledger, kind, payload, opts) when is_map(payload) do
     timestamp = opts |> Keyword.get(:timestamp, DateTime.utc_now()) |> datetime_to_iso()
     kind_string = kind_to_string(kind)
-    seq = ledger.next_seq
+
+    manifest =
+      ledger
+      |> latest_manifest()
+      |> reconciled_manifest(ledger.run_dir)
+
+    seq = next_sequence_from_manifest(manifest)
     relative_path = Path.join("checkpoints", checkpoint_filename(seq, kind_string))
     checkpoint_path = Path.join(ledger.run_dir, relative_path)
 
@@ -108,20 +128,30 @@ defmodule Rondo.RunLedger do
 
     manifest_update = Keyword.get(opts, :manifest_update, & &1)
 
-    manifest =
-      ledger.manifest
+    updated_manifest =
+      manifest
       |> Map.update("checkpoints", [checkpoint_index], &(&1 ++ [checkpoint_index]))
       |> put_in(["timestamps", "updated_at"], timestamp)
       |> manifest_update.()
 
-    with :ok <- write_json_file(checkpoint_path, checkpoint),
-         :ok <- write_json_file(ledger.manifest_path, manifest) do
-      {:ok, %{ledger | next_seq: seq + 1, manifest: manifest}}
+    if File.exists?(checkpoint_path) do
+      retry_on_collision(ledger, kind_string, timestamp, manifest_update, seq, relative_path, checkpoint)
+    else
+      with :ok <- write_json_file(checkpoint_path, checkpoint),
+           :ok <- write_json_file(ledger.manifest_path, updated_manifest) do
+        {:ok, %{ledger | next_seq: seq + 1, manifest: updated_manifest}}
+      end
     end
   end
 
   @spec append_agent_event(t(), map(), keyword()) :: :ok | {:error, term()}
   def append_agent_event(%__MODULE__{} = ledger, event, opts \\ []) when is_map(event) do
+    with_run_lock(ledger.run_dir, fn ->
+      do_append_agent_event(ledger, event, opts)
+    end)
+  end
+
+  defp do_append_agent_event(%__MODULE__{} = ledger, event, opts) when is_map(event) do
     timestamp = opts |> Keyword.get(:timestamp, Map.get(event, :timestamp, DateTime.utc_now())) |> datetime_to_iso()
 
     artifact = agent_event_payload(event, timestamp)
@@ -149,6 +179,12 @@ defmodule Rondo.RunLedger do
 
   @spec update_agent_metadata(t(), map()) :: {:ok, t()} | {:error, term()}
   def update_agent_metadata(%__MODULE__{} = ledger, metadata) when is_map(metadata) do
+    with_run_lock(ledger.run_dir, fn ->
+      do_update_agent_metadata(ledger, metadata)
+    end)
+  end
+
+  defp do_update_agent_metadata(%__MODULE__{} = ledger, metadata) when is_map(metadata) do
     agent_metadata = metadata |> sanitize_value() |> drop_nil_values()
 
     if agent_metadata == %{} do
@@ -166,7 +202,12 @@ defmodule Rondo.RunLedger do
         |> put_in(["timestamps", "updated_at"], timestamp)
 
       with :ok <- write_json_file(ledger.manifest_path, manifest) do
-        {:ok, %{ledger | manifest: manifest}}
+        {:ok,
+         %{
+           ledger
+           | next_seq: next_sequence_from_manifest(manifest),
+             manifest: manifest
+         }}
       end
     end
   end
@@ -211,7 +252,8 @@ defmodule Rondo.RunLedger do
     )
   end
 
-  defp do_record_model_routing_decision(%__MODULE__{}, routing, _opts), do: {:error, {:invalid_model_routing, routing}}
+  defp do_record_model_routing_decision(%__MODULE__{}, routing, _opts),
+    do: {:error, {:invalid_model_routing, routing}}
 
   @spec pause_run(t(), map(), keyword()) :: {:ok, t()} | {:error, term()}
   def pause_run(%__MODULE__{} = ledger, interrupt, opts \\ []) when is_map(interrupt) do
@@ -241,21 +283,23 @@ defmodule Rondo.RunLedger do
     status_string = kind_to_string(status)
     kind = terminal_checkpoint_kind(status_string)
     timestamp = Keyword.get(opts, :timestamp, DateTime.utc_now())
+    iso_timestamp = datetime_to_iso(timestamp)
 
-    with {:ok, ledger} <- write_checkpoint(ledger, kind, payload, Keyword.put(opts, :timestamp, timestamp)) do
-      iso_timestamp = datetime_to_iso(timestamp)
+    manifest_update = fn manifest ->
+      manifest
+      |> Map.put("status", status_string)
+      |> maybe_put_terminal_failure_classification(status_string, opts)
+      |> put_in(["timestamps", "updated_at"], iso_timestamp)
+      |> put_in(["timestamps", "finished_at"], iso_timestamp)
+    end
 
-      manifest =
-        ledger.manifest
-        |> Map.put("status", status_string)
-        |> maybe_put_terminal_failure_classification(status_string, opts)
-        |> put_in(["timestamps", "updated_at"], iso_timestamp)
-        |> put_in(["timestamps", "finished_at"], iso_timestamp)
+    checkpoint_opts =
+      opts
+      |> Keyword.put(:timestamp, timestamp)
+      |> Keyword.put(:manifest_update, manifest_update)
 
-      with :ok <- write_json_file(ledger.manifest_path, manifest) do
-        ledger = %{ledger | manifest: manifest}
-        maybe_write_delivery_artifact(ledger, status_string)
-      end
+    with {:ok, ledger} <- write_checkpoint(ledger, kind, payload, checkpoint_opts) do
+      maybe_write_delivery_artifact(ledger, status_string)
     end
   end
 
@@ -283,43 +327,56 @@ defmodule Rondo.RunLedger do
 
   @spec link_artifacts(t(), [map()]) :: {:ok, t()} | {:error, term()}
   def link_artifacts(%__MODULE__{} = ledger, artifacts) when is_list(artifacts) do
+    case with_run_lock(ledger.run_dir, fn -> do_link_artifacts(ledger, artifacts) end) do
+      {:ok, ledger, :refresh_delivery_artifact} -> maybe_refresh_delivery_artifact(ledger)
+      {:ok, ledger, :no_refresh} -> {:ok, ledger}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_link_artifacts(%__MODULE__{} = ledger, artifacts) when is_list(artifacts) do
     normalized_artifacts =
       artifacts
       |> Enum.filter(&valid_artifact?/1)
-      |> Enum.map(&sanitize_value/1)
+      |> Enum.map(&normalize_artifact(&1, ledger.run_dir))
 
     if normalized_artifacts == [] do
-      {:ok, ledger}
+      {:ok, ledger, :no_refresh}
     else
       timestamp = DateTime.utc_now() |> datetime_to_iso()
+      manifest = latest_manifest(ledger)
 
-      manifest =
-        ledger.manifest
+      updated_manifest =
+        manifest
         |> Map.update("artifacts", normalized_artifacts, fn existing ->
           Enum.reduce(normalized_artifacts, existing, &upsert_artifact(&2, &1))
         end)
         |> put_in(["timestamps", "updated_at"], timestamp)
 
-      with :ok <- write_json_file(ledger.manifest_path, manifest) do
-        ledger = %{ledger | manifest: manifest}
-        maybe_refresh_delivery_artifact(ledger, normalized_artifacts)
+      with :ok <- write_json_file(ledger.manifest_path, updated_manifest) do
+        ledger = %{
+          ledger
+          | next_seq: next_sequence_from_manifest(updated_manifest),
+            manifest: updated_manifest
+        }
+
+        {:ok, ledger, delivery_artifact_refresh_status(ledger, normalized_artifacts)}
       end
     end
   end
 
-  defp maybe_refresh_delivery_artifact(ledger, linked_artifacts) do
+  defp delivery_artifact_refresh_status(ledger, linked_artifacts) do
     cond do
-      Map.get(ledger.manifest, "status") != "completed" ->
-        {:ok, ledger}
+      Map.get(ledger.manifest, "status") != "completed" -> :no_refresh
+      Enum.any?(linked_artifacts, &(Map.get(&1, "kind") == "delivery_artifact")) -> :no_refresh
+      true -> :refresh_delivery_artifact
+    end
+  end
 
-      Enum.any?(linked_artifacts, &(Map.get(&1, "kind") == "delivery_artifact")) ->
-        {:ok, ledger}
-
-      true ->
-        case DeliveryArtifact.write(ledger) do
-          {:ok, ledger, _status} -> {:ok, ledger}
-          {:error, reason} -> {:error, reason}
-        end
+  defp maybe_refresh_delivery_artifact(ledger) do
+    case DeliveryArtifact.write(ledger) do
+      {:ok, ledger, _status} -> {:ok, ledger}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -576,7 +633,7 @@ defmodule Rondo.RunLedger do
         "finished_at" => nil
       },
       "checkpoints" => [],
-      "artifacts" => [%{"kind" => "agent_events", "path" => "artifacts/agent-events.ndjson"}]
+      "artifacts" => [%{"kind" => "agent_events", "path" => "artifacts/agent-events.ndjson", "status" => "tracked"}]
     }
     |> maybe_put_source_contract(Keyword.get(opts, :source_contract))
   end
@@ -651,6 +708,63 @@ defmodule Rondo.RunLedger do
     }
   end
 
+  # Serializes all mutating ledger operations per run. This prevents the
+  # orchestrator and a worker task (or multiple resumed ledgers) from racing
+  # with stale `next_seq` values.
+  defp with_run_lock(run_dir, fun) do
+    lock_path = Path.join(run_dir, ".ledger.lock")
+
+    case acquire_run_lock(lock_path, @lock_acquire_attempts) do
+      {:ok, io_device} ->
+        try do
+          fun.()
+        after
+          File.close(io_device)
+          File.rm(lock_path)
+        end
+
+      {:error, reason} ->
+        {:error, {:lock_failed, reason}}
+    end
+  end
+
+  defp acquire_run_lock(_lock_path, 0), do: {:error, :lock_timeout}
+
+  defp acquire_run_lock(lock_path, attempts_left) do
+    case File.open(lock_path, [:write, :exclusive, :binary]) do
+      {:ok, io_device} ->
+        timestamp = DateTime.utc_now() |> DateTime.to_unix() |> Integer.to_string()
+        IO.binwrite(io_device, timestamp)
+        {:ok, io_device}
+
+      {:error, :eexist} ->
+        unless lock_stale?(lock_path) do
+          Process.sleep(@lock_retry_ms)
+        end
+
+        acquire_run_lock(lock_path, attempts_left - 1)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp lock_stale?(lock_path) do
+    with {:ok, contents} <- File.read(lock_path),
+         {unix, _} <- Integer.parse(contents) do
+      now = DateTime.utc_now() |> DateTime.to_unix()
+
+      if now - unix > @lock_stale_seconds do
+        File.rm(lock_path)
+        true
+      else
+        false
+      end
+    else
+      _ -> false
+    end
+  end
+
   defp write_json_file(path, payload) do
     with :ok <- File.mkdir_p(Path.dirname(path)),
          {:ok, json} <- Jason.encode(payload) do
@@ -690,6 +804,122 @@ defmodule Rondo.RunLedger do
     end
   end
 
+  # Retries a checkpoint write once when a file collision is detected.
+  # Re-derives the next sequence from the latest on-disk manifest so that
+  # the caller does not lose a checkpoint on a transient race.
+  defp retry_on_collision(ledger, kind_string, timestamp, manifest_update, _original_seq, original_relative_path, original_checkpoint) do
+    retry_manifest =
+      ledger
+      |> latest_manifest()
+      |> reconciled_manifest(ledger.run_dir)
+
+    retry_seq = next_sequence_from_manifest(retry_manifest)
+    retry_relative_path = Path.join("checkpoints", checkpoint_filename(retry_seq, kind_string))
+    retry_checkpoint_path = Path.join(ledger.run_dir, retry_relative_path)
+    retry_checkpoint = %{original_checkpoint | "seq" => retry_seq}
+
+    retry_index = %{
+      "seq" => retry_seq,
+      "kind" => kind_string,
+      "path" => retry_relative_path,
+      "timestamp" => timestamp
+    }
+
+    retry_updated_manifest =
+      retry_manifest
+      |> Map.update("checkpoints", [retry_index], &(&1 ++ [retry_index]))
+      |> put_in(["timestamps", "updated_at"], timestamp)
+      |> manifest_update.()
+
+    if File.exists?(retry_checkpoint_path) do
+      {:error, {:checkpoint_collision, original_relative_path}}
+    else
+      with :ok <- write_json_file(retry_checkpoint_path, retry_checkpoint),
+           :ok <- write_json_file(ledger.manifest_path, retry_updated_manifest) do
+        {:ok, %{ledger | next_seq: retry_seq + 1, manifest: retry_updated_manifest}}
+      end
+    end
+  end
+
+  defp reconciled_manifest(manifest, run_dir) do
+    checkpoints = Map.get(manifest, "checkpoints", [])
+    indexed_paths = MapSet.new(checkpoints, & &1["path"])
+    indexed_seqs = MapSet.new(checkpoints, & &1["seq"])
+
+    missing =
+      run_dir
+      |> Path.join("checkpoints")
+      |> File.ls()
+      |> case do
+        {:ok, files} -> files
+        _ -> []
+      end
+      |> Enum.filter(&String.ends_with?(&1, ".json"))
+      |> Enum.reject(fn file -> MapSet.member?(indexed_paths, Path.join("checkpoints", file)) end)
+      |> Enum.map(fn file -> parse_checkpoint_index(run_dir, file) end)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.sort_by(&{&1["seq"], &1["path"]})
+      |> dedupe_checkpoint_indexes(indexed_seqs)
+
+    Map.put(manifest, "checkpoints", checkpoints ++ missing)
+  end
+
+  defp dedupe_checkpoint_indexes(entries, indexed_seqs) do
+    {_seen, deduped} =
+      Enum.reduce(entries, {indexed_seqs, []}, fn entry, {seen, acc} ->
+        seq = entry["seq"]
+
+        if MapSet.member?(seen, seq) do
+          {seen, acc}
+        else
+          {MapSet.put(seen, seq), [entry | acc]}
+        end
+      end)
+
+    Enum.reverse(deduped)
+  end
+
+  defp parse_checkpoint_index(run_dir, file) do
+    path = Path.join("checkpoints", file)
+    full_path = Path.join(run_dir, path)
+
+    with {:ok, json} <- File.read(full_path),
+         {:ok, checkpoint} <- decode_json(json),
+         seq when is_integer(seq) <- Map.get(checkpoint, "seq"),
+         kind when is_binary(kind) <- Map.get(checkpoint, "kind"),
+         timestamp when is_binary(timestamp) <- Map.get(checkpoint, "timestamp") do
+      %{"seq" => seq, "kind" => kind, "path" => path, "timestamp" => timestamp}
+    else
+      _other -> synthesize_checkpoint_index(file)
+    end
+  end
+
+  defp synthesize_checkpoint_index(file) do
+    case checkpoint_seq_from_filename(file) do
+      nil ->
+        nil
+
+      seq ->
+        %{
+          "seq" => seq,
+          "kind" => "unknown",
+          "path" => Path.join("checkpoints", file),
+          "timestamp" => DateTime.utc_now() |> datetime_to_iso()
+        }
+    end
+  end
+
+  defp next_sequence_from_manifest(manifest) do
+    manifest
+    |> Map.get("checkpoints", [])
+    |> Enum.map(&Map.get(&1, "seq"))
+    |> Enum.filter(&is_integer/1)
+    |> case do
+      [] -> 1
+      sequences -> Enum.max(sequences) + 1
+    end
+  end
+
   defp validate_manifest(%{"schema_version" => @schema_version, "run_id" => run_id, "status" => status, "run_dir" => run_dir, "checkpoints" => checkpoints})
        when is_binary(run_id) and is_binary(status) and is_binary(run_dir) and is_list(checkpoints),
        do: :ok
@@ -720,6 +950,13 @@ defmodule Rondo.RunLedger do
     "#{seq_string}-#{safe_kind}.json"
   end
 
+  defp checkpoint_seq_from_filename(filename) do
+    case Regex.run(~r/^(\d{4})-/, filename) do
+      [_, digits] -> String.to_integer(digits)
+      _ -> nil
+    end
+  end
+
   defp terminal_checkpoint_kind("completed"), do: :completed
   defp terminal_checkpoint_kind("handed_off"), do: :handed_off
   defp terminal_checkpoint_kind("terminated"), do: :terminated
@@ -734,6 +971,22 @@ defmodule Rondo.RunLedger do
   defp valid_artifact?(%{"kind" => kind, "path" => path}) when is_binary(kind) and is_binary(path), do: true
   defp valid_artifact?(%{kind: kind, path: path}) when is_binary(kind) and is_binary(path), do: true
   defp valid_artifact?(_artifact), do: false
+
+  defp normalize_artifact(artifact, run_dir) do
+    artifact = sanitize_value(artifact)
+    status = artifact["status"] || artifact_status(artifact, run_dir)
+    Map.put(artifact, "status", status)
+  end
+
+  defp artifact_status(%{"path" => path}, run_dir) when is_binary(path) do
+    full_path = if Path.type(path) == :relative, do: Path.join(run_dir, path), else: path
+
+    if File.exists?(full_path) do
+      "present"
+    else
+      "missing"
+    end
+  end
 
   defp issue_identifier(issue), do: issue_value(issue, :identifier) || issue_value(issue, :id) || "issue"
 
