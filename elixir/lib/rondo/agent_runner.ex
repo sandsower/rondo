@@ -7,7 +7,7 @@ defmodule Rondo.AgentRunner do
   alias Rondo.Agent.Adapter
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.PiAdapter
-  alias Rondo.{Config, FinalReport, Gates, Interrupt, ModelRouting, ProcessProvider, RunLedger, Tracker, Workspace}
+  alias Rondo.{Config, FinalReport, Gates, Interrupt, ModelRouting, ProcessProvider, Tracker, Workspace}
   alias Rondo.Linear.Issue
   alias Rondo.ProcessProvider.{Beislid, Native}
   alias Rondo.Tracker.UpdateDetector
@@ -128,6 +128,8 @@ defmodule Rondo.AgentRunner do
          capabilities: Map.get(event, :capabilities),
          final_report: Map.get(event, :final_report),
          diff_source: Map.get(event, :diff_source),
+         model_routing: Map.get(event, :model_routing),
+         source: Map.get(event, :source),
          raw: compatibility_raw(event)
        }}
     )
@@ -137,9 +139,27 @@ defmodule Rondo.AgentRunner do
 
   defp send_claude_update(_recipient, _issue, _event), do: :ok
 
-  defp compatibility_event_type(%{adapter: "claude_code", raw: %{event_type: event_type}}) when is_atom(event_type), do: event_type
-  defp compatibility_event_type(%{event_type: event_type}) when is_atom(event_type), do: event_type
-  defp compatibility_event_type(_event), do: :unknown
+  defp dispatch_model_routing_decision(recipient, issue, routing, source) do
+    send_claude_update(recipient, issue, %{
+      event: :model_routing_decision,
+      method: "model_routing_decision",
+      model_routing: routing,
+      source: source
+    })
+  end
+
+  defp compatibility_event_type(event) when is_map(event) do
+    raw_event_type = get_in(event, [:raw, :event_type])
+    event_type = Map.get(event, :event_type)
+    event_name = Map.get(event, :event)
+
+    cond do
+      is_atom(raw_event_type) and not is_nil(raw_event_type) -> raw_event_type
+      is_atom(event_type) and not is_nil(event_type) -> event_type
+      is_atom(event_name) and not is_nil(event_name) -> event_name
+      true -> :unknown
+    end
+  end
 
   defp compatibility_raw(%{adapter: "claude_code", raw: raw}) when is_map(raw), do: raw
   defp compatibility_raw(event), do: event
@@ -166,9 +186,9 @@ defmodule Rondo.AgentRunner do
   defp run_agent_turns(workspace, issue, claude_update_recipient, opts) do
     with {:ok, provider} <- process_provider_module(opts),
          :ok <- preflight_process_provider(provider, opts),
-         {:ok, opts} <- model_routing_opts(provider, opts),
+         {:ok, opts} <- model_routing_opts(provider, nil, issue, claude_update_recipient, opts, 1),
          {:ok, adapter} <- adapter_module(opts),
-         {:ok, opts} <- ensure_model_selection_supported(adapter, opts) do
+         {:ok, opts} <- ensure_model_selection_supported(adapter, issue, claude_update_recipient, opts, 1) do
       issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
       issue_context_fetcher = Keyword.get(opts, :issue_context_fetcher, &Tracker.fetch_issue_contexts_by_ids/1)
       issue_context_snapshot = initial_issue_context_snapshot(issue, issue_context_fetcher)
@@ -191,25 +211,30 @@ defmodule Rondo.AgentRunner do
     end
   end
 
-  defp model_routing_opts(provider, opts) do
-    routing = resolve_model_routing(provider, opts)
+  defp model_routing_opts(provider, current_adapter, issue, claude_update_recipient, opts, turn_number) do
+    routing_context = model_routing_context_for_turn(opts, turn_number)
+    base_opts = model_routing_base_opts(opts, routing_context)
+    routing = resolve_model_routing(provider, base_opts)
+    routing = maybe_bound_model_routing_to_adapter(routing, current_adapter)
+    source = model_routing_source(provider_id(provider), routing_context, turn_number)
 
     if routing.status == :blocked do
-      with {:ok, _opts} <- maybe_record_model_routing(Keyword.put(opts, :model_routing, routing), routing) do
-        {:error, {:model_routing_blocked, routing}}
-      end
+      dispatch_model_routing_decision(claude_update_recipient, issue, routing, source)
+      {:error, {:model_routing_blocked, routing}}
     else
-      {:ok, apply_model_routing_opts(opts, routing)}
+      {:ok, apply_model_routing_opts(base_opts, routing)}
     end
   end
 
-  defp ensure_model_selection_supported(adapter, opts) do
+  defp ensure_model_selection_supported(adapter, issue, claude_update_recipient, opts, turn_number) do
     routing = Keyword.get(opts, :model_routing)
+    routing_context = Keyword.get(opts, :model_routing_context, %{})
+    source = model_routing_source(provider_id(adapter), routing_context, turn_number)
 
     if Keyword.has_key?(opts, :model) and model_selection_unsupported?(adapter, opts) do
-      handle_unsupported_model_selection(opts, routing, adapter)
+      handle_unsupported_model_selection(opts, routing, adapter, claude_update_recipient, issue, source)
     else
-      maybe_record_model_routing(opts, routing)
+      {:ok, opts}
     end
   end
 
@@ -228,21 +253,19 @@ defmodule Rondo.AgentRunner do
     error -> {:error, error}
   end
 
-  defp handle_unsupported_model_selection(opts, %{mode: :require} = routing, adapter) do
+  defp handle_unsupported_model_selection(_opts, %{mode: :require} = routing, adapter, claude_update_recipient, issue, source) do
     routing = unsupported_model_selection_routing(routing, adapter, :blocked)
-
-    with {:ok, _opts} <- maybe_record_model_routing(Keyword.put(opts, :model_routing, routing), routing) do
-      {:error, {:model_routing_blocked, routing}}
-    end
+    dispatch_model_routing_decision(claude_update_recipient, issue, routing, source)
+    {:error, {:model_routing_blocked, routing}}
   end
 
-  defp handle_unsupported_model_selection(opts, routing, adapter) when is_map(routing) do
+  defp handle_unsupported_model_selection(opts, routing, adapter, _claude_update_recipient, _issue, _source) when is_map(routing) do
     routing = unsupported_model_selection_routing(routing, adapter, :fallback)
-    opts = opts |> Keyword.delete(:model) |> Keyword.put(:model_routing, routing)
-    maybe_record_model_routing(opts, routing)
+    opts = opts |> Keyword.delete(:model) |> Keyword.delete(:agent_adapter) |> Keyword.put(:model_routing, routing)
+    {:ok, opts}
   end
 
-  defp handle_unsupported_model_selection(opts, _routing, _adapter), do: {:ok, opts}
+  defp handle_unsupported_model_selection(opts, _routing, _adapter, _claude_update_recipient, _issue, _source), do: {:ok, opts}
 
   defp unsupported_model_selection_routing(routing, adapter, status) do
     %{routing | status: status, resolved: nil, reason: "adapter #{adapter.id()} does not support per-run model selection"}
@@ -257,6 +280,66 @@ defmodule Rondo.AgentRunner do
     )
   end
 
+  defp model_routing_context_for_turn(opts, turn_number) do
+    context =
+      case Keyword.get(opts, :model_routing_context) do
+        %{} = routing_context -> routing_context
+        _ -> %{}
+      end
+
+    initial_spawn? =
+      turn_number == 1 and
+        is_nil(Keyword.get(opts, :initial_run_ref)) and
+        is_nil(Keyword.get(opts, :operator_guidance))
+
+    if initial_spawn? do
+      Map.put_new(context, :stage, :initial_spawn)
+    else
+      context
+      |> Map.put(:stage, :turn)
+      |> Map.put_new(:phase, "implementation")
+    end
+  end
+
+  defp model_routing_source(source, routing_context, turn_number) do
+    [
+      source: source,
+      stage: Map.get(routing_context, :stage) || Map.get(routing_context, "stage"),
+      skill: Map.get(routing_context, :skill) || Map.get(routing_context, "skill"),
+      phase: Map.get(routing_context, :phase) || Map.get(routing_context, "phase"),
+      step: Map.get(routing_context, :step) || Map.get(routing_context, "step"),
+      turn_number: turn_number
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp model_routing_base_opts(opts, routing_context) do
+    opts
+    |> maybe_clear_routed_model_state()
+    |> Keyword.put(:model_routing_context, routing_context)
+  end
+
+  defp maybe_bound_model_routing_to_adapter(%{resolved: %{adapter: desired_adapter}} = routing, current_adapter)
+       when is_binary(desired_adapter) and not is_nil(current_adapter) do
+    current_adapter_id = provider_id(current_adapter)
+
+    if current_adapter_id == desired_adapter do
+      routing
+    else
+      status = if routing.mode == :require, do: :blocked, else: :fallback
+
+      %{
+        routing
+        | status: status,
+          resolved: nil,
+          reason: "model routing requested adapter #{desired_adapter} but active adapter #{current_adapter_id} cannot switch mid-run"
+      }
+    end
+  end
+
+  defp maybe_bound_model_routing_to_adapter(routing, _current_adapter), do: routing
+
   defp apply_model_routing_opts(opts, routing) do
     opts
     |> Keyword.put(:model_routing, routing)
@@ -270,67 +353,114 @@ defmodule Rondo.AgentRunner do
   defp maybe_put_routed_adapter(opts, %{resolved: %{adapter: adapter}}) when is_binary(adapter), do: Keyword.put(opts, :agent_adapter, adapter)
   defp maybe_put_routed_adapter(opts, _routing), do: opts
 
-  defp maybe_record_model_routing(opts, routing) do
-    case Keyword.get(opts, :run_ledger) do
-      %RunLedger{} = ledger ->
-        with {:ok, ledger} <- RunLedger.update_agent_metadata(ledger, %{"model_routing" => routing}) do
-          {:ok, Keyword.put(opts, :run_ledger, ledger)}
-        end
-
-      _ledger ->
-        {:ok, opts}
+  defp maybe_clear_routed_model_state(opts) do
+    if Keyword.has_key?(opts, :model_routing) do
+      opts
+      |> Keyword.delete(:model)
+      |> Keyword.delete(:agent_adapter)
+    else
+      opts
     end
   end
 
   defp do_run_agent_turns(context, issue, turn_number, run_ref, previous_final_report_fingerprint \\ nil) do
-    prompt = build_turn_prompt(context.process_provider, issue, context.opts, turn_number, context.max_turns)
+    with {:ok, turn_opts} <-
+           model_routing_opts(
+             context.process_provider,
+             context.adapter,
+             issue,
+             context.claude_update_recipient,
+             context.opts,
+             turn_number
+           ),
+         {:ok, turn_opts} <-
+           ensure_model_selection_supported(
+             context.adapter,
+             issue,
+             context.claude_update_recipient,
+             turn_opts,
+             turn_number
+           ) do
+      turn_context = %{context | opts: turn_opts}
+      routing = Keyword.get(turn_context.opts, :model_routing)
 
-    completion_ref = make_ref()
-    Process.put(completion_ref, false)
-
-    result =
-      context.adapter.invoke(%{
-        prompt: prompt,
-        workspace: context.workspace,
-        previous_run_ref: run_ref,
-        on_event: claude_event_handler(context.claude_update_recipient, issue, completion_ref),
-        opts: context.opts
-      })
-
-    completion_observed? = Process.get(completion_ref, false)
-    Process.delete(completion_ref)
-
-    case result do
-      {:ok, %{run_ref: new_run_ref} = invocation_result} ->
-        effective_run_ref = new_run_ref || run_ref
-        provider_ref = if effective_run_ref, do: Map.get(effective_run_ref, :provider_ref)
-
-        Logger.info(
-          "Completed agent turn for #{issue_context(issue)} adapter=#{context.adapter.id()} " <>
-            "provider_ref=#{provider_ref} workspace=#{context.workspace} turn=#{turn_number}/#{context.max_turns}"
+      routing_source =
+        model_routing_source(
+          provider_id(turn_context.adapter),
+          Keyword.get(turn_context.opts, :model_routing_context, %{}),
+          turn_number
         )
 
-        maybe_send_invocation_result_update(
-          context.claude_update_recipient,
-          issue,
-          context.adapter,
-          invocation_result,
-          completion_observed?
-        )
+      :ok = dispatch_model_routing_decision(turn_context.claude_update_recipient, issue, routing, routing_source)
+      prompt = build_turn_prompt(turn_context.process_provider, issue, turn_context.opts, turn_number, turn_context.max_turns)
 
-        with :ok <- run_gates(context, issue, turn_number) do
-          continue_agent_turns(
-            clear_live_update_prompt(context),
+      completion_ref = make_ref()
+      Process.put(completion_ref, false)
+
+      result =
+        turn_context.adapter.invoke(%{
+          prompt: prompt,
+          workspace: turn_context.workspace,
+          previous_run_ref: run_ref,
+          on_event: claude_event_handler(turn_context.claude_update_recipient, issue, completion_ref),
+          opts: turn_context.opts
+        })
+
+      completion_observed? = Process.get(completion_ref, false)
+      Process.delete(completion_ref)
+
+      case result do
+        {:ok, %{run_ref: _} = invocation_result} ->
+          handle_invocation_result(
+            turn_context,
             issue,
             turn_number,
-            effective_run_ref,
-            Map.get(invocation_result, :final_report),
-            previous_final_report_fingerprint
+            run_ref,
+            previous_final_report_fingerprint,
+            completion_observed?,
+            invocation_result
           )
-        end
 
-      {:error, reason} ->
-        {:error, reason}
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  defp handle_invocation_result(
+         turn_context,
+         issue,
+         turn_number,
+         run_ref,
+         previous_final_report_fingerprint,
+         completion_observed?,
+         %{run_ref: new_run_ref} = invocation_result
+       ) do
+    effective_run_ref = new_run_ref || run_ref
+    provider_ref = if effective_run_ref, do: Map.get(effective_run_ref, :provider_ref)
+
+    Logger.info(
+      "Completed agent turn for #{issue_context(issue)} adapter=#{turn_context.adapter.id()} " <>
+        "provider_ref=#{provider_ref} workspace=#{turn_context.workspace} turn=#{turn_number}/#{turn_context.max_turns}"
+    )
+
+    maybe_send_invocation_result_update(
+      turn_context.claude_update_recipient,
+      issue,
+      turn_context.adapter,
+      invocation_result,
+      completion_observed?
+    )
+
+    with :ok <- run_gates(turn_context, issue, turn_number) do
+      continue_agent_turns(
+        clear_live_update_prompt(turn_context),
+        issue,
+        turn_number,
+        effective_run_ref,
+        Map.get(invocation_result, :final_report),
+        previous_final_report_fingerprint
+      )
     end
   end
 

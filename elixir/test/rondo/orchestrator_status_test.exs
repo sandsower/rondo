@@ -2891,6 +2891,7 @@ defmodule Rondo.OrchestratorStatusTest do
         workspace: Path.join(workspace_root, issue.identifier),
         session_id: "paused-startup-session",
         retry_attempt: 1,
+        model_routing_context: %{skill: "review-response", phase: "fix", stage: :turn},
         timestamp: ~U[2026-05-28 10:00:00Z]
       })
 
@@ -2913,6 +2914,7 @@ defmodule Rondo.OrchestratorStatusTest do
     assert paused_entry.tracker_visibility == "unknown"
 
     state = :sys.get_state(pid)
+    assert state.paused_interrupts[issue.id].model_routing_context == %{"skill" => "review-response", "phase" => "fix", "stage" => "turn"}
     assert MapSet.member?(state.claimed, issue.id)
     assert %Rondo.RunLedger{} = state.paused_interrupts[issue.id].ledger
     assert state.paused_interrupts[issue.id].ledger.run_id == ledger.run_id

@@ -40,6 +40,7 @@ defmodule Rondo.InterruptTest do
         session_id: "session-123",
         run_ref: %{provider_ref: "provider-abc"},
         retry_attempt: 1,
+        model_routing_context: %{skill: "review-response", phase: "fix", stage: :turn},
         timestamp: @now
       })
 
@@ -64,7 +65,8 @@ defmodule Rondo.InterruptTest do
              "workspace" => "/tmp/rondo/GH-22",
              "session_id" => "session-123",
              "run_ref" => %{"provider_ref" => "provider-abc"},
-             "retry_attempt" => 1
+             "retry_attempt" => 1,
+             "model_routing_context" => %{"skill" => "review-response", "phase" => "fix", "stage" => "turn"}
            }
 
     assert interrupt["gate"]["status"] == "fail"

@@ -78,6 +78,37 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  defp start_update_recorder(test_pid, ledger \\ nil) do
+    spawn_link(fn -> update_recorder_loop(test_pid, ledger) end)
+  end
+
+  defp update_recorder_loop(test_pid, ledger) do
+    receive do
+      {:set_ledger, %RunLedger{} = new_ledger} ->
+        update_recorder_loop(test_pid, new_ledger)
+
+      {:claude_worker_update, issue_id, %{event: :model_routing_decision} = update} ->
+        ledger =
+          case {ledger, Map.get(update, :model_routing)} do
+            {%RunLedger{} = current_ledger, %{} = routing} ->
+              case RunLedger.record_model_routing_decision(current_ledger, routing, source: Map.get(update, :source, %{})) do
+                {:ok, updated_ledger} -> updated_ledger
+                {:error, _reason} -> current_ledger
+              end
+
+            _other ->
+              ledger
+          end
+
+        send(test_pid, {:claude_worker_update, issue_id, update})
+        update_recorder_loop(test_pid, ledger)
+
+      message ->
+        send(test_pid, message)
+        update_recorder_loop(test_pid, ledger)
+    end
+  end
+
   defmodule FakeProcessProvider do
     @behaviour Rondo.ProcessProvider
 
@@ -221,6 +252,54 @@ defmodule Rondo.AgentAdapterTest do
           "tier" => "heavy",
           "mode" => "prefer"
         }
+      }
+    end
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(_action, _classes, _opts \\ []), do: {:error, :not_used}
+  end
+
+  defmodule TurnAwareModelHintProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "turn_aware_model_hint_process"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test, prompt: :test, model_routing_hints: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :ok, checks: %{available: :ok}}
+
+    @impl true
+    def select_gates(_opts \\ []), do: {:ok, Rondo.ProcessProvider.gate_selection_result([])}
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Turn-aware model hint prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []) do
+      %{
+        "initial" => %{
+          "skill" => "kickoff",
+          "phase" => "context_discovery",
+          "tier" => "standard",
+          "mode" => "prefer"
+        },
+        "steps" => [
+          %{
+            "stage" => "turn",
+            "phase" => "implementation",
+            "tier" => "heavy",
+            "mode" => "prefer"
+          }
+        ]
       }
     end
 
@@ -697,8 +776,9 @@ defmodule Rondo.AgentAdapterTest do
         labels: []
       }
 
-      parent = self()
+      parent = start_update_recorder(self())
       assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
 
       assert :ok =
                AgentRunner.run(issue, parent,
@@ -766,8 +846,9 @@ defmodule Rondo.AgentAdapterTest do
         labels: []
       }
 
-      parent = self()
+      parent = start_update_recorder(self())
       assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
 
       assert :ok =
                AgentRunner.run(issue, parent,
@@ -815,8 +896,9 @@ defmodule Rondo.AgentAdapterTest do
         labels: []
       }
 
-      parent = self()
+      parent = start_update_recorder(self())
       assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
 
       assert :ok =
                AgentRunner.run(issue, parent,
@@ -867,8 +949,9 @@ defmodule Rondo.AgentAdapterTest do
         labels: []
       }
 
-      parent = self()
+      parent = start_update_recorder(self())
       assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
 
       assert :ok =
                AgentRunner.run(issue, parent,
@@ -919,8 +1002,9 @@ defmodule Rondo.AgentAdapterTest do
         labels: []
       }
 
-      parent = self()
+      parent = start_update_recorder(self())
       assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
 
       assert :ok =
                AgentRunner.run(issue, parent,
@@ -951,6 +1035,73 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  test "agent runner re-evaluates model routing on continuation turns" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-turn-routing-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 2,
+        gates: nil,
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{
+            standard: [%{model: "standard-model"}],
+            heavy: [%{model: "heavy-model"}]
+          }
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-turn-routing",
+        identifier: "MT-TURN-ROUTING",
+        title: "Turn routing",
+        description: "Exercise runtime turn-aware routing",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = start_update_recorder(self())
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
+
+      state_fetcher = fn [_issue_id] ->
+        fetch_count = Process.get(:turn_model_routing_fetch_count, 0) + 1
+        Process.put(:turn_model_routing_fetch_count, fetch_count)
+
+        state = if fetch_count == 1, do: "In Progress", else: "Done"
+        {:ok, [%{issue | state: state}]}
+      end
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: TurnAwareModelHintProcessProvider,
+                 run_ledger: ledger,
+                 test_pid: parent,
+                 issue_state_fetcher: state_fetcher
+               )
+
+      assert_receive {:fake_adapter_opts, first_opts}, 500
+      assert Keyword.get(first_opts, :model) == "standard-model"
+      assert %{status: :honored, context: %{stage: "initial_spawn"}} = Keyword.fetch!(first_opts, :model_routing)
+
+      assert_receive {:fake_adapter_opts, second_opts}, 500
+      assert Keyword.get(second_opts, :model) == "heavy-model"
+      assert %{status: :honored, context: %{stage: "turn", phase: "implementation"}} = Keyword.fetch!(second_opts, :model_routing)
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      assert manifest["agent"]["model_routing"]["context"]["stage"] == "turn"
+      assert manifest["agent"]["model_routing"]["context"]["phase"] == "implementation"
+      assert Enum.count(manifest["checkpoints"], &(&1["kind"] == "model_routing_decision")) >= 2
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner records unresolved required initial routing before blocking" do
     test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-initial-routing-unresolved-#{System.unique_integer([:positive])}")
 
@@ -975,8 +1126,9 @@ defmodule Rondo.AgentAdapterTest do
         labels: []
       }
 
-      parent = self()
+      parent = start_update_recorder(self())
       assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
 
       assert_raise RuntimeError, ~r/model_routing_blocked/, fn ->
         AgentRunner.run(issue, parent,
@@ -987,6 +1139,8 @@ defmodule Rondo.AgentAdapterTest do
           issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
         )
       end
+
+      assert_receive {:claude_worker_update, _, %{event: :model_routing_decision}}, 500
 
       manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
       assert manifest["agent"]["model_routing"]["status"] == "blocked"
@@ -1023,8 +1177,9 @@ defmodule Rondo.AgentAdapterTest do
         labels: []
       }
 
-      parent = self()
+      parent = start_update_recorder(self())
       assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
 
       assert_raise RuntimeError, ~r/model_routing_blocked/, fn ->
         AgentRunner.run(issue, parent,
@@ -1035,6 +1190,8 @@ defmodule Rondo.AgentAdapterTest do
           issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
         )
       end
+
+      assert_receive {:claude_worker_update, _, %{event: :model_routing_decision}}, 500
 
       manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
       assert manifest["agent"]["model_routing"]["status"] == "blocked"
@@ -1066,8 +1223,9 @@ defmodule Rondo.AgentAdapterTest do
         labels: []
       }
 
-      parent = self()
+      parent = start_update_recorder(self())
       assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
 
       assert_raise RuntimeError, ~r/model_routing_blocked/, fn ->
         AgentRunner.run(issue, parent,
@@ -1078,6 +1236,8 @@ defmodule Rondo.AgentAdapterTest do
           issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
         )
       end
+
+      assert_receive {:claude_worker_update, _, %{event: :model_routing_decision}}, 500
 
       manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
       assert manifest["agent"]["model_routing"]["status"] == "blocked"
@@ -1106,8 +1266,9 @@ defmodule Rondo.AgentAdapterTest do
         labels: []
       }
 
-      parent = self()
+      parent = start_update_recorder(self())
       assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
 
       assert_raise RuntimeError, ~r/model_routing_blocked/, fn ->
         AgentRunner.run(issue, parent,
@@ -1118,6 +1279,8 @@ defmodule Rondo.AgentAdapterTest do
           issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
         )
       end
+
+      assert_receive {:claude_worker_update, _, %{event: :model_routing_decision}}, 500
 
       manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
       assert manifest["agent"]["model_routing"]["status"] == "blocked"
@@ -1160,7 +1323,7 @@ defmodule Rondo.AgentAdapterTest do
         labels: []
       }
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       assert :ok =
                AgentRunner.run(issue, parent, issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end)
@@ -1223,7 +1386,7 @@ defmodule Rondo.AgentAdapterTest do
         labels: []
       }
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       assert :ok =
                AgentRunner.run(issue, parent,
@@ -1259,7 +1422,7 @@ defmodule Rondo.AgentAdapterTest do
         labels: []
       }
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       assert :ok =
                AgentRunner.run(issue, parent,
@@ -1296,7 +1459,7 @@ defmodule Rondo.AgentAdapterTest do
         max_turns: 1
       )
 
-      parent = self()
+      parent = start_update_recorder(self())
       previous_run_ref = Adapter.run_ref("fake", "paused-run-1", "fake_run_id", true)
 
       issue = %Issue{
@@ -1339,7 +1502,7 @@ defmodule Rondo.AgentAdapterTest do
         max_turns: 2
       )
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       state_fetcher = fn [_issue_id] ->
         attempt = Process.get(:fake_adapter_fetch_count, 0) + 1
@@ -1399,7 +1562,7 @@ defmodule Rondo.AgentAdapterTest do
 
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, max_turns: 1, gates: nil)
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       issue = %Issue{
         id: "issue-provider",
@@ -1457,7 +1620,7 @@ defmodule Rondo.AgentAdapterTest do
         gates: [%{name: "native-proof", command: "echo native > native-gate.txt", timeout_ms: 1_000}]
       )
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       issue = %Issue{
         id: "issue-fallback",
@@ -1561,7 +1724,7 @@ defmodule Rondo.AgentAdapterTest do
 
       write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root, max_turns: 1, gates: nil)
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       issue = %Issue{
         id: "issue-empty-gates",
@@ -1658,7 +1821,7 @@ defmodule Rondo.AgentAdapterTest do
         process_provider_artifact_path: fixture_path("unapproved.json")
       )
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       issue = %Issue{
         id: "issue-beislid-source",
@@ -1711,7 +1874,7 @@ defmodule Rondo.AgentAdapterTest do
         action_policy_command: fake_action_policy("allow")
       )
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       issue = %Issue{
         id: "issue-beislid-no-policy",
@@ -1764,7 +1927,7 @@ defmodule Rondo.AgentAdapterTest do
         process_provider_artifact_path: fixture_path("approved.json")
       )
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       issue = %Issue{
         id: "issue-beislid-ok",
@@ -1821,7 +1984,7 @@ defmodule Rondo.AgentAdapterTest do
         gates: [%{name: "native-proof", command: "echo native > native-gate.txt", timeout_ms: 1_000}]
       )
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       issue = %Issue{
         id: "issue-beislid-fallback",
@@ -1912,7 +2075,7 @@ defmodule Rondo.AgentAdapterTest do
         action_policy_command: fake_action_policy("allow")
       )
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       issue = %Issue{
         id: "issue-flat-gates",
@@ -1964,7 +2127,7 @@ defmodule Rondo.AgentAdapterTest do
         gates: [%{name: "proof", command: "pwd > gate-pwd.txt", timeout_ms: 1_000}]
       )
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       issue = %Issue{
         id: "issue-gates",
@@ -2008,7 +2171,7 @@ defmodule Rondo.AgentAdapterTest do
         gates: [%{name: "proof", command: "echo gate", timeout_ms: 1_000}]
       )
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       issue = %Issue{
         id: "issue-gate-turns",
@@ -2065,7 +2228,7 @@ defmodule Rondo.AgentAdapterTest do
         gates: [%{name: "proof", command: "printf 'gate\\n' >> #{inspect(trace_file)}", timeout_ms: 1_000}]
       )
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       issue = %Issue{
         id: "issue-gate-reuse",
@@ -2139,7 +2302,7 @@ defmodule Rondo.AgentAdapterTest do
         gates: [%{name: "proof", command: "printf 'gate\\n' >> #{inspect(trace_file)}", timeout_ms: 1_000}]
       )
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       issue = %Issue{
         id: "issue-gate-rerun",
@@ -2212,7 +2375,7 @@ gate
         gates: [%{name: "proof", command: "exit 3", timeout_ms: 1_000}]
       )
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       issue = %Issue{
         id: "issue-gate-fail",
@@ -2426,7 +2589,7 @@ gate
         pi_command: pi_binary
       )
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       assert {:ok, result} =
                PiAdapter.invoke(%{
@@ -2490,7 +2653,7 @@ gate
         labels: []
       }
 
-      parent = self()
+      parent = start_update_recorder(self())
 
       assert :ok =
                AgentRunner.run(issue, parent, issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end)

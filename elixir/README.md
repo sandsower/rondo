@@ -270,8 +270,10 @@ Notes:
   artifacts, which outrank repo routing/global config. Supported provider-neutral tiers are `light`,
   `standard`, `heavy`, and `frontier`; built-in defaults map them to Claude Code aliases `haiku`,
   `sonnet`, `opus`, and `opus`. A repo floor such as `floor: {tier: standard, mode: require}` raises
-  lower requested tiers to the floor and records status `fallback` with an explanatory reason. Resolved
-  routing is passed to adapters per run and persisted under `agent.model_routing` in the run ledger.
+  lower requested tiers to the floor and records status `fallback` with an explanatory reason. Rondo
+  re-evaluates routing at turn/phase boundaries, and selector values normalize hyphens/underscores so
+  `context-discovery` and `context_discovery` match deterministically. Resolved routing is passed to
+  adapters per run and persisted under `agent.model_routing` in the run ledger.
 - `agent.max_turns` caps how many back-to-back agent turns Rondo will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Rondo uses a default prompt template that includes the issue
