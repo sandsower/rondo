@@ -37,12 +37,15 @@ defmodule Rondo.TestSupport do
         Workflow.set_workflow_file_path(workflow_file)
         if Process.whereis(Rondo.WorkflowStore), do: Rondo.WorkflowStore.force_reload()
         stop_default_http_server()
+        previous_openrouter_key = System.get_env("OPENROUTER_API_KEY")
+        System.put_env("OPENROUTER_API_KEY", "rondo-test-openrouter-key")
 
         on_exit(fn ->
           Workflow.clear_workflow_file_path()
           Application.delete_env(:rondo, :server_port_override)
           Application.delete_env(:rondo, :memory_tracker_issues)
           Application.delete_env(:rondo, :memory_tracker_recipient)
+          restore_env("OPENROUTER_API_KEY", previous_openrouter_key)
           File.rm_rf(workflow_root)
         end)
 

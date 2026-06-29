@@ -634,6 +634,33 @@ defmodule Rondo.RunLedgerTest do
     assert by_file == by_dir
   end
 
+  test "record_model_routing_decision preserves routing profile" do
+    workspace_root = tmp_dir("ledger-model-routing-profile")
+    issue = issue_fixture()
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "57a1e005"
+             )
+
+    routing = %{
+      status: :honored,
+      mode: :prefer,
+      profile: "bulk_implementation",
+      requested_tier: "light",
+      candidates: [%{adapter: "pi", model: "openrouter/deepseek/deepseek-chat"}],
+      resolved: %{adapter: "pi", model: "openrouter/deepseek/deepseek-chat"},
+      reason: "resolved tier light to pi/openrouter/deepseek/deepseek-chat"
+    }
+
+    assert {:ok, ledger} = RunLedger.record_model_routing_decision(ledger, routing)
+    manifest = decode_json!(ledger.manifest_path)
+
+    assert manifest["agent"]["model_routing"]["profile"] == "bulk_implementation"
+  end
+
   test "edge-case inputs remain safe and serializable" do
     workspace_root = tmp_dir("ledger-edges")
     issue = issue_fixture()
