@@ -10,6 +10,7 @@ defmodule Rondo.Orchestrator do
   alias Rondo.Agent.Adapter, as: AgentAdapter
   alias Rondo.AgentRunner
   alias Rondo.Config
+  alias Rondo.Escalation
   alias Rondo.Interrupt
   alias Rondo.Linear.Issue
   alias Rondo.ReleaseLoop
@@ -187,42 +188,11 @@ defmodule Rondo.Orchestrator do
         session_id = running_entry_session_id(running_entry)
 
         state =
-          cond do
-            reason == :normal ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
-
-              state
-              |> archive_running_entry(running_entry, reason)
-              |> complete_issue(issue_id)
-              |> schedule_issue_retry(issue_id, 1, %{
-                identifier: running_entry.identifier,
-                delay_type: :continuation
-              })
-
-            action_policy_guidance_exit?(reason) ->
-              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=action_policy_guidance")
-              pause_running_entry(state, issue_id, running_entry, reason)
-
-            final_report_invalid_exit?(reason) ->
-              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=final_report_invalid")
-              pause_running_entry(state, issue_id, running_entry, reason)
-
-            pause_after_gate_failure?(running_entry, reason) ->
-              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=repeated_gate_failure")
-              pause_running_entry(state, issue_id, running_entry, reason)
-
-            true ->
-              Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
-
-              next_attempt = next_retry_attempt_from_running(running_entry)
-
-              state
-              |> archive_running_entry(running_entry, reason)
-              |> schedule_issue_retry(issue_id, next_attempt, %{
-                identifier: running_entry.identifier,
-                error: "agent exited: #{inspect(reason)}",
-                failure_reason: retry_failure_reason(running_entry, reason)
-              })
+          if action_policy_guidance_exit?(reason) do
+            Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=action_policy_guidance")
+            pause_running_entry(state, issue_id, running_entry, reason)
+          else
+            handle_run_completion(state, issue_id, running_entry, reason, session_id)
           end
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
@@ -1084,6 +1054,8 @@ defmodule Rondo.Orchestrator do
   end
 
   defp start_agent_for_issue(%State{} = state, issue, attempt, attempt_metadata, recipient, ledger, agent_opts \\ []) do
+    merged_opts = Keyword.merge(escalation_agent_opts(attempt_metadata), agent_opts)
+
     case Task.Supervisor.start_child(Rondo.TaskSupervisor, fn ->
            base_opts = [
              attempt: normalize_retry_attempt(attempt),
@@ -1091,7 +1063,7 @@ defmodule Rondo.Orchestrator do
              run_ledger: ledger
            ]
 
-           AgentRunner.run(issue, recipient, Keyword.merge(base_opts, agent_opts))
+           AgentRunner.run(issue, recipient, Keyword.merge(base_opts, merged_opts))
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -1130,9 +1102,10 @@ defmodule Rondo.Orchestrator do
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
             retry_failure_reason: Keyword.get(attempt_metadata, :failure_reason),
+            attempt_chain: Keyword.get(attempt_metadata, :attempt_chain, []),
             started_at: DateTime.utc_now(),
             latest_gate: nil,
-            model_routing_context: Keyword.get(agent_opts, :model_routing_context),
+            model_routing_context: Keyword.get(merged_opts, :model_routing_context),
             event_log: []
           })
 
@@ -1154,6 +1127,176 @@ defmodule Rondo.Orchestrator do
           error: "failed to spawn agent: #{inspect(reason)}"
         })
     end
+  end
+
+  defp escalation_agent_opts(metadata) do
+    opts =
+      case Keyword.get(metadata, :next_tier) do
+        tier when is_binary(tier) ->
+          [source_contract: %{"model_routing" => %{"tier" => tier, "mode" => "prefer"}}]
+
+        _ ->
+          []
+      end
+
+    opts =
+      case Keyword.get(metadata, :evidence_prompt) do
+        prompt when is_binary(prompt) -> Keyword.put(opts, :operator_guidance, prompt)
+        _ -> opts
+      end
+
+    opts =
+      if Keyword.get(metadata, :fresh_workspace, false) do
+        Keyword.put(opts, :fresh_workspace, true)
+      else
+        opts
+      end
+
+    case Keyword.get(metadata, :max_turns) do
+      n when is_integer(n) and n > 0 -> Keyword.put(opts, :max_turns, n)
+      _ -> opts
+    end
+  end
+
+  defp handle_run_completion(%State{} = state, issue_id, running_entry, reason, session_id) do
+    has_ledger? = match?(%RunLedger{}, Map.get(running_entry, :ledger))
+    escalation_enabled? = has_ledger? and Escalation.resolve_config(nil).enabled
+
+    cond do
+      reason == :normal ->
+        handle_normal_completion(state, issue_id, running_entry, session_id, has_ledger?)
+
+      not escalation_enabled? ->
+        handle_non_escalation_exit(state, issue_id, running_entry, reason, session_id, has_ledger?)
+
+      true ->
+        Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; evaluating escalation policy")
+        evaluate_escalation(state, issue_id, running_entry, reason)
+    end
+  end
+
+  defp handle_normal_completion(%State{} = state, issue_id, running_entry, session_id, has_ledger?) do
+    Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+    if has_ledger? do
+      archive_running_entry(state, running_entry, :normal)
+    else
+      state
+    end
+    |> complete_issue(issue_id)
+    |> schedule_issue_retry(issue_id, 1, %{
+      identifier: running_entry.identifier,
+      delay_type: :continuation
+    })
+  end
+
+  defp handle_non_escalation_exit(%State{} = state, issue_id, running_entry, reason, session_id, has_ledger?) do
+    cond do
+      final_report_invalid_exit?(reason) ->
+        Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=final_report_invalid")
+        pause_running_entry(state, issue_id, running_entry, reason)
+
+      pause_after_gate_failure?(running_entry, reason) ->
+        Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=repeated_gate_failure")
+        pause_running_entry(state, issue_id, running_entry, reason)
+
+      true ->
+        Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+
+        next_attempt = next_retry_attempt_from_running(running_entry)
+
+        if has_ledger? do
+          archive_running_entry(state, running_entry, reason)
+        else
+          state
+        end
+        |> schedule_issue_retry(issue_id, next_attempt, %{
+          identifier: running_entry.identifier,
+          error: "agent exited: #{inspect(reason)}",
+          failure_reason: retry_failure_reason(running_entry, reason)
+        })
+    end
+  end
+
+  defp evaluate_escalation(%State{} = state, issue_id, running_entry, reason) do
+    state = archive_running_entry(state, running_entry, reason)
+
+    run_dir = Map.get(running_entry, :run_dir)
+    attempt_chain = Map.get(running_entry, :attempt_chain, [])
+
+    case load_run_manifest(run_dir) do
+      {:ok, manifest} ->
+        case Escalation.after_attempt(manifest, attempt_chain, nil) do
+          {:done, _chain} ->
+            complete_issue(state, issue_id)
+            |> schedule_issue_retry(issue_id, 1, %{
+              identifier: running_entry.identifier,
+              delay_type: :continuation
+            })
+
+          {:pause, pause_reason, chain} ->
+            pause_for_escalation(state, issue_id, running_entry, pause_reason, chain)
+
+          {:escalate, next_tier, chain, prompt} ->
+            schedule_issue_retry(state, issue_id, nil, %{
+              identifier: running_entry.identifier,
+              delay_type: :escalation,
+              next_tier: next_tier,
+              evidence_prompt: prompt,
+              fresh_workspace: true,
+              attempt_chain: chain
+            })
+
+          {:repair, chain, prompt} ->
+            current_tier = chain |> List.last() |> Map.get(:tier)
+
+            schedule_issue_retry(state, issue_id, nil, %{
+              identifier: running_entry.identifier,
+              delay_type: :repair,
+              next_tier: current_tier,
+              evidence_prompt: prompt,
+              fresh_workspace: false,
+              max_turns: 1,
+              attempt_chain: chain
+            })
+        end
+
+      {:error, load_reason} ->
+        Logger.error("Escalation decision skipped for issue_id=#{issue_id}; could not load manifest: #{inspect(load_reason)}")
+
+        schedule_issue_retry(state, issue_id, nil, %{
+          identifier: running_entry.identifier,
+          error: "escalation manifest load failed: #{inspect(load_reason)}"
+        })
+    end
+  end
+
+  defp load_run_manifest(nil), do: {:error, :missing_run_dir}
+
+  defp load_run_manifest(run_dir) when is_binary(run_dir) do
+    RunLedger.load_manifest(run_dir)
+  end
+
+  defp pause_for_escalation(state, issue_id, running_entry, reason, chain) do
+    run_dir = Map.get(running_entry, :run_dir)
+
+    ledger =
+      case load_run_manifest(run_dir) do
+        {:ok, manifest} ->
+          manifest_path = Path.join(run_dir, "manifest.json")
+          ledger = run_ledger_from_manifest(manifest, manifest_path)
+
+          case RunLedger.record_attempt_chain(ledger, chain) do
+            {:ok, ledger} -> ledger
+            {:error, _} -> ledger
+          end
+
+        {:error, _} ->
+          Map.get(running_entry, :ledger)
+      end
+
+    running_entry = Map.put(running_entry, :ledger, ledger)
+    pause_running_entry(state, issue_id, running_entry, {:escalation_paused, reason, chain})
   end
 
   defp create_run_ledger(issue, attempt) do
@@ -1366,6 +1509,16 @@ defmodule Rondo.Orchestrator do
 
   defp pause_interrupt_for_reason(_running_entry, {:action_policy_guidance_required, interrupt}) when is_map(interrupt), do: interrupt
   defp pause_interrupt_for_reason(_running_entry, {:final_report_invalid, interrupt}) when is_map(interrupt), do: interrupt
+
+  defp pause_interrupt_for_reason(running_entry, {:escalation_paused, reason, chain}) do
+    Interrupt.escalation_paused(
+      Map.merge(interrupt_context(running_entry), %{
+        reason: reason,
+        attempt_chain: chain
+      })
+    )
+  end
+
   defp pause_interrupt_for_reason(running_entry, _reason), do: Interrupt.repeated_gate_failure(interrupt_context(running_entry))
 
   defp interrupt_context(running_entry) do
@@ -1695,25 +1848,49 @@ defmodule Rondo.Orchestrator do
             due_at_ms: due_at_ms,
             identifier: identifier,
             error: error,
-            failure_reason: Map.get(metadata, :failure_reason)
+            failure_reason: Map.get(metadata, :failure_reason),
+            delay_type: Map.get(metadata, :delay_type),
+            next_tier: Map.get(metadata, :next_tier),
+            evidence_prompt: Map.get(metadata, :evidence_prompt),
+            fresh_workspace: Map.get(metadata, :fresh_workspace),
+            max_turns: Map.get(metadata, :max_turns),
+            attempt_chain: Map.get(metadata, :attempt_chain)
           })
     }
   end
 
+  @retry_metadata_fields [
+    :identifier,
+    :error,
+    :failure_reason,
+    :delay_type,
+    :next_tier,
+    :evidence_prompt,
+    :fresh_workspace,
+    :max_turns,
+    :attempt_chain
+  ]
+
   defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
     case Map.get(state.retry_attempts, issue_id) do
       %{attempt: attempt, retry_token: ^retry_token} = retry_entry ->
-        metadata = %{
-          identifier: Map.get(retry_entry, :identifier),
-          error: Map.get(retry_entry, :error),
-          failure_reason: Map.get(retry_entry, :failure_reason)
-        }
+        metadata = extract_retry_metadata(retry_entry)
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
 
       _ ->
         :missing
     end
+  end
+
+  defp extract_retry_metadata(retry_entry) do
+    @retry_metadata_fields
+    |> Enum.reduce(%{}, fn field, acc ->
+      case Map.fetch(retry_entry, field) do
+        {:ok, value} when not is_nil(value) -> Map.put(acc, field, value)
+        _ -> acc
+      end
+    end)
   end
 
   defp handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
@@ -1815,15 +1992,19 @@ defmodule Rondo.Orchestrator do
     %{state | claimed: MapSet.delete(state.claimed, issue_id)}
   end
 
-  defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
-    case metadata[:delay_type] do
-      :continuation when attempt == 1 -> @continuation_retry_delay_ms
-      :poll_retry -> @poll_retry_delay_ms
-      :slot_wait -> @slot_wait_delay_ms
-      :release_loop_wait -> Config.release_loop_wait_interval_seconds() * 1_000
-      _ -> failure_retry_delay(attempt)
-    end
-  end
+  defp retry_delay(1, %{delay_type: :continuation}), do: @continuation_retry_delay_ms
+  defp retry_delay(_attempt, %{delay_type: :escalation}), do: 0
+  defp retry_delay(_attempt, %{delay_type: :repair}), do: 0
+  defp retry_delay(_attempt, %{delay_type: :poll_retry}), do: @poll_retry_delay_ms
+  defp retry_delay(_attempt, %{delay_type: :slot_wait}), do: @slot_wait_delay_ms
+
+  defp retry_delay(_attempt, %{delay_type: :release_loop_wait}),
+    do: Config.release_loop_wait_interval_seconds() * 1_000
+
+  defp retry_delay(attempt, _metadata) when is_integer(attempt) and attempt > 0,
+    do: failure_retry_delay(attempt)
+
+  defp retry_delay(_attempt, _metadata), do: failure_retry_delay(1)
 
   defp failure_retry_delay(attempt) do
     max_delay_power = min(attempt - 1, 10)

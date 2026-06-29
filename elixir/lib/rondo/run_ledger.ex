@@ -176,6 +176,19 @@ defmodule Rondo.RunLedger do
     do_record_model_routing_decision(ledger, routing, opts)
   end
 
+  @spec record_attempt_chain(t(), [map()]) :: {:ok, t()} | {:error, term()}
+  def record_attempt_chain(%__MODULE__{} = ledger, chain) when is_list(chain) do
+    sanitized = sanitize_value(chain)
+
+    manifest_update = fn manifest ->
+      update_in(manifest, ["escalation"], fn existing ->
+        Map.merge(existing || %{}, %{"attempt_chain" => sanitized})
+      end)
+    end
+
+    write_checkpoint(ledger, :escalation_chain, %{"attempt_chain" => sanitized}, manifest_update: manifest_update)
+  end
+
   defp do_record_model_routing_decision(%__MODULE__{} = ledger, routing, opts) when is_map(routing) do
     payload =
       routing

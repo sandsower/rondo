@@ -56,6 +56,10 @@ defmodule Rondo.Config do
   @default_observability_render_interval_ms 16
   @default_server_host "127.0.0.1"
   @default_github_state_label_prefix "status:"
+  @default_escalation_enabled false
+  @default_escalation_tiers ["light", "standard", "heavy", "frontier"]
+  @default_escalation_max_total_attempts 3
+  @default_escalation_report_repair_attempts 2
   @workflow_options_schema NimbleOptions.new!(
                              tracker: [
                                type: :map,
@@ -210,6 +214,23 @@ defmodule Rondo.Config do
                                  defaults: [type: :map, default: %{}],
                                  step_hints: [type: :map, default: %{}],
                                  profiles: [type: {:map, :string, :any}, default: %{}]
+                               ]
+                             ],
+                             escalation: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 enabled: [type: :boolean, default: @default_escalation_enabled],
+                                 tiers: [type: {:list, :string}, default: @default_escalation_tiers],
+                                 max_total_attempts: [
+                                   type: :pos_integer,
+                                   default: @default_escalation_max_total_attempts
+                                 ],
+                                 token_budget: [type: {:or, [:pos_integer, nil]}, default: nil],
+                                 report_repair_attempts: [
+                                   type: :pos_integer,
+                                   default: @default_escalation_report_repair_attempts
+                                 ]
                                ]
                              ],
                              hooks: [
@@ -465,6 +486,33 @@ defmodule Rondo.Config do
       gates when is_list(gates) -> Enum.map(gates, &normalize_gate/1)
       _absent -> gates()
     end
+  end
+
+  @spec escalation_enabled?() :: boolean()
+  def escalation_enabled? do
+    get_in(validated_workflow_options(), [:escalation, :enabled])
+  end
+
+  @spec escalation_tiers() :: [String.t()]
+  def escalation_tiers do
+    get_in(validated_workflow_options(), [:escalation, :tiers]) || @default_escalation_tiers
+  end
+
+  @spec escalation_max_total_attempts() :: pos_integer()
+  def escalation_max_total_attempts do
+    get_in(validated_workflow_options(), [:escalation, :max_total_attempts]) ||
+      @default_escalation_max_total_attempts
+  end
+
+  @spec escalation_token_budget() :: pos_integer() | nil
+  def escalation_token_budget do
+    get_in(validated_workflow_options(), [:escalation, :token_budget])
+  end
+
+  @spec escalation_report_repair_attempts() :: pos_integer()
+  def escalation_report_repair_attempts do
+    get_in(validated_workflow_options(), [:escalation, :report_repair_attempts]) ||
+      @default_escalation_report_repair_attempts
   end
 
   @spec max_concurrent_agents() :: pos_integer()
@@ -991,6 +1039,7 @@ defmodule Rondo.Config do
       release_loop: extract_release_loop_options(section_map(config, "release_loop")),
       process_provider: extract_process_provider_options(section_map(config, "process_provider")),
       model_routing: extract_model_routing_options(section_map(config, "model_routing")),
+      escalation: extract_escalation_options(section_map(config, "escalation")),
       hooks: extract_hooks_options(section_map(config, "hooks")),
       gates: extract_gates_options(Map.get(config, "gates")),
       gate_reuse: extract_gate_reuse_options(section_map(config, "gate_reuse")),
@@ -1124,6 +1173,15 @@ defmodule Rondo.Config do
     |> put_if_present(:profiles, normalize_model_routing_profiles(Map.get(section, "profiles")))
   end
 
+  defp extract_escalation_options(section) when is_map(section) do
+    %{}
+    |> put_if_present(:enabled, boolean_value(Map.get(section, "enabled")))
+    |> put_if_present(:tiers, tier_list_value(Map.get(section, "tiers")))
+    |> put_if_present(:max_total_attempts, positive_integer_value(Map.get(section, "max_total_attempts")))
+    |> put_if_present(:token_budget, positive_integer_value(Map.get(section, "token_budget")))
+    |> put_if_present(:report_repair_attempts, positive_integer_value(Map.get(section, "report_repair_attempts")))
+  end
+
   defp normalize_model_routing_tiers(tiers) when is_map(tiers) do
     tiers
     |> Enum.reduce(%{}, fn {tier, candidates}, acc ->
@@ -1248,6 +1306,18 @@ defmodule Rondo.Config do
 
   defp tools_list_value(_value), do: :omit
 
+  defp tier_list_value(values) when is_list(values) do
+    normalized =
+      values
+      |> Enum.filter(&is_binary/1)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+
+    if normalized == [], do: :omit, else: normalized
+  end
+
+  defp tier_list_value(_value), do: :omit
+
   defp extract_hooks_options(section) do
     %{}
     |> put_if_present(:after_create, hook_command_value(Map.get(section, "after_create")))
@@ -1314,6 +1384,7 @@ defmodule Rondo.Config do
     release_loop_closeout = section_map(release_loop, "closeout")
     release_loop_merge = section_map(release_loop_closeout, "merge")
     process_provider = section_map(config, "process_provider")
+    escalation = section_map(config, "escalation")
     hooks = section_map(config, "hooks")
     gates = Map.get(config, "gates")
     gate_reuse = section_map(config, "gate_reuse")
@@ -1334,6 +1405,12 @@ defmodule Rondo.Config do
       validate_section_map(release_loop_closeout, "merge"),
       validate_section_map(config, "process_provider"),
       validate_section_map(config, "model_routing"),
+      validate_section_map(config, "escalation"),
+      validate_boolean_field(escalation, "escalation.enabled"),
+      validate_tier_list_field(escalation, "escalation.tiers"),
+      validate_positive_integer_field(escalation, "escalation.max_total_attempts"),
+      validate_positive_integer_field(escalation, "escalation.token_budget"),
+      validate_positive_integer_field(escalation, "escalation.report_repair_attempts"),
       validate_section_map(config, "hooks"),
       validate_gates_field(gates),
       validate_section_map(config, "gate_reuse"),
@@ -1591,6 +1668,27 @@ defmodule Rondo.Config do
       {:ok, parsed} when parsed > 0 -> []
       _ -> [config_error(entry_path, limit, "must be a positive integer")]
     end
+  end
+
+  defp validate_tier_list_field(section, path) do
+    validate_present_value(section, path, fn
+      values when is_list(values) ->
+        invalid = Enum.reject(values, fn value -> is_binary(value) and String.trim(value) in ["light", "standard", "heavy", "frontier"] end)
+
+        cond do
+          Enum.any?(values, fn value -> not is_binary(value) end) ->
+            [config_error(path, values, "must be a list of tier strings")]
+
+          invalid != [] ->
+            [config_error(path, invalid, "must be one of light, standard, heavy, frontier")]
+
+          true ->
+            []
+        end
+
+      value ->
+        [config_error(path, value, "must be a list of tier strings")]
+    end)
   end
 
   defp validate_clean_eval_gates_field(clean_eval) do

@@ -58,9 +58,16 @@ defmodule Rondo.AgentRunner do
         ledger -> [ledger: ledger]
       end
 
-    case Keyword.get(opts, :action_policy_policy_file) do
-      nil -> ledger_opts
-      policy_file -> Keyword.put(ledger_opts, :policy_file, policy_file)
+    ledger_opts =
+      case Keyword.get(opts, :action_policy_policy_file) do
+        nil -> ledger_opts
+        policy_file -> Keyword.put(ledger_opts, :policy_file, policy_file)
+      end
+
+    if Keyword.get(opts, :fresh_workspace, false) do
+      Keyword.put(ledger_opts, :fresh, true)
+    else
+      ledger_opts
     end
   end
 
@@ -1099,8 +1106,15 @@ defmodule Rondo.AgentRunner do
   defp build_turn_prompt(provider, issue, opts, 1, _max_turns) do
     prompt =
       case opts |> Keyword.get(:operator_guidance) |> normalize_operator_guidance() do
-        nil -> ProcessProvider.prompt(provider, issue, opts)
-        guidance -> operator_guidance_prompt(guidance)
+        nil ->
+          ProcessProvider.prompt(provider, issue, opts)
+
+        guidance ->
+          if Keyword.get(opts, :fresh_workspace, false) do
+            guidance
+          else
+            operator_guidance_prompt(guidance)
+          end
       end
 
     prepend_live_update_prompt(prompt, opts)
