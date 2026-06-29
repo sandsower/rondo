@@ -1,7 +1,7 @@
 # Rondo
 
-This directory contains the current Elixir/OTP implementation of Rondo, based on
-[`SPEC.md`](../SPEC.md) at the repository root.
+This directory contains the current Elixir/OTP implementation of Rondo, a Phoenix LiveView/Bandit
+app based on [`SPEC.md`](../SPEC.md) at the repository root.
 
 > [!WARNING]
 > Rondo is prototype software intended for evaluation only and is presented as-is.
@@ -19,8 +19,8 @@ This directory contains the current Elixir/OTP implementation of Rondo, based on
 4. Sends a workflow prompt to Claude Code
 5. Keeps Claude Code working on the issue until the work is done
 
-During Claude Code sessions, Rondo also serves a client-side `linear_graphql` tool so that repo
-skills can make raw Linear GraphQL calls.
+During Claude Code sessions, the agent environment can also expose a client-side `linear_graphql`
+tool so that repo skills can make raw Linear GraphQL calls.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Rondo stops the active agent for that issue and cleans up matching workspaces.
@@ -32,7 +32,7 @@ Rondo stops the active agent for that issue and cleans up matching workspaces.
    set it as the `LINEAR_API_KEY` environment variable.
 3. Copy this directory's `WORKFLOW.md` to your repo.
 4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
-   - The `linear` skill expects Rondo's `linear_graphql` tool for raw Linear GraphQL
+   - The `linear` skill expects the agent environment to provide a `linear_graphql` tool for raw Linear GraphQL
      operations such as comment editing or upload flows.
 5. Customize the copied `WORKFLOW.md` file for your project.
    - To get your project's slug, right-click the project and copy its URL. The slug is part of the
@@ -155,7 +155,7 @@ agent:
   max_turns: 20
 claude:
   command: claude
-  permission_mode: default
+  permission_mode: bypassPermissions
   dangerously_skip_permissions: true
   max_turns: 50
   output_format: stream-json
