@@ -6,6 +6,7 @@ defmodule RondoWeb.ObservabilityApiController do
   use Phoenix.Controller, formats: [:json]
 
   alias Plug.Conn
+  alias Rondo.{ModelUsage, Orchestrator}
   alias RondoWeb.{Endpoint, Presenter}
 
   @spec state(Conn.t(), map()) :: Conn.t()
@@ -52,6 +53,42 @@ defmodule RondoWeb.ObservabilityApiController do
 
       {:error, :unavailable} ->
         error_response(conn, 503, "orchestrator_unavailable", "Orchestrator is unavailable")
+    end
+  end
+
+  @spec models(Conn.t(), map()) :: Conn.t()
+  def models(conn, _params) do
+    case Orchestrator.snapshot(orchestrator(), snapshot_timeout_ms()) do
+      %{} = snapshot ->
+        running = Map.get(snapshot, :running, [])
+        archived = Map.get(snapshot, :archived, [])
+        usage = ModelUsage.aggregate(running, archived)
+        active_codex = ModelUsage.active_codex_consumers(running)
+
+        # Build per-ticket model timelines
+        timelines =
+          (running ++ archived)
+          |> Enum.group_by(&(&1[:identifier] || &1["identifier"]), & &1)
+          |> Enum.sort_by(fn {identifier, _runs} -> identifier || "" end)
+          |> Enum.map(fn {identifier, runs} ->
+            %{
+              identifier: identifier,
+              timeline: ModelUsage.model_timeline(runs),
+              roles: ModelUsage.model_roles(runs)
+            }
+          end)
+
+        json(conn, %{
+          usage: usage,
+          active_codex_consumers: active_codex,
+          timelines: timelines
+        })
+
+      :timeout ->
+        error_response(conn, 503, "snapshot_timeout", "Snapshot timed out")
+
+      :unavailable ->
+        error_response(conn, 503, "snapshot_unavailable", "Snapshot unavailable")
     end
   end
 
