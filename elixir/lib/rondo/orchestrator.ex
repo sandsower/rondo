@@ -2867,6 +2867,8 @@ defmodule Rondo.Orchestrator do
       %{
         issue_id: issue && issue.id,
         identifier: identifier,
+        run_id: Map.get(running_entry, :run_id),
+        run_dir: Map.get(running_entry, :run_dir),
         session_id: Map.get(running_entry, :session_id),
         state: issue && issue.state,
         started_at: Map.get(running_entry, :started_at),
@@ -3199,7 +3201,7 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  @archive_keys ~w(issue_id identifier session_id state started_at finished_at exit_reason non_active_state turn_count tokens latest_gate event_log model_routing adapter)
+  @archive_keys ~w(issue_id identifier run_id run_dir session_id state started_at finished_at exit_reason non_active_state turn_count tokens latest_gate event_log model_routing adapter)
   @token_keys ~w(input_tokens output_tokens total_tokens)
   @event_keys ~w(at event message tokens)
 

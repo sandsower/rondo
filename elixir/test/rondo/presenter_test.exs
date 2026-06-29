@@ -1,6 +1,8 @@
 defmodule Rondo.PresenterTest do
   use Rondo.TestSupport
 
+  alias Rondo.RunLedger
+
   defmodule SnapshotServer do
     use GenServer
 
@@ -63,6 +65,72 @@ defmodule Rondo.PresenterTest do
 
     assert {:ok, issue_payload} = RondoWeb.Presenter.issue_payload("MT-GATE", server_name, 1_000)
     assert issue_payload.running.latest_gate.status == :fail
+  end
+
+  test "state payload includes projected run timelines" do
+    workspace_root = tmp_dir("presenter-run-timelines")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    issue = %Issue{
+      id: "issue-presenter-timeline",
+      identifier: "MT-PRESENTER-TL",
+      title: "Presenter timeline",
+      description: "Presenter timeline",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-PRESENTER-TL"
+    }
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: ~U[2026-05-10 15:30:00Z],
+               random_suffix: "feedface"
+             )
+
+    assert {:ok, ledger} =
+             RunLedger.write_checkpoint(ledger, :dispatch, %{attempt: 1}, timestamp: ~U[2026-05-10 15:30:01Z])
+
+    assert {:ok, _ledger} =
+             RunLedger.write_checkpoint(ledger, :turn_started, %{turn_number: 1}, timestamp: ~U[2026-05-10 15:30:02Z])
+
+    snapshot = %{
+      running: [
+        %{
+          issue_id: issue.id,
+          identifier: issue.identifier,
+          state: "In Progress",
+          run_id: ledger.run_id,
+          run_dir: ledger.run_dir,
+          session_id: "session-presenter-timeline",
+          started_at: ~U[2026-05-10 15:30:00Z],
+          last_claude_event: :turn_started,
+          last_claude_message: %{event: :turn_started},
+          last_claude_timestamp: ~U[2026-05-10 15:30:02Z],
+          latest_gate: nil,
+          model_routing: nil,
+          model_fallback: nil,
+          claude_input_tokens: 0,
+          claude_output_tokens: 0,
+          claude_total_tokens: 0,
+          turn_count: 1,
+          event_log: []
+        }
+      ],
+      retrying: [],
+      paused: [],
+      archived: [],
+      claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    server_name = Module.concat(__MODULE__, :TimelineSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+    assert [%{identifier: "MT-PRESENTER-TL", timeline: timeline}] = payload.run_timelines
+    kinds = Enum.map(timeline, & &1.kind)
+    assert "dispatch" in kinds
+    assert "turn_started" in kinds
   end
 
   test "state and issue API payloads expose paused interrupts" do
@@ -334,5 +402,9 @@ defmodule Rondo.PresenterTest do
 
     assert RondoWeb.Presenter.run_token_comparison(runs).labels == ["Run 1", "Run 2", "Run 3 (11:14)"]
     assert RondoWeb.Presenter.run_duration_comparison(runs).labels == ["Run 1", "Run 2", "Run 3 (11:14)"]
+  end
+
+  defp tmp_dir(name) do
+    Path.join(System.tmp_dir!(), "rondo-#{name}-#{System.unique_integer([:positive])}")
   end
 end
