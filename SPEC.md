@@ -4,6 +4,8 @@ Status: Draft v1 (language-agnostic)
 
 Purpose: Define a service that orchestrates coding agents to get project work done.
 
+This spec uses RFC 2119-style words inline where needed (`MUST`, `SHOULD`, `MAY`) and otherwise keeps the prose descriptive rather than maintaining a separate terminology section.
+
 ## 1. Problem Statement
 
 Rondo is a long-running automation service that continuously reads work from an issue tracker
@@ -658,6 +660,8 @@ Dynamic reload is required:
   require restart unless the implementation explicitly supports live rebind.
 - Implementations should also re-validate/reload defensively during runtime operations (for example
   before dispatch) in case filesystem watch events are missed.
+- Startup-time configuration load/validation failures are fatal and prevent the service from entering
+  the scheduling loop.
 - Invalid reloads should not crash the service; keep operating with the last known good effective
   configuration and emit an operator-visible error.
 
@@ -670,13 +674,15 @@ behavior.
 Startup validation:
 
 - Validate configuration before starting the scheduling loop.
-- If startup validation fails, fail startup and emit an operator-visible error.
+- If startup validation fails, fail startup immediately and emit an operator-visible error.
 
 Per-tick dispatch validation:
 
 - Re-validate before each dispatch cycle.
 - If validation fails, skip dispatch for that tick, keep reconciliation active, and emit an
   operator-visible error.
+- If the failure came from a workflow reload rather than startup, preserve the last known good
+  effective configuration and continue operating.
 
 Validation checks:
 
@@ -1240,6 +1246,9 @@ Optional tool extensions:
 - For Linear access, an MCP server can be configured to provide `linear_graphql` or equivalent
   tooling directly to Claude Code, rather than requiring Rondo to proxy tool calls.
 - Claude Code's `--allowedTools` flag can restrict which tools are available to the agent.
+- In this repository, the recommended path is a project-scoped `.mcp.json` entry that launches
+  `./elixir/bin/linear_graphql_mcp` and exposes the `linear_graphql` tool through Claude Code's
+  MCP tool naming scheme.
 
 `linear_graphql` extension contract:
 
@@ -1247,7 +1256,8 @@ Optional tool extensions:
   tracker auth for the current session.
 - Availability: only meaningful when `tracker.kind == "linear"` and valid Linear auth is configured.
 - This can be provided via an MCP server configured in Claude Code's environment, or via any other
-  tool mechanism available to the agent.
+  tool mechanism available to the agent; in this repo, the local `.mcp.json` + Elixir server path is
+  the canonical implementation.
 - Preferred input shape:
 
   ```json
@@ -2275,7 +2285,8 @@ Use the same validation profiles as Section 17:
 - Optional HTTP server honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - Optional `linear_graphql` tool extension exposes raw Linear GraphQL access through the
-  Claude Code session using configured Rondo auth (via MCP server or other mechanism).
+  Claude Code session using configured Rondo auth (via MCP server or other mechanism);
+  this repository ships a project-scoped local MCP server for that path.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.

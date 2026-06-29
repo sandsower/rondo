@@ -473,6 +473,31 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert log =~ "Variable \\\"$ids\\\" got invalid value"
   end
 
+  test "linear client graphql_raw preserves successful GraphQL bodies including errors" do
+    assert {:ok, body} =
+             Client.graphql_raw(
+               "query Viewer { viewer { id } }",
+               %{},
+               request_fun: fn _payload, _headers ->
+                 {:ok,
+                  %{
+                    status: 200,
+                    body: %{
+                      "errors" => [
+                        %{
+                          "message" => "Variable \"$ids\" got invalid value",
+                          "extensions" => %{"code" => "BAD_USER_INPUT"}
+                        }
+                      ],
+                      "data" => nil
+                    }
+                  }}
+               end
+             )
+
+    assert Enum.at(body["errors"], 0)["message"] == "Variable \"$ids\" got invalid value"
+  end
+
   test "orchestrator sorts dispatch by priority then oldest created_at" do
     issue_same_priority_older = %Issue{
       id: "issue-old-high",

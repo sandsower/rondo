@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "linear_graphql": {
+      "command": "./elixir/bin/linear_graphql_mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}
