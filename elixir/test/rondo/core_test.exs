@@ -463,8 +463,14 @@ defmodule Rondo.CoreTest do
 
     before_down_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
-    Process.sleep(50)
-    state = :sys.get_state(pid, 15_000)
+
+    state =
+      wait_until_state(pid, fn state ->
+        not Map.has_key?(state.running, issue_id) and
+          MapSet.member?(state.completed, issue_id) and
+          is_map(state.retry_attempts[issue_id])
+      end)
+
     after_state_ms = System.monotonic_time(:millisecond)
 
     refute Map.has_key?(state.running, issue_id)
@@ -506,8 +512,12 @@ defmodule Rondo.CoreTest do
 
     before_down_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
-    Process.sleep(50)
-    state = :sys.get_state(pid, 15_000)
+
+    state =
+      wait_until_state(pid, fn state ->
+        match?(%{attempt: 3, due_at_ms: _due_at_ms, identifier: "MT-559", error: "agent exited: :boom"}, state.retry_attempts[issue_id])
+      end)
+
     after_state_ms = System.monotonic_time(:millisecond)
 
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
@@ -551,8 +561,12 @@ defmodule Rondo.CoreTest do
 
     reason = {:shutdown, {:gate_failed, %{status: :fail}}}
     send(pid, {:DOWN, ref, :process, self(), reason})
-    Process.sleep(50)
-    state = :sys.get_state(pid, 15_000)
+
+    state =
+      wait_until_state(pid, fn state ->
+        state.paused_interrupts == %{} and
+          match?(%{attempt: 2, failure_reason: :gate_failed}, state.retry_attempts[issue_id])
+      end)
 
     assert state.paused_interrupts == %{}
     assert %{attempt: 2, failure_reason: :gate_failed} = state.retry_attempts[issue_id]
@@ -589,14 +603,33 @@ defmodule Rondo.CoreTest do
 
     before_down_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
-    Process.sleep(50)
-    state = :sys.get_state(pid, 15_000)
+
+    state =
+      wait_until_state(pid, fn state ->
+        match?(%{attempt: 1, due_at_ms: _due_at_ms, identifier: "MT-560", error: "agent exited: :boom"}, state.retry_attempts[issue_id])
+      end)
+
     after_state_ms = System.monotonic_time(:millisecond)
 
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
     assert_due_after_range(due_at_ms, before_down_ms, after_state_ms, 10_000)
+  end
+
+  defp wait_until_state(pid, predicate, attempts \\ 100)
+
+  defp wait_until_state(_pid, _predicate, 0), do: flunk("timed out waiting for orchestrator state")
+
+  defp wait_until_state(pid, predicate, attempts) do
+    state = :sys.get_state(pid)
+
+    if predicate.(state) do
+      state
+    else
+      Process.sleep(10)
+      wait_until_state(pid, predicate, attempts - 1)
+    end
   end
 
   defp assert_due_after_range(due_at_ms, before_down_ms, after_state_ms, delay_ms) do
