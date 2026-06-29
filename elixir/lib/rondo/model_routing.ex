@@ -22,14 +22,18 @@ defmodule Rondo.ModelRouting do
           requested_tier: String.t() | nil,
           candidates: [candidate()],
           resolved: candidate() | nil,
-          reason: String.t()
+          reason: String.t(),
+          profile: String.t() | nil
         }
+
+  @openrouter_env "OPENROUTER_API_KEY"
 
   @spec resolve(keyword()) :: routing_status()
   def resolve(opts \\ []) when is_list(opts) do
     repo_routing = Keyword.get_lazy(opts, :repo_model_routing, &Config.model_routing/0)
     routing_context = normalize_routing_context(Keyword.get(opts, :routing_context, %{}))
-    {hints, context} = effective_hints(opts, repo_routing, routing_context)
+    profile_name = Keyword.get(opts, :routing_profile)
+    {hints, context} = effective_hints(opts, repo_routing, routing_context, profile_name)
     requested_tier = normalize_tier(map_value(hints, :tier))
     floor_tier = repo_floor_tier(repo_routing)
     effective_tier = effective_tier(requested_tier, floor_tier)
@@ -37,10 +41,11 @@ defmodule Rondo.ModelRouting do
     adapter = normalize_adapter(map_value(hints, :agent_adapter)) || normalize_adapter(map_value(hints, :adapter))
     mode = normalize_mode(map_value(hints, :mode), map_value(hints, :required))
     candidates = candidates_for_hint(effective_tier, model, adapter, repo_routing, Map.get(hints, :required_unresolved))
+    {candidates, openrouter_credentials_missing?} = filter_openrouter_candidates(candidates)
     resolved = List.first(candidates)
     floor_fallback? = floor_fallback?(requested_tier, floor_tier)
 
-    %{
+    result = %{
       status: status(mode, resolved, floor_fallback?),
       mode: mode,
       requested_tier: requested_tier,
@@ -48,13 +53,18 @@ defmodule Rondo.ModelRouting do
       resolved: resolved,
       reason: reason(requested_tier, effective_tier, resolved, mode, floor_fallback?, context)
     }
+
+    result
+    |> maybe_apply_credential_failure(openrouter_credentials_missing?, mode, context)
     |> maybe_put_context(context)
+    |> maybe_put_profile(profile_name)
   end
 
-  defp effective_hints(opts, repo_routing, routing_context) do
+  defp effective_hints(opts, repo_routing, routing_context, profile_name) do
     provider_hint_map = Keyword.get(opts, :model_routing_hints, %{}) || %{}
     source_hint_map = source_contract_hints(opts)
     repo_step_hint_map = repo_step_hints(repo_routing)
+    profile_defaults = profile_default_hints(repo_routing, profile_name)
 
     provider_context_hints = context_specific_hints(provider_hint_map, routing_context)
     repo_step_context_hints = context_specific_hints(repo_step_hint_map, routing_context)
@@ -65,6 +75,7 @@ defmodule Rondo.ModelRouting do
     hints =
       repo_routing
       |> repo_default_hints()
+      |> apply_hint_map(profile_defaults)
       |> apply_hint_map(provider_hint_map)
       |> maybe_clear_broad_model_for_context(context_hint_map)
       |> apply_hint_map(repo_step_context_hints || %{})
@@ -90,6 +101,27 @@ defmodule Rondo.ModelRouting do
   end
 
   defp repo_step_hints(_repo_routing), do: %{}
+
+  defp profile_default_hints(repo_routing, profile_name)
+       when is_binary(profile_name) or is_atom(profile_name) do
+    repo_routing
+    |> map_value(:profiles)
+    |> profile_lookup(profile_name)
+    |> normalize_hint_map()
+  end
+
+  defp profile_default_hints(_repo_routing, _profile_name), do: %{}
+
+  defp profile_lookup(profiles, name) when is_map(profiles) and is_atom(name) do
+    Map.get(profiles, name) || Map.get(profiles, Atom.to_string(name))
+  end
+
+  defp profile_lookup(profiles, name) when is_map(profiles) and is_binary(name) do
+    Map.get(profiles, name) ||
+      if String.printable?(name), do: Map.get(profiles, String.to_atom(name)), else: nil
+  end
+
+  defp profile_lookup(_profiles, _name), do: nil
 
   defp source_contract_hints(opts) do
     source_contract = Keyword.get(opts, :source_contract, %{})
@@ -268,6 +300,9 @@ defmodule Rondo.ModelRouting do
   defp maybe_put_context(result, nil), do: result
   defp maybe_put_context(result, context), do: Map.put(result, :context, context)
 
+  defp maybe_put_profile(result, nil), do: result
+  defp maybe_put_profile(result, profile_name), do: Map.put(result, :profile, profile_name)
+
   defp maybe_clear_broad_model_for_context(hints, %{tier: _tier} = context_hints) do
     if Map.has_key?(context_hints, :model) or Map.has_key?(context_hints, :claude_model) do
       hints
@@ -318,6 +353,40 @@ defmodule Rondo.ModelRouting do
   end
 
   defp normalize_candidates(_candidates), do: nil
+
+  defp filter_openrouter_candidates(candidates) do
+    openrouter_key_available? = openrouter_key_available?()
+
+    {available, removed} =
+      Enum.split_with(candidates, fn candidate ->
+        not openrouter_candidate?(candidate) or openrouter_key_available?
+      end)
+
+    {available, removed != [] and not openrouter_key_available?}
+  end
+
+  defp openrouter_candidate?(%{model: model}) when is_binary(model) do
+    String.starts_with?(model, "openrouter/")
+  end
+
+  defp openrouter_key_available? do
+    case System.get_env(@openrouter_env) do
+      nil -> false
+      "" -> false
+      _value -> true
+    end
+  end
+
+  defp maybe_apply_credential_failure(%{resolved: resolved} = result, true, mode, context)
+       when is_nil(resolved) do
+    reason = "OpenRouter API key missing; cannot resolve #{context_label(context)}OpenRouter candidate"
+    %{result | status: credential_status(mode), reason: reason}
+  end
+
+  defp maybe_apply_credential_failure(result, _missing?, _mode, _context), do: result
+
+  defp credential_status(:require), do: :blocked
+  defp credential_status(_mode), do: :unsupported
 
   defp repo_floor_tier(repo_routing) when is_map(repo_routing) do
     floor = map_value(repo_routing, :floor)

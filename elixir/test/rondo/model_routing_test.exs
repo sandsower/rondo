@@ -646,4 +646,171 @@ defmodule Rondo.ModelRoutingTest do
 
     assert reason =~ "resolved tier light"
   end
+
+  test "bulk implementation profile routes to OpenRouter light candidate" do
+    assert %{
+             status: :honored,
+             mode: :prefer,
+             profile: "bulk_implementation",
+             requested_tier: "light",
+             resolved: %{adapter: "pi", model: "openrouter/deepseek/deepseek-chat"}
+           } =
+             ModelRouting.resolve(
+               routing_profile: "bulk_implementation",
+               repo_model_routing: %{
+                 defaults: %{tier: "standard", mode: "prefer"},
+                 profiles: %{
+                   bulk_implementation: %{tier: "light", mode: "prefer", adapter: "pi"}
+                 },
+                 tiers: %{
+                   light: [%{adapter: "pi", model: "openrouter/deepseek/deepseek-chat"}],
+                   standard: [%{adapter: "pi", model: "openai-codex/gpt-5.4-mini"}]
+                 }
+               }
+             )
+  end
+
+  test "step hint overrides bulk profile default for stronger reasoning" do
+    assert %{
+             status: :honored,
+             profile: "bulk_implementation",
+             requested_tier: "heavy",
+             resolved: %{adapter: "pi", model: "openrouter/heavy-model"},
+             context: %{stage: "turn", skill: "implement", phase: "planning"}
+           } =
+             ModelRouting.resolve(
+               routing_context: %{stage: :turn, skill: "implement", phase: :planning},
+               routing_profile: "bulk_implementation",
+               repo_model_routing: %{
+                 defaults: %{tier: "standard", mode: "prefer"},
+                 profiles: %{bulk_implementation: %{tier: "light", mode: "prefer"}},
+                 step_hints: %{
+                   steps: [
+                     %{stage: "turn", skill: "implement", phase: "planning", tier: "heavy"}
+                   ]
+                 },
+                 tiers: %{
+                   light: [%{adapter: "pi", model: "openrouter/light-model"}],
+                   heavy: [%{adapter: "pi", model: "openrouter/heavy-model"}]
+                 }
+               }
+             )
+  end
+
+  test "empty OpenRouter key is treated as missing" do
+    previous_key = System.get_env("OPENROUTER_API_KEY")
+    System.put_env("OPENROUTER_API_KEY", "")
+
+    on_exit(fn -> restore_env("OPENROUTER_API_KEY", previous_key) end)
+
+    assert %{
+             status: :unsupported,
+             candidates: [],
+             resolved: nil,
+             reason: reason
+           } =
+             ModelRouting.resolve(
+               model_routing_hints: %{"tier" => "light"},
+               repo_model_routing: %{
+                 tiers: %{light: [%{adapter: "pi", model: "openrouter/deepseek/deepseek-chat"}]}
+               }
+             )
+
+    assert reason =~ "OpenRouter API key missing"
+  end
+
+  test "non-string routing profile is ignored" do
+    assert %{
+             status: :honored,
+             requested_tier: "standard",
+             resolved: %{adapter: "pi", model: "openai-codex/gpt-5.4-mini"}
+           } =
+             ModelRouting.resolve(
+               routing_profile: 123,
+               model_routing_hints: %{tier: "standard"},
+               repo_model_routing: %{
+                 defaults: %{tier: "light"},
+                 profiles: %{"123" => %{tier: "heavy"}},
+                 tiers: %{
+                   standard: [%{adapter: "pi", model: "openai-codex/gpt-5.4-mini"}],
+                   light: [%{adapter: "pi", model: "openrouter/light-model"}]
+                 }
+               }
+             )
+  end
+
+  test "missing OpenRouter key blocks bulk profile with a clear reason" do
+    previous_key = System.get_env("OPENROUTER_API_KEY")
+    System.delete_env("OPENROUTER_API_KEY")
+
+    on_exit(fn -> restore_env("OPENROUTER_API_KEY", previous_key) end)
+
+    assert %{
+             status: :unsupported,
+             mode: :prefer,
+             profile: "bulk_implementation",
+             requested_tier: "light",
+             candidates: [],
+             resolved: nil,
+             reason: reason
+           } =
+             ModelRouting.resolve(
+               routing_profile: "bulk_implementation",
+               repo_model_routing: %{
+                 defaults: %{tier: "standard", mode: "prefer"},
+                 profiles: %{bulk_implementation: %{tier: "light", mode: "prefer"}},
+                 tiers: %{light: [%{adapter: "pi", model: "openrouter/deepseek/deepseek-chat"}]}
+               }
+             )
+
+    assert reason =~ "OpenRouter API key missing"
+  end
+
+  test "missing OpenRouter key blocks require-mode profile" do
+    previous_key = System.get_env("OPENROUTER_API_KEY")
+    System.delete_env("OPENROUTER_API_KEY")
+
+    on_exit(fn -> restore_env("OPENROUTER_API_KEY", previous_key) end)
+
+    assert %{
+             status: :blocked,
+             mode: :require,
+             profile: "bulk_implementation",
+             reason: reason
+           } =
+             ModelRouting.resolve(
+               routing_profile: "bulk_implementation",
+               repo_model_routing: %{
+                 defaults: %{tier: "standard", mode: "prefer"},
+                 profiles: %{bulk_implementation: %{tier: "light", mode: "require"}},
+                 tiers: %{light: [%{adapter: "pi", model: "openrouter/deepseek/deepseek-chat"}]}
+               }
+             )
+
+    assert reason =~ "OpenRouter API key missing"
+  end
+
+  test "missing OpenRouter key does not block mixed tier with a non-OpenRouter candidate" do
+    previous_key = System.get_env("OPENROUTER_API_KEY")
+    System.delete_env("OPENROUTER_API_KEY")
+
+    on_exit(fn -> restore_env("OPENROUTER_API_KEY", previous_key) end)
+
+    assert %{
+             status: :honored,
+             requested_tier: "standard",
+             resolved: %{adapter: "pi", model: "openai-codex/gpt-5.4-mini"}
+           } =
+             ModelRouting.resolve(
+               model_routing_hints: %{"tier" => "standard"},
+               repo_model_routing: %{
+                 tiers: %{
+                   standard: [
+                     %{adapter: "pi", model: "openai-codex/gpt-5.4-mini"},
+                     %{adapter: "pi", model: "openrouter/moonshotai/kimi-k2.7-code"}
+                   ]
+                 }
+               }
+             )
+  end
 end

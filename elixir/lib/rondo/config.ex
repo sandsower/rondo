@@ -208,7 +208,8 @@ defmodule Rondo.Config do
                                  tiers: [type: :map, default: %{}],
                                  floor: [type: :map, default: %{}],
                                  defaults: [type: :map, default: %{}],
-                                 step_hints: [type: :map, default: %{}]
+                                 step_hints: [type: :map, default: %{}],
+                                 profiles: [type: {:map, :string, :any}, default: %{}]
                                ]
                              ],
                              hooks: [
@@ -1120,6 +1121,7 @@ defmodule Rondo.Config do
     |> put_if_present(:floor, normalize_model_routing_map(Map.get(section, "floor")))
     |> put_if_present(:defaults, normalize_model_routing_map(Map.get(section, "defaults")))
     |> put_if_present(:step_hints, normalize_model_routing_step_hints(model_routing_step_hints_value(section)))
+    |> put_if_present(:profiles, normalize_model_routing_profiles(Map.get(section, "profiles")))
   end
 
   defp normalize_model_routing_tiers(tiers) when is_map(tiers) do
@@ -1160,6 +1162,58 @@ defmodule Rondo.Config do
 
   defp normalize_model_routing_candidates(candidates) when is_list(candidates), do: Enum.map(candidates, &normalize_model_routing_map/1)
   defp normalize_model_routing_candidates(_candidates), do: []
+
+  defp normalize_model_routing_profiles(profiles) when is_map(profiles) do
+    profiles
+    |> Enum.reduce(%{}, fn {name, profile}, acc ->
+      normalized = normalize_model_routing_profile(profile)
+      if map_size(normalized) > 0, do: Map.put(acc, to_string(name), normalized), else: acc
+    end)
+    |> case do
+      normalized when map_size(normalized) > 0 -> normalized
+      _empty -> :omit
+    end
+  end
+
+  defp normalize_model_routing_profiles(_profiles), do: :omit
+
+  defp normalize_model_routing_profile(profile) when is_map(profile) do
+    %{}
+    |> put_if_present(:tier, normalize_tier_key(map_value(profile, :tier)))
+    |> put_if_present(:model, normalize_profile_string(map_value(profile, :model)))
+    |> put_if_present(:mode, normalize_profile_mode(map_value(profile, :mode)))
+    |> put_if_present(:adapter, normalize_profile_string(map_value(profile, :adapter)))
+    |> put_if_present(:required, normalize_profile_required(map_value(profile, :required)))
+    |> put_if_present(:candidates, normalize_model_routing_profile_candidates(map_value(profile, :candidates)))
+  end
+
+  defp normalize_model_routing_profile(_profile), do: %{}
+
+  defp map_value(map, key) when is_map(map) and is_atom(key) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  end
+
+  defp map_value(_map, _key), do: nil
+
+  defp normalize_profile_string(nil), do: :omit
+  defp normalize_profile_string(value) when is_binary(value), do: value
+  defp normalize_profile_string(_value), do: :omit
+
+  defp normalize_profile_mode("prefer"), do: "prefer"
+  defp normalize_profile_mode(:prefer), do: "prefer"
+  defp normalize_profile_mode("require"), do: "require"
+  defp normalize_profile_mode(:require), do: "require"
+  defp normalize_profile_mode(_mode), do: :omit
+
+  defp normalize_profile_required(value) when is_boolean(value), do: value
+  defp normalize_profile_required(_value), do: :omit
+
+  defp normalize_model_routing_profile_candidates(candidates) when is_list(candidates) do
+    normalized = Enum.map(candidates, &normalize_model_routing_map/1)
+    if normalized == [], do: :omit, else: normalized
+  end
+
+  defp normalize_model_routing_profile_candidates(_candidates), do: :omit
 
   defp normalize_model_routing_map(map) when is_map(map) do
     map
