@@ -256,6 +256,35 @@ defmodule Rondo.RunLedgerTest do
     assert Enum.any?(failed_manifest["checkpoints"], &(&1["kind"] == "failed"))
   end
 
+  test "complete_run(:handed_off) records handoff status and checkpoint" do
+    workspace_root = tmp_dir("ledger-handoff")
+    issue = issue_fixture()
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "cafe02"
+             )
+
+    assert {:ok, ledger} =
+             RunLedger.complete_run(
+               ledger,
+               :handed_off,
+               %{
+                 exit_reason: "handed_off",
+                 non_active_state: "In Review",
+                 session_id: "sess-1",
+                 turn_count: 3
+               },
+               timestamp: @now
+             )
+
+    manifest = decode_json!(ledger.manifest_path)
+    assert manifest["status"] == "handed_off"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "handed_off"))
+  end
+
   test "pause_run writes interrupt checkpoint and paused manifest state" do
     workspace_root = tmp_dir("ledger-pause")
     issue = issue_fixture()
@@ -632,6 +661,33 @@ defmodule Rondo.RunLedgerTest do
     assert {:ok, by_file} = RunLedger.load_manifest(ledger.manifest_path)
     assert {:ok, by_dir} = RunLedger.load_manifest(ledger.run_dir)
     assert by_file == by_dir
+  end
+
+  test "record_model_routing_decision preserves routing profile" do
+    workspace_root = tmp_dir("ledger-model-routing-profile")
+    issue = issue_fixture()
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "57a1e005"
+             )
+
+    routing = %{
+      status: :honored,
+      mode: :prefer,
+      profile: "bulk_implementation",
+      requested_tier: "light",
+      candidates: [%{adapter: "pi", model: "openrouter/deepseek/deepseek-chat"}],
+      resolved: %{adapter: "pi", model: "openrouter/deepseek/deepseek-chat"},
+      reason: "resolved tier light to pi/openrouter/deepseek/deepseek-chat"
+    }
+
+    assert {:ok, ledger} = RunLedger.record_model_routing_decision(ledger, routing)
+    manifest = decode_json!(ledger.manifest_path)
+
+    assert manifest["agent"]["model_routing"]["profile"] == "bulk_implementation"
   end
 
   test "edge-case inputs remain safe and serializable" do
@@ -1052,6 +1108,46 @@ defmodule Rondo.RunLedgerTest do
     assert {:ok, override_ledger} = RunLedger.complete_run(override_ledger, :failed, %{reason: "boom"}, override_opts)
 
     assert decode_json!(override_ledger.manifest_path)["failure_classification"] == "task_failure"
+
+    assert {:ok, scan_ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "5ca55ca5"
+             )
+
+    assert {:ok, scan_ledger} = RunLedger.record_patch_secret_scan(scan_ledger, :pass)
+    assert decode_json!(scan_ledger.manifest_path)["patch_secret_scan"]["status"] == "pass"
+  end
+
+  test "delivery artifact write failures surface from completed ledgers" do
+    workspace_root = tmp_dir("ledger-delivery-errors")
+
+    assert {:ok, blocked_artifact_dir_ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "de1e0001"
+             )
+
+    File.rm_rf!(Path.join(blocked_artifact_dir_ledger.run_dir, "artifacts"))
+    File.write!(Path.join(blocked_artifact_dir_ledger.run_dir, "artifacts"), "blocking file")
+
+    assert {:error, _reason} =
+             RunLedger.complete_run(blocked_artifact_dir_ledger, :completed, %{mode: "test"}, timestamp: @now)
+
+    assert {:ok, refresh_ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "de1e0002"
+             )
+
+    assert {:ok, refresh_ledger} = RunLedger.complete_run(refresh_ledger, :completed, %{mode: "test"}, timestamp: @now)
+    File.rm_rf!(Path.join(refresh_ledger.run_dir, "artifacts"))
+    File.write!(Path.join(refresh_ledger.run_dir, "artifacts"), "blocking file")
+
+    assert {:error, _reason} = RunLedger.link_archive(refresh_ledger, "artifacts/archive/run.json")
   end
 
   defp issue_fixture do

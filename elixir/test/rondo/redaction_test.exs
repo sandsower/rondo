@@ -38,11 +38,13 @@ defmodule Rondo.RedactionTest do
     assert Redaction.redact("API_KEY=supersecretvalue", @no_env) == "[REDACTED]"
     assert Redaction.redact("password: \"hunter2hunter2\"", @no_env) =~ "[REDACTED]"
     refute Redaction.redact("export MY_AUTH_TOKEN=abcd1234efgh", @no_env) =~ "abcd1234efgh"
+    assert Redaction.contains_secret?("export MY_AUTH_TOKEN=abcd1234efgh", @no_env)
   end
 
   test "leaves benign strings untouched" do
     assert Redaction.redact("input_tokens counted 12345678 across turns", @no_env) == "input_tokens counted 12345678 across turns"
     assert Redaction.redact("ran make all in elixir/", @no_env) == "ran make all in elixir/"
+    refute Redaction.contains_secret?("ran make all in elixir/", @no_env)
   end
 
   test "leaves identifiers that merely contain sk- untouched" do
@@ -73,5 +75,6 @@ defmodule Rondo.RedactionTest do
     assert Redaction.redact(42, @no_env) == 42
     assert Redaction.redact(nil, @no_env) == nil
     assert Redaction.redact(:atom, @no_env) == :atom
+    refute Redaction.contains_secret?(42, @no_env)
   end
 end

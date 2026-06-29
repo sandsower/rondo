@@ -50,6 +50,11 @@ model_routing:
   defaults:
     tier: standard
     mode: prefer
+  profiles:
+    bulk_implementation:
+      tier: light
+      mode: prefer
+      adapter: pi
   tiers:
     light:
       - adapter: pi

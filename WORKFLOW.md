@@ -58,6 +58,14 @@ model_routing:
   defaults:
     tier: standard
     mode: prefer
+  profiles:
+    # Low-cost bulk AFK implementation runs route through OpenRouter-backed
+    # light candidates by default. Planning/review-critical phases still
+    # escalate via step_hints or source-contract hints to heavy/frontier.
+    bulk_implementation:
+      tier: light
+      mode: prefer
+      adapter: pi
   tiers:
     light:
       - adapter: pi

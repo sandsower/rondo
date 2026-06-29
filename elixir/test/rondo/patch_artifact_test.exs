@@ -117,6 +117,31 @@ defmodule Rondo.PatchArtifactTest do
     assert metadata["head_ref"] == "abc123"
   end
 
+  test "classifies secret-bearing patches without rewriting patch bytes" do
+    {_workspace_root, workspace, ledger} = ledger_with_git_workspace("patch-secret")
+    secret_line = "API_KEY=supersecretvalue"
+    File.write!(Path.join(workspace, "tracked.txt"), "#{secret_line}\n")
+
+    assert {:ok, ledger, :captured} = PatchArtifact.capture(ledger, now: @now)
+
+    patch = File.read!(Path.join(ledger.run_dir, "artifacts/changes.patch"))
+    assert patch =~ secret_line
+
+    manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+    assert manifest["failure_classification"] == "patch_contains_secret"
+    assert manifest["patch_secret_scan"]["status"] == "fail"
+    assert manifest["patch_secret_scan"]["patch_path"] == "artifacts/changes.patch"
+
+    assert %{
+             "kind" => "patch",
+             "path" => "artifacts/changes.patch",
+             "exportable" => false,
+             "blocked_reason" => "patch_contains_secret"
+           } in manifest["artifacts"]
+
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "patch_secret_scan"))
+  end
+
   test "reports no_changes for a clean workspace without writing artifacts" do
     {_workspace_root, _workspace, ledger} = ledger_with_git_workspace("patch-clean")
 

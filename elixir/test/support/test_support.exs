@@ -37,12 +37,15 @@ defmodule Rondo.TestSupport do
         Workflow.set_workflow_file_path(workflow_file)
         if Process.whereis(Rondo.WorkflowStore), do: Rondo.WorkflowStore.force_reload()
         stop_default_http_server()
+        previous_openrouter_key = System.get_env("OPENROUTER_API_KEY")
+        System.put_env("OPENROUTER_API_KEY", "rondo-test-openrouter-key")
 
         on_exit(fn ->
           Workflow.clear_workflow_file_path()
           Application.delete_env(:rondo, :server_port_override)
           Application.delete_env(:rondo, :memory_tracker_issues)
           Application.delete_env(:rondo, :memory_tracker_recipient)
+          restore_env("OPENROUTER_API_KEY", previous_openrouter_key)
           File.rm_rf(workflow_root)
         end)
 
@@ -152,6 +155,11 @@ defmodule Rondo.TestSupport do
           clean_eval_enabled: nil,
           clean_eval_base_ref: nil,
           clean_eval_gates: nil,
+          escalation_enabled: nil,
+          escalation_tiers: nil,
+          escalation_max_total_attempts: nil,
+          escalation_token_budget: nil,
+          escalation_report_repair_attempts: nil,
           observability_enabled: true,
           observability_refresh_ms: 1_000,
           observability_render_interval_ms: 16,
@@ -238,6 +246,11 @@ defmodule Rondo.TestSupport do
     clean_eval_enabled = Keyword.get(config, :clean_eval_enabled)
     clean_eval_base_ref = Keyword.get(config, :clean_eval_base_ref)
     clean_eval_gates = Keyword.get(config, :clean_eval_gates)
+    escalation_enabled = Keyword.get(config, :escalation_enabled)
+    escalation_tiers = Keyword.get(config, :escalation_tiers)
+    escalation_max_total_attempts = Keyword.get(config, :escalation_max_total_attempts)
+    escalation_token_budget = Keyword.get(config, :escalation_token_budget)
+    escalation_report_repair_attempts = Keyword.get(config, :escalation_report_repair_attempts)
     observability_enabled = Keyword.get(config, :observability_enabled)
     observability_refresh_ms = Keyword.get(config, :observability_refresh_ms)
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
@@ -297,6 +310,13 @@ defmodule Rondo.TestSupport do
         gates_yaml(gates),
         gate_reuse_yaml(gate_reuse_enabled),
         clean_eval_yaml(clean_eval_enabled, clean_eval_base_ref, clean_eval_gates),
+        escalation_yaml(
+          escalation_enabled,
+          escalation_tiers,
+          escalation_max_total_attempts,
+          escalation_token_budget,
+          escalation_report_repair_attempts
+        ),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
         "---",
@@ -519,6 +539,24 @@ defmodule Rondo.TestSupport do
 
     "  gates:\n" <> entries
   end
+
+  defp escalation_yaml(nil, nil, nil, nil, nil), do: nil
+
+  defp escalation_yaml(enabled, tiers, max_total_attempts, token_budget, report_repair_attempts) do
+    [
+      "escalation:",
+      escalation_line("enabled", enabled),
+      escalation_line("tiers", tiers),
+      escalation_line("max_total_attempts", max_total_attempts),
+      escalation_line("token_budget", token_budget),
+      escalation_line("report_repair_attempts", report_repair_attempts)
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+  end
+
+  defp escalation_line(_key, nil), do: nil
+  defp escalation_line(key, value), do: "  #{key}: #{yaml_value(value)}"
 
   defp observability_yaml(enabled, refresh_ms, render_interval_ms) do
     [

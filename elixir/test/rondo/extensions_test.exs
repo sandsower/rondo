@@ -696,11 +696,54 @@ defmodule Rondo.ExtensionsTest do
   end
 
   defp wait_for_bound_port do
+    # Wait for the port to be bound first
     assert_eventually(fn ->
       is_integer(HttpServer.bound_port())
     end)
 
-    HttpServer.bound_port()
+    port = HttpServer.bound_port()
+
+    # Then verify the server is actually accepting TCP connections before
+    # any HTTP requests; port binding can precede the Phoenix/Bandit
+    # acceptor by a small window that widens under load.
+    assert_eventually(fn -> tcp_accept_ready?(port) end)
+
+    # Under load the Bandit acceptor can accept TCP connections before
+    # it's ready to process HTTP requests.  Send a real HTTP request
+    # and verify we get a response (not just an open socket).
+    assert_eventually(fn -> http_ready?(port) end)
+
+    port
+  end
+
+  defp tcp_accept_ready?(port) do
+    case :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 500) do
+      {:ok, socket} ->
+        :gen_tcp.close(socket)
+        true
+
+      {:error, _} ->
+        false
+    end
+  end
+
+  defp http_ready?(port) do
+    case :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 500) do
+      {:ok, socket} ->
+        :ok = :gen_tcp.send(socket, "GET / HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n\r\n")
+
+        ready? =
+          case :gen_tcp.recv(socket, 0, 500) do
+            {:ok, _chunk} -> true
+            {:error, _} -> false
+          end
+
+        :gen_tcp.close(socket)
+        ready?
+
+      {:error, _} ->
+        false
+    end
   end
 
   defp unlink_endpoint do
@@ -779,12 +822,32 @@ defmodule Rondo.ExtensionsTest do
     {String.to_integer(status_code), headers, response_body}
   end
 
-  defp http_raw_request(port, request) do
-    {:ok, socket} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 1_000)
-    :ok = :gen_tcp.send(socket, request)
-    response = recv_all(socket, "")
-    :gen_tcp.close(socket)
-    response
+  defp http_raw_request(port, request, attempts \\ 5)
+
+  defp http_raw_request(_port, _request, 0) do
+    flunk("HTTP server not ready after retries")
+  end
+
+  defp http_raw_request(port, request, attempts) do
+    case :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 2_000) do
+      {:ok, socket} ->
+        :ok = :gen_tcp.send(socket, request)
+        response = recv_all(socket, "")
+        :gen_tcp.close(socket)
+
+        # An empty response means the server accepted the TCP connection
+        # but hasn't started processing HTTP yet (Bandit acceptor race).
+        if response == "" do
+          Process.sleep(50)
+          http_raw_request(port, request, attempts - 1)
+        else
+          response
+        end
+
+      {:error, _reason} ->
+        Process.sleep(50)
+        http_raw_request(port, request, attempts - 1)
+    end
   end
 
   defp build_http_request(method, path, body, extra_headers) do
@@ -817,6 +880,7 @@ defmodule Rondo.ExtensionsTest do
     case :gen_tcp.recv(socket, 0, 1_000) do
       {:ok, chunk} -> recv_all(socket, acc <> chunk)
       {:error, :closed} -> acc
+      {:error, :timeout} -> acc
     end
   end
 

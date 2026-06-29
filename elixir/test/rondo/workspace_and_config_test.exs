@@ -773,7 +773,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Config.process_provider() == %{kind: "native", required: false, artifact_path: nil}
     assert Config.process_provider_kind() == "native"
     assert Config.process_provider_required?() == false
-    assert Config.model_routing() == %{tiers: %{}, floor: %{}, defaults: %{}, step_hints: %{}}
+    assert Config.model_routing() == %{tiers: %{}, floor: %{}, defaults: %{}, step_hints: %{}, profiles: %{}}
 
     write_workflow_file!(Workflow.workflow_file_path(),
       model_routing: %{
@@ -786,7 +786,8 @@ defmodule Rondo.WorkspaceAndConfigTest do
              tiers: %{light: [%{adapter: "pi", model: "openai/gpt-4o-mini"}]},
              floor: %{tier: "standard", mode: "require"},
              defaults: %{},
-             step_hints: %{}
+             step_hints: %{},
+             profiles: %{}
            }
 
     write_workflow_file!(Workflow.workflow_file_path(), process_provider_required: true)
@@ -921,7 +922,8 @@ defmodule Rondo.WorkspaceAndConfigTest do
                  "phase" => "context_discovery",
                  "tier" => "frontier"
                }
-             }
+             },
+             profiles: %{}
            }
   end
 
@@ -943,7 +945,8 @@ defmodule Rondo.WorkspaceAndConfigTest do
              defaults: %{},
              step_hints: %{
                initial: %{"skill" => "kickoff", "tier" => "frontier"}
-             }
+             },
+             profiles: %{}
            }
   end
 
@@ -952,7 +955,25 @@ defmodule Rondo.WorkspaceAndConfigTest do
       model_routing: %{"step_hints" => "bad"}
     )
 
-    assert Config.model_routing() == %{tiers: %{}, floor: %{}, defaults: %{}, step_hints: %{}}
+    assert Config.model_routing() == %{tiers: %{}, floor: %{}, defaults: %{}, step_hints: %{}, profiles: %{}}
+  end
+
+  test "config preserves model routing profiles" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      model_routing: %{
+        "profiles" => %{
+          "bulk_implementation" => %{"tier" => "light", "mode" => "prefer", "adapter" => "pi"}
+        }
+      }
+    )
+
+    assert Config.model_routing() == %{
+             tiers: %{},
+             floor: %{},
+             defaults: %{},
+             step_hints: %{},
+             profiles: %{"bulk_implementation" => %{tier: :light, mode: "prefer", adapter: "pi"}}
+           }
   end
 
   test "config reads flat gate definitions" do

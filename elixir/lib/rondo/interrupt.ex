@@ -66,6 +66,29 @@ defmodule Rondo.Interrupt do
     |> drop_nil_values()
   end
 
+  @spec escalation_paused(map()) :: payload()
+  def escalation_paused(context) when is_map(context) do
+    reason = value(context, :reason) || "no_recovery_path"
+
+    %{
+      "reason" => "escalation_paused",
+      "state" => "paused",
+      "classification" => reason,
+      "created_at" => timestamp(context),
+      "question" => "Escalation policy exhausted (#{reason}). A human must decide how to proceed.",
+      "options" => [
+        %{"id" => "resume", "label" => "Resume with operator guidance"},
+        %{"id" => "abort", "label" => "Abort this run"},
+        %{"id" => "defer", "label" => "Keep paused and decide later"}
+      ],
+      "recommendation" => "Review the attempt chain and token spend, then resume or abort.",
+      "attempt_chain" => normalize_value(value(context, :attempt_chain) || []),
+      "issue" => issue_payload(value(context, :issue) || %{}),
+      "resume" => resume_payload(context)
+    }
+    |> drop_nil_values()
+  end
+
   defp final_report_question("blocked_state_unparsed") do
     "The last assistant message reported a blocked state, but it was not valid rondo.final_report/v0 JSON."
   end

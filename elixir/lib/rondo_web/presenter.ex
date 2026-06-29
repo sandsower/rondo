@@ -404,6 +404,7 @@ defmodule RondoWeb.Presenter do
       started_at: started_at,
       finished_at: iso8601(entry.finished_at) || to_string(entry.finished_at),
       exit_reason: entry.exit_reason,
+      non_active_state: Map.get(entry, :non_active_state),
       turn_count: entry.turn_count,
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       tokens: entry.tokens,
