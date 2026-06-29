@@ -366,7 +366,9 @@ fields are ignored for forward compatibility, but consumed sections are validate
 - `server.port` or CLI `--port` enables the optional HTTP dashboard and JSON API at `/`,
   `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 - Each dispatched attempt writes a local run ledger under
-  `<workspace.root>/.rondo_runs/<issue_identifier>/<run_id>/`. See
+  `<workspace.root>/.rondo_runs/<issue_identifier>/<run_id>/`. Completed runs also emit
+  `artifacts/delivery-artifact.json`, a redacted handoff summary that links patch/final-report,
+  gate, clean-eval, interrupt, and decision evidence without embedding raw logs or diffs. See
   [`docs/run_ledger.md`](docs/run_ledger.md) for layout, privacy, and retention notes.
 
 ## Project Layout

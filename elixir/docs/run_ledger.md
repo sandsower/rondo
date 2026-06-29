@@ -15,6 +15,7 @@ Ledgers live under the configured `workspace.root`:
     ...
   artifacts/
     agent-events.ndjson
+    delivery-artifact.json
     gates/
       turn-0001/
         results.json
@@ -46,6 +47,7 @@ If `workspace.root` points at a temporary directory, ledgers are ephemeral with 
 - checkpoint index
 - artifact links
 - `final_report` validation block and `failure_classification` when recorded (see below)
+- completed-run delivery artifact link (`kind: delivery_artifact`) when emitted
 - pending human interrupt payload when the status is `paused`
 
 Checkpoint and built-in artifact paths are relative to `run_dir`. Archive links may point at the existing archive location outside the ledger.
@@ -70,6 +72,7 @@ Current checkpoint kinds include:
 - `edit_batch`
 - `gates_completed`
 - `final_report_validated`
+- `patch_secret_scan`
 - `interrupt_created`
 - `completed`
 - `failed`
@@ -108,6 +111,8 @@ For completed runs (orchestrator-driven and `run-once`) whose workspace changed 
 
 Both files are linked from the manifest with artifact kinds `patch` and `patch_metadata`. Capture is skipped (without failing the run) when the workspace is missing, not a git repository, has no commits, or has no changes relative to the base. See `Rondo.PatchArtifact`.
 
+Patch bytes stay byte-exact so clean-eval can apply them. Rondo still runs the deny-list scanner over the captured patch. If a hit is found, the patch is not rewritten; the manifest records `failure_classification: patch_contains_secret`, writes a `patch_secret_scan` checkpoint, marks the patch artifact `exportable: false`, and suppresses delivery-artifact emission/export inclusion for that run.
+
 ## Final report artifact
 
 Completed runs (orchestrator-driven and `run-once`) validate the adapter's final report against the `rondo.final_report/v0` schema (`Rondo.FinalReport`). The report is a JSON object — the whole final report string or a fenced ```json block (the first candidate that validates wins; the last fenced block is preferred when several validate) — with required fields `schema`, `summary`, `changed_files`, `gates_run`, `failures`, `risks`, and `next_state`.
@@ -115,6 +120,14 @@ Completed runs (orchestrator-driven and `run-once`) validate the adapter's final
 Validation writes a `final_report_validated` checkpoint and a manifest `final_report` block with `status` `valid`, `invalid`, or `missing` plus validation `errors`. Valid reports are persisted (sanitized) to `artifacts/final-report.json` and linked with artifact kind `final_report`.
 
 Invalid or missing reports are a distinct failure classification from task/code failures: the manifest `failure_classification` field is `final_report_invalid` or `final_report_missing` for completed runs with bad reports, and `task_failure` for runs that terminate with status `failed`.
+
+## Delivery artifact
+
+Successfully completed runs emit `artifacts/delivery-artifact.json` and link it from the manifest with artifact kind `delivery_artifact`. The schema is `rondo-delivery-artifact-v0` and includes these top-level sections: `run`, `source`, `summary`, `outputs`, `proof`, `interrupts`, `human_decisions`, `risks`, `deferred_work`, `memory_lesson_candidates`, `redaction`, and `portability`.
+
+The delivery artifact is a consumable handoff summary for humans and Beislið reconciliation. It links to existing proof artifacts (gate results, stdout/stderr paths, clean-eval result path, final-report path, patch path when safe) instead of embedding raw logs or diffs. Paths are run-dir-relative by default so a future export bundle can include `delivery-artifact.json` plus referenced relative artifacts. Absolute archive links are treated as local-only and omitted from portable outputs while setting `portability.requires_local_workspace: true`.
+
+Runs classified as `patch_contains_secret` do not emit a delivery artifact; the byte-exact patch remains available locally for clean-eval but is blocked from delivery/export inclusion.
 
 ## Gate artifacts
 

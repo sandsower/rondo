@@ -1462,6 +1462,13 @@ lifecycle transitions, and treat write failures as warnings rather than run-fata
 artifacts are local diagnostic data and may include issue text, file paths, summarized agent events,
 session metadata, and token counts.
 
+Completed ledgers should expose a portable delivery artifact (`rondo-delivery-artifact-v0`) that
+summarizes run/source metadata, final report, patch/PR/branch links, gate and clean-eval proof links,
+interrupts, human decisions, residual risks, deferred work, and redaction/portability notes. It must
+link to raw logs/diffs by artifact path rather than embedding them by default. If the byte-exact patch
+artifact triggers the deny-list scanner, classify the run as `patch_contains_secret` and suppress
+delivery/export inclusion while preserving the local patch for clean evaluation.
+
 ### 13.3 Runtime Snapshot / Monitoring Interface (Optional but Recommended)
 
 If the implementation exposes a synchronous runtime snapshot (for dashboards or monitoring), it

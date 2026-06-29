@@ -46,6 +46,14 @@ defmodule Rondo.Redaction do
 
   def redact(value, _opts), do: value
 
+  @doc "Returns true when redaction would remove secret-shaped content from a string."
+  @spec contains_secret?(term()) :: boolean()
+  def contains_secret?(value), do: contains_secret?(value, [])
+
+  @spec contains_secret?(term(), keyword()) :: boolean()
+  def contains_secret?(value, opts) when is_binary(value), do: redact(value, opts) != value
+  def contains_secret?(_value, _opts), do: false
+
   @spec secret_env_values(%{optional(String.t()) => String.t()}) :: [String.t()]
   def secret_env_values(env) when is_map(env) do
     for {name, value} <- env,

@@ -7,7 +7,7 @@ defmodule Rondo.RunLedger do
   workspace root.
   """
 
-  alias Rondo.{Config, FinalReport, Linear.Issue, ProcessProvider, Redaction}
+  alias Rondo.{Config, DeliveryArtifact, FinalReport, Linear.Issue, ProcessProvider, Redaction}
 
   @schema_version 1
   @events_schema "rondo.events/v0"
@@ -240,10 +240,20 @@ defmodule Rondo.RunLedger do
         |> put_in(["timestamps", "finished_at"], iso_timestamp)
 
       with :ok <- write_json_file(ledger.manifest_path, manifest) do
-        {:ok, %{ledger | manifest: manifest}}
+        ledger = %{ledger | manifest: manifest}
+        maybe_write_delivery_artifact(ledger, status_string)
       end
     end
   end
+
+  defp maybe_write_delivery_artifact(ledger, "completed") do
+    case DeliveryArtifact.write(ledger) do
+      {:ok, ledger, _status} -> {:ok, ledger}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp maybe_write_delivery_artifact(ledger, _status), do: {:ok, ledger}
 
   defp maybe_put_terminal_failure_classification(manifest, "failed", opts) do
     Map.put(manifest, "failure_classification", Keyword.get(opts, :failure_classification, "task_failure"))
@@ -278,8 +288,25 @@ defmodule Rondo.RunLedger do
         |> put_in(["timestamps", "updated_at"], timestamp)
 
       with :ok <- write_json_file(ledger.manifest_path, manifest) do
-        {:ok, %{ledger | manifest: manifest}}
+        ledger = %{ledger | manifest: manifest}
+        maybe_refresh_delivery_artifact(ledger, normalized_artifacts)
       end
+    end
+  end
+
+  defp maybe_refresh_delivery_artifact(ledger, linked_artifacts) do
+    cond do
+      Map.get(ledger.manifest, "status") != "completed" ->
+        {:ok, ledger}
+
+      Enum.any?(linked_artifacts, &(Map.get(&1, "kind") == "delivery_artifact")) ->
+        {:ok, ledger}
+
+      true ->
+        case DeliveryArtifact.write(ledger) do
+          {:ok, ledger, _status} -> {:ok, ledger}
+          {:error, reason} -> {:error, reason}
+        end
     end
   end
 
@@ -388,6 +415,30 @@ defmodule Rondo.RunLedger do
   @doc "Returns the run-dir-relative path of the validated final report artifact."
   @spec final_report_relative_path() :: String.t()
   def final_report_relative_path, do: @final_report_relative_path
+
+  @spec record_patch_secret_scan(t(), :fail | :pass, map()) :: {:ok, t()} | {:error, term()}
+  def record_patch_secret_scan(%__MODULE__{} = ledger, status, details \\ %{}) when status in [:fail, :pass] and is_map(details) do
+    status_string = Atom.to_string(status)
+
+    payload =
+      details
+      |> Map.merge(%{"status" => status_string})
+      |> sanitize_value()
+
+    manifest_update = fn manifest ->
+      manifest
+      |> Map.put("patch_secret_scan", payload)
+      |> maybe_put_patch_secret_classification(status)
+    end
+
+    write_checkpoint(ledger, :patch_secret_scan, payload,
+      source: %{scanner: Map.get(payload, "scanner", "rondo.redaction/v0")},
+      manifest_update: manifest_update
+    )
+  end
+
+  defp maybe_put_patch_secret_classification(manifest, :fail), do: Map.put(manifest, "failure_classification", "patch_contains_secret")
+  defp maybe_put_patch_secret_classification(manifest, :pass), do: manifest
 
   @spec record_final_report(t(), term()) :: {:ok, t(), :valid | :invalid | :missing} | {:error, term()}
   def record_final_report(%__MODULE__{} = ledger, source) do
@@ -590,7 +641,22 @@ defmodule Rondo.RunLedger do
   defp write_json_file(path, payload) do
     with :ok <- File.mkdir_p(Path.dirname(path)),
          {:ok, json} <- Jason.encode(payload) do
-      File.write(path, json)
+      write_atomic(path, json)
+    end
+  end
+
+  defp write_atomic(path, contents) do
+    tmp_path = path <> ".tmp-" <> (:erlang.unique_integer([:positive]) |> Integer.to_string())
+
+    with :ok <- File.write(tmp_path, contents) do
+      case File.rename(tmp_path, path) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          _ = File.rm(tmp_path)
+          {:error, reason}
+      end
     end
   end
 
