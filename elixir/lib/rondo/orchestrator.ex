@@ -2976,12 +2976,6 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  defp debug_log(msg) do
-    line = "[#{DateTime.utc_now() |> DateTime.to_iso8601()}] #{msg}\n"
-    File.mkdir_p!("/tmp/rondo_workspaces")
-    File.write!("/tmp/rondo_workspaces/rondo_debug.log", line, [:append])
-  end
-
   @archive_keys ~w(issue_id identifier session_id state started_at finished_at exit_reason non_active_state turn_count tokens latest_gate event_log)
   @token_keys ~w(input_tokens output_tokens total_tokens)
   @event_keys ~w(at event message tokens)

@@ -70,6 +70,6 @@ defmodule RondoWeb.StaticAssets do
   def fetch(_path), do: :error
 
   @dialyzer {:nowarn_function, serve: 2}
-  defp serve(_content_type, nil), do: :error
   defp serve(content_type, body) when is_binary(body), do: {:ok, content_type, body}
+  defp serve(_content_type, _body), do: :error
 end

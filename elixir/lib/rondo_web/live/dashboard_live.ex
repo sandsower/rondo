@@ -943,7 +943,4 @@ defmodule RondoWeb.DashboardLive do
   end
 
   defp push_run_charts(socket, _), do: socket
-
-  defp pretty_value(nil), do: "n/a"
-  defp pretty_value(value), do: inspect(value, pretty: true, limit: :infinity)
 end

@@ -123,8 +123,6 @@ defmodule Rondo.Escalation do
   Build a short evidence prompt to seed an escalated or repair attempt.
   """
   @spec evidence_prompt([attempt_entry()], :escalate | :repair, tier() | nil) :: String.t()
-  def evidence_prompt(chain, mode, target_tier \\ nil)
-
   def evidence_prompt(chain, :escalate, target_tier) when is_binary(target_tier) do
     latest = List.last(chain) || %{}
 
@@ -227,7 +225,7 @@ defmodule Rondo.Escalation do
 
   defp handle_final_report(chain, config) do
     if repair_attempts_used(chain) < config.report_repair_attempts do
-      {:repair, chain, evidence_prompt(chain, :repair)}
+      {:repair, chain, evidence_prompt(chain, :repair, nil)}
     else
       {:pause, "report_repair_exhausted", chain}
     end
