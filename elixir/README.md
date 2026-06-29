@@ -159,9 +159,13 @@ claude:
   dangerously_skip_permissions: true
   max_turns: 50
   output_format: stream-json
-# Or set agent.adapter: pi and configure:
+# Or set agent.adapter: pi or codex and configure:
 # pi:
 #   command: pi
+#   turn_timeout_ms: 3600000
+#   stall_timeout_ms: 300000
+# codex:
+#   command: codex
 #   turn_timeout_ms: 3600000
 #   stall_timeout_ms: 300000
 ---
@@ -224,12 +228,17 @@ Notes:
 - `claude.turn_timeout_ms` maximum wall-clock time per turn in milliseconds.
 - `claude.stall_timeout_ms` maximum time without output before a turn is considered stalled.
 - `agent.adapter` selects the provider adapter. Supported first-class values are `claude_code`
-  (default) and `pi`.
+  (default), `pi`, and `codex`.
 - When `agent.adapter: pi`, `pi.command` launches `pi --mode json`; `pi.turn_timeout_ms` and
   `pi.stall_timeout_ms` mirror the Claude timeout settings. Resume uses pi `--session <id>` when a
   stable session id is available; usage/rate-limit/sandbox metadata is best-effort/degraded based on
   pi JSON-mode events. Per-run model routing passes `--model <id>` to pi when a resolved model is
   available; the pi adapter probe reports whether the installed CLI advertises `--model` support.
+- When `agent.adapter: codex`, `codex.command` launches `codex exec --json`; `codex.turn_timeout_ms`
+  and `codex.stall_timeout_ms` control per-turn timeouts. Resume uses Codex thread ids when
+  available; JSONL `thread.started` / `turn.*` / `item.*` events are normalized into Rondo adapter
+  updates, with raw payloads preserved for auditing. Per-run model routing passes `--model <id>` to
+  Codex when the CLI advertises support.
 - `action_policy.command` points to the Beislið CLI used for deterministic action-risk evaluation.
   Default: `beislid`.
 - `action_policy.run_mode` selects Beislið's policy mode. Supported values: `supervised-auto` and
@@ -407,13 +416,21 @@ export RONDO_E2E_AGENT_COMMAND=/path/to/pi   # optional; defaults to "pi" on PAT
 make e2e
 ```
 
+To run through the **codex adapter**:
+
+```bash
+export RONDO_E2E_AGENT_ADAPTER=codex
+export RONDO_E2E_AGENT_COMMAND=/path/to/codex   # optional; defaults to "codex" on PATH
+make e2e
+```
+
 Optional knobs:
 
-- `RONDO_E2E_AGENT_ADAPTER` — adapter to drive (`claude_code` or `pi`; default
+- `RONDO_E2E_AGENT_ADAPTER` — adapter to drive (`claude_code`, `pi`, or `codex`; default
   `claude_code`). Any other value is a config error with a clear message.
 - `RONDO_E2E_AGENT_COMMAND` — agent CLI binary override. When not set the default
-  binary for the selected adapter is used (`claude` for `claude_code`, `pi` for `pi`).
-  If the default binary is not found on `$PATH` the test **fails** with a clear message
+  binary for the selected adapter is used (`claude` for `claude_code`, `pi` for `pi`, `codex` for
+  `codex`). If the default binary is not found on `$PATH` the test **fails** with a clear message
   naming the missing command and the env var to set.
 - `RONDO_E2E_AGENT_MAX_TURNS` — max agent turns for the short task (default `10`).
 - `RONDO_E2E_ACTION_POLICY_COMMAND` — action-policy evaluator override. The live

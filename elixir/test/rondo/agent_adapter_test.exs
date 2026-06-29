@@ -670,10 +670,11 @@ defmodule Rondo.AgentAdapterTest do
     assert Adapter.probe_result(:degraded, %{binary: :missing}).status == :degraded
   end
 
-  test "config exposes agent.adapter with claude_code default and pi config" do
+  test "config exposes agent.adapter with claude_code default and pi/codex config" do
     write_workflow_file!(Workflow.workflow_file_path(), agent_adapter: nil)
     assert Config.agent_adapter() == "claude_code"
     assert Config.pi_command() == "pi"
+    assert Config.codex_command() == "codex"
     assert :ok = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), agent_adapter: "fake")
@@ -684,6 +685,11 @@ defmodule Rondo.AgentAdapterTest do
     write_workflow_file!(Workflow.workflow_file_path(), agent_adapter: "pi", claude_command: "", pi_command: "pi")
     assert Config.agent_adapter() == "pi"
     assert Config.pi_command() == "pi"
+    assert :ok = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(), agent_adapter: "codex", codex_command: "codex")
+    assert Config.agent_adapter() == "codex"
+    assert Config.codex_command() == "codex"
     assert :ok = Config.validate!()
 
     write_workflow_file!(Workflow.workflow_file_path(), agent_adapter: "claude_code", claude_command: "claude", pi_command: "")
@@ -3087,6 +3093,74 @@ gate
                         event: :invocation_completed,
                         final_report: "runner final",
                         raw: %{adapter: "pi"}
+                      }},
+                     500
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner can resolve codex adapter from config and preserve compatibility envelope" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-codex-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace_root)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      echo '{"type":"thread.started","thread_id":"runner-codex-thread"}'
+      echo '{"type":"item.completed","thread_id":"runner-codex-thread","item":{"id":"msg-1","type":"agent_message","text":"Working from codex"}}'
+      echo '{"type":"turn.completed","thread_id":"runner-codex-thread","usage":{"input_tokens":2,"cached_input_tokens":1,"output_tokens":3,"reasoning_output_tokens":4}}'
+      exit 0
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        agent_adapter: "codex",
+        codex_command: codex_binary
+      )
+
+      issue = %Issue{
+        id: "issue-codex",
+        identifier: "MT-CODEX",
+        title: "Codex adapter",
+        description: "Run through codex",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = start_update_recorder(self())
+
+      assert :ok =
+               AgentRunner.run(issue, parent, issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end)
+
+      assert_receive {:claude_worker_update, "issue-codex",
+                      %{
+                        event: :session_started,
+                        adapter: "codex",
+                        run_ref: %{provider_ref: "runner-codex-thread", provider_ref_kind: "thread_id"},
+                        session_id: "runner-codex-thread"
+                      }},
+                     500
+
+      assert_receive {:claude_worker_update, "issue-codex",
+                      %{
+                        event: :assistant_message,
+                        adapter: "codex",
+                        message: "Working from codex"
+                      }},
+                     500
+
+      assert_receive {:claude_worker_update, "issue-codex",
+                      %{
+                        event: :invocation_completed,
+                        adapter: "codex",
+                        final_report: "Working from codex",
+                        usage: %{total_tokens: 10}
                       }},
                      500
     after

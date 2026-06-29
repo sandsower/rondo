@@ -23,7 +23,7 @@ defmodule Rondo.LiveE2E do
 
   # Adapter selection
   @adapter_var "RONDO_E2E_AGENT_ADAPTER"
-  @accepted_adapters ["claude_code", "pi"]
+  @accepted_adapters ["claude_code", "pi", "codex"]
   @default_adapter "claude_code"
 
   # Generalized agent env vars (canonical)
@@ -35,7 +35,7 @@ defmodule Rondo.LiveE2E do
   @deprecated_max_turns_var "RONDO_E2E_CLAUDE_MAX_TURNS"
 
   # Default commands per adapter
-  @default_commands %{"claude_code" => "claude", "pi" => "pi"}
+  @default_commands %{"claude_code" => "claude", "pi" => "pi", "codex" => "codex"}
 
   @team_query """
   query RondoE2EResolveTeam($key: String!) {
@@ -206,7 +206,7 @@ defmodule Rondo.LiveE2E do
   @doc """
   Returns the keyword list of WORKFLOW.md overrides for the given adapter context.
 
-  Used by the live E2E test to emit the correct adapter section (`claude:` or `pi:`)
+  Used by the live E2E test to emit the correct adapter section (`claude:`, `pi:`, or `codex:`)
   in the temporary WORKFLOW.md, while keeping adapter-agnostic fields separate.
   """
   @spec workflow_overrides_for_adapter(map()) :: keyword()
@@ -226,6 +226,16 @@ defmodule Rondo.LiveE2E do
       pi_command: context.agent_command,
       pi_turn_timeout_ms: 3_600_000,
       pi_stall_timeout_ms: 300_000
+    ]
+  end
+
+  def workflow_overrides_for_adapter(%{agent_adapter: "codex"} = context) do
+    [
+      agent_adapter: "codex",
+      agent_max_turns: context.agent_max_turns,
+      codex_command: context.agent_command,
+      codex_turn_timeout_ms: 3_600_000,
+      codex_stall_timeout_ms: 300_000
     ]
   end
 

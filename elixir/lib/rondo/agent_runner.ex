@@ -6,6 +6,7 @@ defmodule Rondo.AgentRunner do
   require Logger
   alias Rondo.Agent.Adapter
   alias Rondo.Agent.ClaudeCodeAdapter
+  alias Rondo.Agent.CodexAdapter
   alias Rondo.Agent.PiAdapter
 
   alias Rondo.{
@@ -1885,6 +1886,8 @@ defmodule Rondo.AgentRunner do
   defp resolve_adapter_module(:claude_code), do: {:ok, ClaudeCodeAdapter}
   defp resolve_adapter_module("pi"), do: {:ok, PiAdapter}
   defp resolve_adapter_module(:pi), do: {:ok, PiAdapter}
+  defp resolve_adapter_module("codex"), do: {:ok, CodexAdapter}
+  defp resolve_adapter_module(:codex), do: {:ok, CodexAdapter}
   defp resolve_adapter_module(other), do: {:error, {:unsupported_agent_adapter, other}}
 
   defp process_provider_module(opts) do

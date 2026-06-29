@@ -42,6 +42,7 @@ defmodule Rondo.LiveE2ESupportTest do
       "beislid" -> "/usr/local/bin/beislid"
       "claude" -> "/usr/local/bin/claude"
       "pi" -> "/usr/local/bin/pi"
+      "codex" -> "/usr/local/bin/codex"
       _ -> nil
     end
   end
@@ -162,6 +163,23 @@ defmodule Rondo.LiveE2ESupportTest do
       assert context.agent_command == "pi"
     end
 
+    test "selects codex adapter when RONDO_E2E_AGENT_ADAPTER=codex" do
+      overrides = %{"RONDO_E2E_AGENT_ADAPTER" => "codex"}
+
+      assert {:ok, context} =
+               LiveE2E.load_context(
+                 env(full_env(overrides)),
+                 fn
+                   "codex" -> "/usr/local/bin/codex"
+                   "beislid" -> "/usr/local/bin/beislid"
+                   _ -> nil
+                 end
+               )
+
+      assert context.agent_adapter == "codex"
+      assert context.agent_command == "codex"
+    end
+
     test "returns config error for unknown adapter value" do
       overrides = %{"RONDO_E2E_AGENT_ADAPTER" => "openai"}
 
@@ -170,6 +188,7 @@ defmodule Rondo.LiveE2ESupportTest do
 
       assert "claude_code" in accepted
       assert "pi" in accepted
+      assert "codex" in accepted
     end
 
     test "probe-honest failure when claude CLI is not on PATH (claude_code adapter)" do
@@ -332,6 +351,23 @@ defmodule Rondo.LiveE2ESupportTest do
       assert Keyword.get(content, :pi_command) == "/opt/bin/pi"
       assert Keyword.get(content, :pi_turn_timeout_ms) == 3_600_000
       assert Keyword.get(content, :pi_stall_timeout_ms) == 300_000
+      refute Keyword.has_key?(content, :claude_command)
+    end
+
+    test "emits codex: section for codex adapter" do
+      context = %{
+        agent_adapter: "codex",
+        agent_command: "/opt/bin/codex",
+        agent_max_turns: 8
+      }
+
+      content = LiveE2E.workflow_overrides_for_adapter(context)
+
+      assert Keyword.get(content, :agent_adapter) == "codex"
+      assert Keyword.get(content, :agent_max_turns) == 8
+      assert Keyword.get(content, :codex_command) == "/opt/bin/codex"
+      assert Keyword.get(content, :codex_turn_timeout_ms) == 3_600_000
+      assert Keyword.get(content, :codex_stall_timeout_ms) == 300_000
       refute Keyword.has_key?(content, :claude_command)
     end
   end

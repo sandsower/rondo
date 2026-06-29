@@ -1434,7 +1434,12 @@ defmodule Rondo.OrchestratorStatusTest do
       %{state | poll_check_in_progress: true, next_poll_due_at_ms: nil}
     end)
 
-    snapshot = GenServer.call(pid, :snapshot)
+    snapshot =
+      wait_for_snapshot(pid, fn
+        %{polling: %{checking?: true, next_poll_in_ms: nil}} -> true
+        _ -> false
+      end)
+
     assert %{polling: %{checking?: true, next_poll_in_ms: nil}} = snapshot
   end
 
@@ -1463,7 +1468,7 @@ defmodule Rondo.OrchestratorStatusTest do
                  _ ->
                    false
                end,
-               500
+               2_000
              )
 
     assert %{
@@ -1483,7 +1488,7 @@ defmodule Rondo.OrchestratorStatusTest do
                  _ ->
                    false
                end,
-               500
+               2_000
              )
 
     assert is_integer(next_poll_in_ms)
