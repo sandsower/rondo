@@ -464,7 +464,7 @@ defmodule Rondo.CoreTest do
     before_down_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = :sys.get_state(pid, 15_000)
     after_state_ms = System.monotonic_time(:millisecond)
 
     refute Map.has_key?(state.running, issue_id)
@@ -507,7 +507,7 @@ defmodule Rondo.CoreTest do
     before_down_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = :sys.get_state(pid, 15_000)
     after_state_ms = System.monotonic_time(:millisecond)
 
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
@@ -552,7 +552,7 @@ defmodule Rondo.CoreTest do
     reason = {:shutdown, {:gate_failed, %{status: :fail}}}
     send(pid, {:DOWN, ref, :process, self(), reason})
     Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = :sys.get_state(pid, 15_000)
 
     assert state.paused_interrupts == %{}
     assert %{attempt: 2, failure_reason: :gate_failed} = state.retry_attempts[issue_id]
@@ -590,7 +590,7 @@ defmodule Rondo.CoreTest do
     before_down_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
-    state = :sys.get_state(pid)
+    state = :sys.get_state(pid, 15_000)
     after_state_ms = System.monotonic_time(:millisecond)
 
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =

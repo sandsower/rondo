@@ -141,6 +141,161 @@ defmodule Rondo.EscalationTest do
       assert List.last(chain).tier == "mystery"
       assert String.contains?(prompt, "escalated attempt at tier `standard`")
     end
+
+    test "normalizes atom tier lists, ignores invalid entries, and falls back from empty tiers" do
+      config =
+        Escalation.resolve_config(%{
+          escalation: %{
+            tiers: [:light, 123, " STANDARD "],
+            max_total_attempts: "not-a-number",
+            token_budget: "oops",
+            report_repair_attempts: "still-not-a-number"
+          }
+        })
+
+      assert config.tiers == ["light", "standard"]
+      assert config.max_total_attempts == 3
+      assert config.token_budget == nil
+      assert config.report_repair_attempts == 2
+
+      empty_config = Escalation.resolve_config(%{"escalation" => %{"tiers" => []}})
+      assert empty_config.tiers == ["light", "standard", "heavy", "frontier"]
+    end
+  end
+
+  describe "coverage edge cases" do
+    test "repair prompts use the default arity and preserve atom final report statuses" do
+      manifest =
+        manifest(%{
+          run_id: "run-repair",
+          status: "completed",
+          failure_classification: "final_report_invalid"
+        })
+        |> Map.put("final_report", %{"status" => :invalid, "errors" => []})
+
+      assert {:repair, chain, prompt} = Escalation.after_attempt(manifest, [])
+      assert List.last(chain).final_report_status == :invalid
+      assert String.contains?(prompt, "invalid")
+      assert String.contains?(Escalation.evidence_prompt(chain, :repair), "same-tier repair attempt")
+    end
+
+    test "escalation prompts handle missing requested tiers, custom reasons, and gate summaries" do
+      base =
+        manifest(%{
+          run_id: "run-escalate",
+          status: "failed",
+          failure_classification: "task_failure",
+          escalation: %{"current_attempt" => %{"reason" => "custom_reason"}},
+          agent: %{
+            "model_routing" => %{"resolved" => %{"model" => "openrouter/moonshotai/kimi-k2.7-code"}},
+            "usage" => %{"input_tokens" => 1, "output_tokens" => 2, "total_tokens" => 3}
+          },
+          latest_gate: %{}
+        })
+
+      assert {:escalate, "standard", chain, prompt} = Escalation.after_attempt(base, [])
+      assert Map.get(List.last(chain), :tier) == nil
+      assert List.last(chain).reason == :custom_reason
+      assert String.contains?(prompt, "gate summary: none")
+
+      with_gate_status = Map.put(base, "latest_gate", %{"status" => "warn"})
+      assert {:escalate, "standard", _, status_prompt} = Escalation.after_attempt(with_gate_status, [])
+      assert String.contains?(status_prompt, "gate summary: status warn")
+
+      resolved_string =
+        manifest(%{
+          run_id: "run-resolved-string",
+          status: "failed",
+          failure_classification: "task_failure",
+          agent: %{
+            "model_routing" => %{"resolved" => "manual"},
+            "usage" => %{"input_tokens" => 1, "output_tokens" => 2, "total_tokens" => 3}
+          }
+        })
+
+      assert {:escalate, "standard", _, _} = Escalation.after_attempt(resolved_string, [])
+    end
+
+    test "attempt status and token spend branches accept alternate payload shapes" do
+      for status <- ["paused", "terminated", "mystery"] do
+        manifest =
+          manifest(%{
+            run_id: "run-#{status}",
+            status: status,
+            failure_classification: "task_failure"
+          })
+
+        assert {:escalate, "standard", _, _} = Escalation.after_attempt(manifest, [])
+      end
+
+      escalation_reason_manifest =
+        manifest(%{
+          run_id: "run-escalation-reason",
+          status: "failed",
+          failure_classification: "task_failure"
+        })
+        |> Map.put("escalation", %{"current_attempt" => %{"reason" => "escalation"}})
+
+      assert {:escalate, "standard", _, _} = Escalation.after_attempt(escalation_reason_manifest, [])
+
+      initial_reason_manifest =
+        manifest(%{
+          run_id: "run-initial-reason",
+          status: "failed",
+          failure_classification: "task_failure"
+        })
+        |> Map.put("escalation", %{"current_attempt" => %{"reason" => "initial"}})
+
+      assert {:escalate, "standard", _, _} = Escalation.after_attempt(initial_reason_manifest, [])
+
+      atom_usage_manifest =
+        manifest(%{
+          run_id: "run-atom-usage",
+          status: "failed",
+          failure_classification: "task_failure",
+          agent: %{
+            "model_routing" => %{
+              "requested_tier" => "light",
+              "resolved" => %{"model" => "openrouter/moonshotai/kimi-k2.7-code"}
+            },
+            "usage" => %{input_tokens: 7, output_tokens: 8, total_tokens: 9}
+          }
+        })
+        |> Map.put("agent", %{
+          "model_routing" => %{
+            "requested_tier" => "light",
+            "resolved" => %{"model" => "openrouter/moonshotai/kimi-k2.7-code"}
+          },
+          "usage" => %{input_tokens: 7, output_tokens: 8, total_tokens: 9}
+        })
+
+      assert {:escalate, _, atom_chain, _} = Escalation.after_attempt(atom_usage_manifest, [])
+      assert List.last(atom_chain).token_spend == %{input_tokens: 7, output_tokens: 8, total_tokens: 9}
+
+      string_usage_manifest =
+        manifest(%{
+          run_id: "run-string-usage",
+          status: "failed",
+          failure_classification: "task_failure",
+          agent: %{
+            "model_routing" => %{
+              "requested_tier" => "light",
+              "resolved" => %{"model" => "openrouter/moonshotai/kimi-k2.7-code"}
+            },
+            "usage" => %{"input_tokens" => "7", "output_tokens" => "8", "total_tokens" => "9"}
+          }
+        })
+        |> Map.put("agent", %{
+          "model_routing" => %{
+            "requested_tier" => "light",
+            "resolved" => %{"model" => "openrouter/moonshotai/kimi-k2.7-code"}
+          },
+          "usage" => %{input_tokens: "7", output_tokens: "8", total_tokens: "9"}
+        })
+
+      assert {:escalate, _, string_chain, _} = Escalation.after_attempt(string_usage_manifest, [])
+      assert List.last(string_chain).token_spend == %{input_tokens: 0, output_tokens: 0, total_tokens: 0}
+    end
   end
 
   describe "pass-on-first" do

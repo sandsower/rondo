@@ -147,6 +147,24 @@ defmodule Rondo.ModelUsageTest do
       assert result.by_model["adapter:pi"].provider == nil
     end
 
+    test "keeps aggregate model map unchanged when routing has no model or adapter" do
+      runs = [
+        %{
+          "identifier" => "TEST-NO-MODEL",
+          "model_routing" => %{"resolved" => "manual"},
+          "started_at" => ~U[2026-06-29 10:00:00Z],
+          "tokens" => %{"total_tokens" => 100}
+        }
+      ]
+
+      result = ModelUsage.aggregate(runs, [])
+
+      assert result.total_runs == 1
+      assert result.total_tokens == 100
+      assert result.by_provider == %{}
+      assert result.by_model == %{}
+    end
+
     test "model_routing stored info takes precedence over top-level adapter field" do
       runs = [
         %{
@@ -333,6 +351,39 @@ defmodule Rondo.ModelUsageTest do
       assert entry.model == nil
       assert entry.boundary == "initial_spawn"
     end
+
+    test "handles resolved routing strings, terminal exits, and missing timestamps" do
+      runs = [
+        %{
+          "identifier" => "RON-10",
+          "started_at" => "2026-06-29T10:00:00Z",
+          "model_routing" => %{
+            "resolved" => %{"model" => "openrouter/moonshotai/kimi-k2.7-code"}
+          },
+          "exit_reason" => "completed"
+        },
+        %{
+          "identifier" => "RON-11",
+          "model_routing" => %{
+            "resolved" => "manual"
+          }
+        },
+        %{
+          "identifier" => "RON-12",
+          "started_at" => ~U[2026-06-29 11:00:00Z],
+          "model_routing" => %{
+            "resolved" => %{"adapter" => "pi", "model" => "openai-codex/gpt-5.5"}
+          },
+          "exit_reason" => "terminated"
+        }
+      ]
+
+      timeline = ModelUsage.model_timeline(runs)
+
+      assert Enum.any?(timeline, &(&1.model == "openrouter/moonshotai/kimi-k2.7-code" and &1.boundary == "completed" and &1.at == "2026-06-29T10:00:00Z"))
+      assert Enum.any?(timeline, &(&1.model == nil and &1.boundary == "active" and is_nil(&1.at)))
+      assert Enum.any?(timeline, &(&1.model == "openai-codex/gpt-5.5" and &1.boundary == "terminated" and &1.at == "2026-06-29T11:00:00Z"))
+    end
   end
 
   describe "model_roles/1" do
@@ -440,6 +491,35 @@ defmodule Rondo.ModelUsageTest do
       assert roles.active.model == nil
       assert roles.historical == []
       assert roles.fallback == []
+    end
+
+    test "sorts invalid and missing started_at values safely" do
+      runs = [
+        %{
+          "identifier" => "GOOD",
+          "started_at" => ~U[2026-06-29 12:00:00Z],
+          "model_routing" => %{"resolved" => %{"model" => "openrouter/kimi"}}
+        },
+        %{
+          "identifier" => "STRING",
+          "started_at" => "2026-06-29T11:30:00Z",
+          "model_routing" => %{"resolved" => %{"model" => "openrouter/kimi-2"}}
+        },
+        %{
+          "identifier" => "BAD",
+          "started_at" => "not-a-date",
+          "model_routing" => %{"resolved" => %{"model" => "openai-codex/gpt-5.4-mini"}}
+        },
+        %{
+          "identifier" => "MISSING",
+          "model_routing" => %{"resolved" => %{"model" => "openai-codex/gpt-5.5"}}
+        }
+      ]
+
+      roles = ModelUsage.model_roles(runs)
+
+      assert roles.active.model == "openrouter/kimi"
+      assert Enum.any?(roles.historical, &(&1.model == "openai-codex/gpt-5.4-mini"))
     end
   end
 

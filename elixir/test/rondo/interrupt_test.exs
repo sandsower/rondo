@@ -147,6 +147,62 @@ defmodule Rondo.InterruptTest do
     assert interrupt["resume"] == %{"run_id" => "run-1", "side_effect_id" => "tracker-transition:GH-58"}
   end
 
+  test "builds an escalation paused interrupt with default reason and normalized resume seeds" do
+    interrupt =
+      Interrupt.escalation_paused(%{
+        timestamp: @now,
+        issue: %{
+          id: "issue-99",
+          identifier: "GH-99",
+          title: "Paused escalation",
+          state: "In Progress",
+          url: "https://example.org/issues/99"
+        },
+        attempt_chain: [
+          %{
+            run_id: "run-1",
+            tier: "light",
+            reason: :initial,
+            status: :failed,
+            token_spend: %{input_tokens: 1, output_tokens: 2, total_tokens: 3}
+          }
+        ],
+        run_id: "run-2",
+        run_dir: "/tmp/rondo/.rondo_runs/GH-99/run-2",
+        workspace: "/tmp/rondo/GH-99",
+        session_id: "session-456",
+        run_ref: %{provider_ref: "provider-abc"},
+        retry_attempt: 2
+      })
+
+    assert interrupt["reason"] == "escalation_paused"
+    assert interrupt["classification"] == "no_recovery_path"
+    assert interrupt["question"] =~ "Escalation policy exhausted (no_recovery_path)"
+
+    assert interrupt["issue"] == %{
+             "id" => "issue-99",
+             "identifier" => "GH-99",
+             "title" => "Paused escalation",
+             "state" => "In Progress",
+             "url" => "https://example.org/issues/99"
+           }
+
+    assert [attempt] = interrupt["attempt_chain"]
+    assert attempt["run_id"] == "run-1"
+    assert attempt["reason"] == "initial"
+    assert attempt["status"] == "failed"
+    assert attempt["token_spend"] == %{"input_tokens" => 1, "output_tokens" => 2, "total_tokens" => 3}
+
+    assert interrupt["resume"] == %{
+             "run_id" => "run-2",
+             "run_dir" => "/tmp/rondo/.rondo_runs/GH-99/run-2",
+             "workspace" => "/tmp/rondo/GH-99",
+             "session_id" => "session-456",
+             "run_ref" => %{"provider_ref" => "provider-abc"},
+             "retry_attempt" => 2
+           }
+  end
+
   test "guidance interrupts tolerate missing policy maps" do
     interrupt =
       Interrupt.action_policy_guidance_required(%{

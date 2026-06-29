@@ -180,7 +180,7 @@ defmodule Rondo.Escalation do
     if final_report_failure?(entry) do
       handle_final_report(chain, config)
     else
-      check_escalate(entry, chain, config) || {:pause, "no_recovery_path", chain}
+      check_escalate(entry, chain, config)
     end
   end
 
