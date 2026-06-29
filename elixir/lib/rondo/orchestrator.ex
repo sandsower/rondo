@@ -73,6 +73,7 @@ defmodule Rondo.Orchestrator do
   @impl true
   def init(_opts) do
     now_ms = System.monotonic_time(:millisecond)
+
     paused_interrupts = load_paused_interrupts()
 
     state = %State{
@@ -1643,6 +1644,7 @@ defmodule Rondo.Orchestrator do
       identifier: Map.get(running_entry, :identifier),
       issue: issue,
       state: Map.get(issue, :state),
+      paused_state: Map.get(issue, :state),
       session_id: Map.get(running_entry, :session_id),
       run_id: run_ledger_id(ledger) || Map.get(running_entry, :run_id),
       run_dir: run_ledger_dir(ledger) || Map.get(running_entry, :run_dir),
@@ -1837,6 +1839,7 @@ defmodule Rondo.Orchestrator do
       identifier: issue.identifier,
       issue: issue,
       state: issue.state,
+      paused_state: issue.state,
       session_id: nil,
       run_id: run_ledger_id(ledger),
       run_dir: run_ledger_dir(ledger),
@@ -2323,13 +2326,25 @@ defmodule Rondo.Orchestrator do
         }
       end)
 
+    paused_issues_by_id =
+      case Tracker.fetch_issue_states_by_ids(Map.keys(state.paused_interrupts)) do
+        {:ok, issues} -> Map.new(issues, &{&1.id, &1})
+        _ -> %{}
+      end
+
     paused =
       state.paused_interrupts
       |> Enum.map(fn {issue_id, metadata} ->
+        current_issue = Map.get(paused_issues_by_id, issue_id)
+        tracker_state = (current_issue && current_issue.state) || Map.get(metadata, :tracker_state) || Map.get(metadata, :state)
+        tracker_visibility = if(current_issue, do: "known", else: Map.get(metadata, :tracker_visibility, "unknown"))
+
         %{
           issue_id: issue_id,
           identifier: Map.get(metadata, :identifier),
           state: Map.get(metadata, :state),
+          paused_state: Map.get(metadata, :paused_state),
+          tracker_state: tracker_state,
           session_id: Map.get(metadata, :session_id),
           run_id: Map.get(metadata, :run_id),
           run_dir: Map.get(metadata, :run_dir),
@@ -2346,7 +2361,8 @@ defmodule Rondo.Orchestrator do
           final_report_status: get_in(metadata, [:interrupt, "final_report", "status"]),
           final_report_classification: get_in(metadata, [:interrupt, "classification"]),
           reported_next_state: get_in(metadata, [:interrupt, "final_report", "reported_next_state"]),
-          tracker_visibility: Map.get(metadata, :tracker_visibility, "unknown"),
+          tracker_visibility: tracker_visibility,
+          tracker_state_mismatch: state_mismatch?(Map.get(metadata, :paused_state) || Map.get(metadata, :state), tracker_state),
           blocks_dispatch: MapSet.member?(state.claimed, issue_id),
           blocked_dispatch_reason: paused_blocked_dispatch_reason(metadata),
           stale_reason: Map.get(metadata, :stale_reason),
@@ -2949,7 +2965,7 @@ defmodule Rondo.Orchestrator do
       input_signals = %{
         "failure_reason" => inspect(reason),
         "retry_attempt" => Map.get(running_entry, :retry_attempt),
-        "gate_status" => Map.get(Map.get(running_entry, :latest_gate), :status)
+        "gate_status" => Map.get(Map.get(running_entry, :latest_gate) || %{}, :status)
       }
 
       if gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate)) do
@@ -3066,6 +3082,11 @@ defmodule Rondo.Orchestrator do
       %{}
   end
 
+  defp state_mismatch?(paused_state, tracker_state) when is_binary(paused_state) and is_binary(tracker_state),
+    do: paused_state != tracker_state
+
+  defp state_mismatch?(_paused_state, _tracker_state), do: false
+
   defp load_paused_interrupt_manifest(path) do
     with {:ok, manifest} <- RunLedger.load_manifest(path),
          "paused" <- Map.get(manifest, "status"),
@@ -3087,6 +3108,7 @@ defmodule Rondo.Orchestrator do
       identifier: issue.identifier || issue.id,
       issue: issue,
       state: issue.state,
+      paused_state: issue.state,
       session_id: get_in(manifest, ["agent", "session_id"]) || get_in(interrupt, ["resume", "session_id"]),
       run_id: run_ledger_id(ledger) || Map.get(manifest, "run_id"),
       run_dir: run_ledger_dir(ledger) || Map.get(manifest, "run_dir"),

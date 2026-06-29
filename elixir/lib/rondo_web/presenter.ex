@@ -172,10 +172,17 @@ defmodule RondoWeb.Presenter do
   end
 
   defp paused_entry_payload(entry) do
+    interrupt = interrupt_payload(Map.get(entry, :interrupt)) || %{}
+    tracker_state = entry_value(entry, :tracker_state) || entry_value(entry, :state)
+    paused_state = entry_value(entry, :paused_state) || entry_value(entry, :state)
+
     %{
       issue_id: entry_value(entry, :issue_id),
       issue_identifier: entry_value(entry, :identifier),
       state: entry_value(entry, :state),
+      paused_state: paused_state,
+      tracker_state: tracker_state,
+      tracker_state_mismatch: state_mismatch?(paused_state, tracker_state),
       session_id: entry_value(entry, :session_id),
       run_id: Map.get(entry, :run_id),
       run_dir: Map.get(entry, :run_dir),
@@ -190,7 +197,9 @@ defmodule RondoWeb.Presenter do
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       model_routing: Map.get(entry, :model_routing),
       model_fallback: Map.get(entry, :model_fallback),
-      interrupt: interrupt_payload(Map.get(entry, :interrupt)),
+      suggested_responses: guidance_responses_from_interrupt(interrupt),
+      upcoming_transitions: Map.get(interrupt, :upcoming_transitions, %{}),
+      interrupt: interrupt,
       tokens: %{
         input_tokens: Map.get(entry, :claude_input_tokens, 0),
         output_tokens: Map.get(entry, :claude_output_tokens, 0),
@@ -213,6 +222,9 @@ defmodule RondoWeb.Presenter do
       :run_id,
       :run_dir,
       :workspace,
+      :paused_state,
+      :tracker_state,
+      :tracker_state_mismatch,
       :paused_at,
       :retry_attempt,
       :tracker_visibility,
@@ -226,7 +238,7 @@ defmodule RondoWeb.Presenter do
     |> Map.merge(%{
       guidance_severity: Map.get(interrupt, :guidance_severity),
       blocked_side_effect: Map.get(interrupt, :blocked_side_effect),
-      suggested_responses: Map.get(interrupt, :suggested_responses, []),
+      suggested_responses: guidance_responses_from_interrupt(interrupt),
       upcoming_transitions: Map.get(interrupt, :upcoming_transitions, %{}),
       interrupt: interrupt
     })
@@ -505,6 +517,17 @@ defmodule RondoWeb.Presenter do
   end
 
   defp due_at_iso8601(_due_in_ms), do: nil
+
+  defp guidance_responses_from_interrupt(interrupt) when is_map(interrupt) do
+    Map.get(interrupt, :suggested_responses) || Map.get(interrupt, :options) || []
+  end
+
+  defp guidance_responses_from_interrupt(_interrupt), do: []
+
+  defp state_mismatch?(paused_state, tracker_state) when is_binary(paused_state) and is_binary(tracker_state),
+    do: paused_state != tracker_state
+
+  defp state_mismatch?(_paused_state, _tracker_state), do: false
 
   defp timestamp_payload(%DateTime{} = datetime), do: iso8601(datetime)
   defp timestamp_payload(timestamp) when is_binary(timestamp), do: timestamp

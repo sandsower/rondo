@@ -48,7 +48,7 @@ defmodule Rondo.InterruptTest do
     assert interrupt["state"] == "paused"
     assert interrupt["created_at"] == "2026-05-28T10:11:12Z"
     assert interrupt["question"] =~ "Configured gates failed repeatedly"
-    assert Enum.map(interrupt["options"], & &1["id"]) == ["resume", "abort", "defer"]
+    assert Enum.map(interrupt["options"], & &1["id"]) == ["resume", "abort_run", "defer"]
     assert interrupt["recommendation"] =~ "Review the gate artifacts"
 
     assert interrupt["issue"] == %{

@@ -115,6 +115,66 @@ defmodule Rondo.PresenterTest do
     assert issue_payload.paused.interrupt.reason == "repeated_gate_failure"
   end
 
+  test "state API exposes tracker-state mismatches for reloaded paused claims" do
+    snapshot = %{
+      running: [],
+      retrying: [],
+      paused: [
+        %{
+          issue_id: "issue-paused-mismatch",
+          identifier: "MT-PAUSED-MISMATCH",
+          state: "In Progress",
+          paused_state: "In Progress",
+          tracker_state: "Todo",
+          session_id: "session-paused-mismatch",
+          run_id: "run-paused-mismatch",
+          run_dir: "/tmp/rondo/.rondo_runs/MT-PAUSED-MISMATCH/run",
+          workspace: "/tmp/rondo/MT-PAUSED-MISMATCH",
+          paused_at: "2026-05-28T10:00:00Z",
+          retry_attempt: 1,
+          blocks_dispatch: true,
+          blocked_dispatch_reason: "paused_claim",
+          tracker_visibility: "known",
+          interrupt: %{
+            "reason" => "repeated_gate_failure",
+            "suggested_responses" => [%{"id" => "resume"}],
+            "resume" => %{"run_id" => "run-paused-mismatch"}
+          },
+          event_log: []
+        }
+      ],
+      archived: [],
+      claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    server_name = Module.concat(__MODULE__, :PausedMismatchSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+    assert payload.counts.paused == 1
+    assert payload.counts.needs_guidance == 1
+
+    [paused] = payload.paused
+    assert paused.state == "In Progress"
+    assert paused.paused_state == "In Progress"
+    assert paused.tracker_state == "Todo"
+    assert paused.tracker_state_mismatch == true
+
+    [guidance] = payload.needs_guidance
+    assert guidance.issue_identifier == "MT-PAUSED-MISMATCH"
+    assert guidance.tracker_state == "Todo"
+    assert guidance.paused_state == "In Progress"
+    assert guidance.tracker_state_mismatch == true
+
+    assert {:ok, issue_payload} = RondoWeb.Presenter.issue_payload("MT-PAUSED-MISMATCH", server_name, 1_000)
+    assert issue_payload.status == "paused"
+    assert issue_payload.paused.state == "In Progress"
+    assert issue_payload.paused.paused_state == "In Progress"
+    assert issue_payload.paused.tracker_state == "Todo"
+    assert issue_payload.paused.tracker_state_mismatch == true
+  end
+
   test "state API exposes action-policy guidance as first-class needs guidance entries" do
     interrupt = %{
       "reason" => "action_policy_guidance_required",
