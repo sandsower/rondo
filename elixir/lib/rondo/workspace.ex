@@ -31,7 +31,21 @@ defmodule Rondo.Workspace do
   end
 
   defp ensure_workspace(workspace, issue_context, opts) do
+    fresh? = Keyword.get(opts, :fresh, false)
+
     cond do
+      fresh? and File.dir?(workspace) ->
+        with :ok <- authorize_workspace_action(:remove, workspace, issue_context, opts),
+             :ok <- remove_workspace_dir(workspace) do
+          create_workspace(workspace, issue_context, opts)
+        end
+
+      fresh? and File.exists?(workspace) ->
+        with :ok <- authorize_workspace_action(:remove_stale_path, workspace, issue_context, opts),
+             {:ok, _removed} <- File.rm_rf(workspace) do
+          create_workspace(workspace, issue_context, opts)
+        end
+
       File.dir?(workspace) ->
         with :ok <- clean_tmp_artifacts(workspace, issue_context, opts) do
           {:ok, false}
@@ -45,6 +59,13 @@ defmodule Rondo.Workspace do
 
       true ->
         create_workspace(workspace, issue_context, opts)
+    end
+  end
+
+  defp remove_workspace_dir(workspace) do
+    case File.rm_rf(workspace) do
+      {:ok, _removed} -> :ok
+      error -> error
     end
   end
 
