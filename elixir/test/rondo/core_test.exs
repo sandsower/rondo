@@ -262,6 +262,10 @@ defmodule Rondo.CoreTest do
       refute MapSet.member?(updated_state.claimed, issue_id)
       refute Process.alive?(agent_pid)
       assert File.exists?(workspace)
+
+      [archived] = updated_state.archived_runs
+      assert archived.exit_reason == "handed_off"
+      assert archived.non_active_state == "Backlog"
     after
       File.rm_rf(test_root)
     end

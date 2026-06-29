@@ -548,7 +548,12 @@ defmodule RondoWeb.DashboardLive do
             <div class="panel-metric">
               <%= if @selected_issue_data[:exit_reason] do %>
                 <span class="panel-metric-label">Result</span>
-                <span class={exit_reason_class(@selected_issue_data[:exit_reason])}><%= @selected_issue_data[:exit_reason] %></span>
+                <div class="detail-stack">
+                  <span class={exit_reason_class(@selected_issue_data[:exit_reason])}><%= @selected_issue_data[:exit_reason] %></span>
+                  <%= if @selected_issue_data[:exit_reason] == "handed_off" && @selected_issue_data[:non_active_state] do %>
+                    <span class="muted" style="font-size: 11px;">issue &rarr; <%= @selected_issue_data[:non_active_state] %></span>
+                  <% end %>
+                </div>
               <% else %>
                 <span class="panel-metric-label">Session</span>
                 <span class="mono" style="font-size: 11px;"><%= @selected_issue_data[:session_id] || "n/a" %></span>
@@ -879,6 +884,7 @@ defmodule RondoWeb.DashboardLive do
   end
 
   defp exit_reason_class("completed"), do: "state-badge state-badge-active"
+  defp exit_reason_class("handed_off"), do: "state-badge state-badge-handoff"
   defp exit_reason_class(_), do: "state-badge state-badge-danger"
 
   defp render_event_message(nil), do: ""
