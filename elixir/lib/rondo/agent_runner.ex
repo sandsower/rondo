@@ -99,17 +99,23 @@ defmodule Rondo.AgentRunner do
             "(creation incomplete or workspace removed before launch)"
   end
 
+  defp handle_agent_run_error(issue, {:model_routing_exhausted, interrupt}) when is_map(interrupt) do
+    Logger.warning("Agent run paused for #{issue_context(issue)}: model routing candidates exhausted")
+    exit({:model_routing_exhausted, interrupt})
+  end
+
   defp handle_agent_run_error(issue, reason) do
     Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
     raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
   end
 
-  defp claude_event_handler(recipient, issue, completion_ref \\ nil) do
+  defp claude_event_handler(recipient, issue, completion_ref \\ nil, failure_hint_ref \\ nil) do
     fn event ->
       if Map.get(event, :event_type) == :invocation_completed and is_reference(completion_ref) do
         Process.put(completion_ref, true)
       end
 
+      maybe_record_provider_exhaustion_hint(failure_hint_ref, event)
       send_claude_update(recipient, issue, event)
     end
   end
@@ -150,9 +156,469 @@ defmodule Rondo.AgentRunner do
     send_claude_update(recipient, issue, %{
       event: :model_routing_decision,
       method: "model_routing_decision",
+      message: Map.get(routing, :reason),
       model_routing: routing,
       source: source
     })
+  end
+
+  defp invoke_turn_with_model_fallback(turn_context, issue, turn_number, run_ref) do
+    routing = Keyword.get(turn_context.opts, :model_routing, %{})
+    routing_context = Keyword.get(turn_context.opts, :model_routing_context, %{})
+    candidates = Map.get(routing, :candidates, []) || []
+
+    run_state = %{
+      routing: routing,
+      routing_context: routing_context,
+      run_ref: run_ref,
+      turn_number: turn_number
+    }
+
+    case candidates do
+      [] -> invoke_current_model_routing_selection(turn_context, issue, run_state)
+      _candidates -> invoke_model_routing_candidate(turn_context, issue, run_state, candidates, nil, 1)
+    end
+  end
+
+  defp invoke_current_model_routing_selection(turn_context, issue, run_state) do
+    source = model_routing_source(provider_id(turn_context.adapter), run_state.routing_context, run_state.turn_number)
+    :ok = dispatch_model_routing_decision(turn_context.claude_update_recipient, issue, run_state.routing, source)
+
+    prompt =
+      build_turn_prompt(
+        turn_context.process_provider,
+        issue,
+        turn_context.opts,
+        run_state.turn_number,
+        turn_context.max_turns
+      )
+
+    completion_ref = make_ref()
+    Process.put(completion_ref, false)
+
+    result =
+      turn_context.adapter.invoke(%{
+        prompt: prompt,
+        workspace: turn_context.workspace,
+        previous_run_ref: run_state.run_ref,
+        on_event: claude_event_handler(turn_context.claude_update_recipient, issue, completion_ref),
+        opts: turn_context.opts
+      })
+
+    completion_observed? = Process.get(completion_ref, false)
+    Process.delete(completion_ref)
+
+    case result do
+      {:ok, %{run_ref: _} = invocation_result} -> {:ok, turn_context, completion_observed?, invocation_result}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp invoke_model_routing_candidate(turn_context, issue, run_state, [candidate | rest], fallback_info, attempt_number) do
+    attempt_routing = build_model_routing_attempt(run_state.routing, candidate, fallback_info)
+    attempt_opts = apply_model_routing_opts(turn_context.opts, attempt_routing)
+    attempt_adapter = attempt_adapter_module(turn_context.adapter, attempt_opts)
+
+    case model_selection_attempt(attempt_adapter, attempt_opts, attempt_routing) do
+      {:ok, attempt_opts, attempt_routing} ->
+        invoke_model_routing_candidate_attempt(
+          turn_context,
+          issue,
+          run_state,
+          {attempt_adapter, attempt_opts, attempt_routing},
+          {candidate, rest, attempt_number}
+        )
+
+      {:error, blocked_routing} ->
+        source = model_routing_source(provider_id(attempt_adapter), run_state.routing_context, run_state.turn_number)
+        :ok = dispatch_model_routing_decision(turn_context.claude_update_recipient, issue, blocked_routing, source)
+        {:error, {:model_routing_blocked, blocked_routing}}
+    end
+  end
+
+  defp invoke_model_routing_candidate_attempt(
+         turn_context,
+         issue,
+         run_state,
+         {attempt_adapter, attempt_opts, attempt_routing},
+         {candidate, rest, attempt_number}
+       ) do
+    attempt_context = %{turn_context | adapter: attempt_adapter, opts: attempt_opts}
+    source = model_routing_source(provider_id(attempt_adapter), run_state.routing_context, run_state.turn_number)
+
+    :ok = dispatch_model_routing_decision(turn_context.claude_update_recipient, issue, attempt_routing, source)
+
+    prompt =
+      build_turn_prompt(
+        attempt_context.process_provider,
+        issue,
+        attempt_opts,
+        run_state.turn_number,
+        attempt_context.max_turns
+      )
+
+    completion_ref = make_ref()
+    failure_hint_ref = make_ref()
+
+    Process.put(completion_ref, false)
+    Process.put(failure_hint_ref, nil)
+
+    result =
+      attempt_adapter.invoke(%{
+        prompt: prompt,
+        workspace: attempt_context.workspace,
+        previous_run_ref: compatible_previous_run_ref(run_state.run_ref, attempt_adapter),
+        on_event: claude_event_handler(turn_context.claude_update_recipient, issue, completion_ref, failure_hint_ref),
+        opts: attempt_opts
+      })
+
+    attempt_state = %{
+      attempt_number: attempt_number,
+      candidate: candidate,
+      completion_observed?: Process.get(completion_ref, false),
+      failure_hint: Process.get(failure_hint_ref),
+      rest: rest,
+      source: source
+    }
+
+    Process.delete(completion_ref)
+    Process.delete(failure_hint_ref)
+    handle_model_routing_result(result, attempt_context, turn_context, issue, run_state, attempt_state)
+  end
+
+  defp model_selection_attempt(attempt_adapter, attempt_opts, %{mode: :require} = attempt_routing) do
+    if model_selection_unsupported?(attempt_adapter, attempt_opts) do
+      {:error, unsupported_model_selection_routing(attempt_routing, attempt_adapter, :blocked)}
+    else
+      {:ok, attempt_opts, attempt_routing}
+    end
+  end
+
+  defp model_selection_attempt(attempt_adapter, attempt_opts, attempt_routing) do
+    if model_selection_unsupported?(attempt_adapter, attempt_opts) do
+      attempt_opts = attempt_opts |> Keyword.delete(:model) |> Keyword.delete(:agent_adapter)
+      attempt_routing = unsupported_model_selection_routing(attempt_routing, attempt_adapter, :fallback)
+      {:ok, Keyword.put(attempt_opts, :model_routing, attempt_routing), attempt_routing}
+    else
+      {:ok, attempt_opts, attempt_routing}
+    end
+  end
+
+  defp handle_model_routing_result(
+         {:ok, %{run_ref: _} = invocation_result},
+         attempt_context,
+         _turn_context,
+         _issue,
+         _run_state,
+         attempt_state
+       ) do
+    {:ok, attempt_context, attempt_state.completion_observed?, invocation_result}
+  end
+
+  defp handle_model_routing_result({:error, reason}, attempt_context, turn_context, issue, run_state, attempt_state) do
+    case provider_exhaustion_context(reason, attempt_state.failure_hint) do
+      nil ->
+        {:error, reason}
+
+      failure_context ->
+        handle_provider_exhaustion(
+          failure_context,
+          reason,
+          attempt_context,
+          turn_context,
+          issue,
+          run_state,
+          attempt_state
+        )
+    end
+  end
+
+  defp handle_provider_exhaustion(failure_context, reason, attempt_context, turn_context, issue, run_state, attempt_state) do
+    case attempt_state.rest do
+      [] ->
+        exhausted_info =
+          build_model_routing_exhausted_info(
+            attempt_state.candidate,
+            failure_context,
+            run_state.turn_number,
+            attempt_state.attempt_number
+          )
+
+        exhausted_routing = build_model_routing_attempt(run_state.routing, attempt_state.candidate, exhausted_info)
+
+        :ok =
+          dispatch_model_routing_decision(
+            turn_context.claude_update_recipient,
+            issue,
+            exhausted_routing,
+            attempt_state.source
+          )
+
+        interrupt =
+          model_routing_exhaustion_interrupt(
+            attempt_context,
+            issue,
+            run_state.turn_number,
+            exhausted_info,
+            reason
+          )
+
+        {:error, {:model_routing_exhausted, interrupt}}
+
+      [next_candidate | remaining] ->
+        next_attempt_number = attempt_state.attempt_number + 1
+
+        next_fallback_info =
+          build_model_routing_transition_info(
+            attempt_state.candidate,
+            next_candidate,
+            failure_context,
+            run_state.turn_number,
+            attempt_state.attempt_number,
+            next_attempt_number
+          )
+
+        invoke_model_routing_candidate(
+          turn_context,
+          issue,
+          run_state,
+          [next_candidate | remaining],
+          next_fallback_info,
+          next_attempt_number
+        )
+    end
+  end
+
+  defp build_model_routing_attempt(routing, candidate, nil) do
+    routing
+    |> Map.put(:resolved, candidate)
+    |> Map.put(:status, Map.get(routing, :status, :honored))
+  end
+
+  defp build_model_routing_attempt(routing, candidate, fallback_info) when is_map(fallback_info) do
+    routing
+    |> Map.put(:resolved, candidate)
+    |> Map.put(:status, :fallback)
+    |> Map.put(:reason, model_routing_fallback_reason(candidate, fallback_info))
+    |> Map.put(:fallback, fallback_info)
+  end
+
+  defp build_model_routing_transition_info(failed_candidate, next_candidate, failure_context, turn_number, failed_attempt_number, next_attempt_number) do
+    %{
+      failed_candidate: sanitize_model_candidate(failed_candidate),
+      next_candidate: sanitize_model_candidate(next_candidate),
+      failed_attempt_number: failed_attempt_number,
+      attempt_number: next_attempt_number,
+      failure_class: failure_context.class,
+      failure_reason: failure_context.reason,
+      turn_number: turn_number,
+      exhausted: false
+    }
+  end
+
+  defp build_model_routing_exhausted_info(failed_candidate, failure_context, turn_number, failed_attempt_number) do
+    %{
+      failed_candidate: sanitize_model_candidate(failed_candidate),
+      next_candidate: nil,
+      failed_attempt_number: failed_attempt_number,
+      attempt_number: failed_attempt_number,
+      failure_class: failure_context.class,
+      failure_reason: failure_context.reason,
+      turn_number: turn_number,
+      exhausted: true
+    }
+  end
+
+  defp model_routing_fallback_reason(candidate, %{
+         failed_candidate: failed_candidate,
+         failure_class: failure_class,
+         failure_reason: failure_reason,
+         turn_number: turn_number,
+         attempt_number: attempt_number,
+         exhausted: true
+       }) do
+    candidate_label = ModelRouting.candidate_label(candidate)
+    failed_label = ModelRouting.candidate_label(failed_candidate)
+
+    "fallback exhausted after #{candidate_label} on turn #{turn_number} attempt #{attempt_number} " <>
+      "following #{failed_label} #{failure_class}: #{failure_reason}"
+  end
+
+  defp model_routing_fallback_reason(candidate, %{
+         failed_candidate: failed_candidate,
+         failure_class: failure_class,
+         failure_reason: failure_reason,
+         turn_number: turn_number,
+         attempt_number: attempt_number
+       }) do
+    candidate_label = ModelRouting.candidate_label(candidate)
+    failed_label = ModelRouting.candidate_label(failed_candidate)
+
+    "fallback from #{failed_label} to #{candidate_label} after #{failure_class} " <>
+      "on turn #{turn_number} attempt #{attempt_number}: #{failure_reason}"
+  end
+
+  defp provider_exhaustion_context(_reason, %{class: class, reason: reason}) when is_binary(reason) do
+    %{class: normalize_failure_class(class), reason: reason}
+  end
+
+  defp provider_exhaustion_context(reason, failure_hint) do
+    Enum.find_value([failure_hint, reason], &exhaustion_context_from_term/1)
+  end
+
+  defp provider_exhaustion_hint(%{event_type: event_type} = event)
+       when event_type in [
+              :warning,
+              :assistant_message,
+              :invocation_failed,
+              :turn_failed,
+              :startup_failed,
+              :turn_ended_with_error
+            ] do
+    [Map.get(event, :message), Map.get(event, "message"), Map.get(event, :raw), event]
+    |> Enum.find_value(&exhaustion_context_from_term/1)
+  end
+
+  defp provider_exhaustion_hint(_event), do: nil
+
+  defp extract_failure_text(term) when is_binary(term) do
+    text = String.trim(term)
+
+    if text == "", do: nil, else: text
+  end
+
+  defp extract_failure_text(term) when is_list(term) do
+    Enum.find_value(term, &extract_failure_text/1)
+  end
+
+  defp extract_failure_text(term) when is_tuple(term) do
+    term
+    |> Tuple.to_list()
+    |> extract_failure_text()
+  end
+
+  defp extract_failure_text(%{} = map) do
+    [
+      event_map_value(map, :message),
+      event_map_value(map, :reason),
+      event_map_value(map, :error),
+      event_map_value(map, :failure_hint),
+      event_map_value(map, :failure_lines),
+      event_map_value(map, :output),
+      event_map_value(map, :details),
+      inspect(map)
+    ]
+    |> Enum.find_value(&extract_failure_text/1)
+  end
+
+  defp extract_failure_text(_term), do: nil
+
+  defp exhaustion_context_from_term(term) do
+    with text when is_binary(text) <- extract_failure_text(term),
+         class when is_binary(class) <- classify_provider_exhaustion_text(text) do
+      %{class: class, reason: text}
+    else
+      _other -> nil
+    end
+  end
+
+  defp classify_provider_exhaustion_text(text) when is_binary(text) do
+    normalized = String.downcase(text)
+
+    cond do
+      contains_any?(normalized, ["usage limit has been reached", "usage limit exceeded"]) ->
+        "usage_limit"
+
+      rate_limit_text?(normalized) ->
+        "rate_limit"
+
+      limited_resource_text?(normalized, "quota", ["exhausted", "exceeded", "reached"]) ->
+        "quota_limit"
+
+      contains_any?(normalized, credit_limit_phrases()) ->
+        "credit_limit"
+
+      limited_resource_text?(normalized, "subscription", ["expired", "exhausted", "reached"]) ->
+        "subscription_limit"
+
+      true ->
+        nil
+    end
+  end
+
+  defp rate_limit_text?(text) do
+    String.contains?(text, "rate limited") or
+      limited_resource_text?(text, "rate limit", ["exceeded", "exhausted", "reached", "429"])
+  end
+
+  defp limited_resource_text?(text, resource, markers) do
+    String.contains?(text, resource) and contains_any?(text, markers)
+  end
+
+  defp contains_any?(text, markers) do
+    Enum.any?(markers, &String.contains?(text, &1))
+  end
+
+  defp credit_limit_phrases do
+    [
+      "insufficient credits",
+      "no credits",
+      "credit exhausted",
+      "credits depleted",
+      "credit limit reached",
+      "credit limit has been reached"
+    ]
+  end
+
+  defp normalize_failure_class(class) when is_atom(class), do: Atom.to_string(class)
+  defp normalize_failure_class(class) when is_binary(class), do: class
+  defp normalize_failure_class(class), do: to_string(class)
+
+  defp event_map_value(map, key) when is_map(map) and is_atom(key) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  end
+
+  defp event_map_value(_map, _key), do: nil
+
+  defp compatible_previous_run_ref(%{adapter: adapter} = run_ref, attempt_adapter) when is_binary(adapter) do
+    if adapter == provider_id(attempt_adapter), do: run_ref, else: nil
+  end
+
+  defp compatible_previous_run_ref(_run_ref, _attempt_adapter), do: nil
+
+  defp attempt_adapter_module(current_adapter, attempt_opts) do
+    case Keyword.get(attempt_opts, :agent_adapter) do
+      nil ->
+        current_adapter
+
+      adapter ->
+        case resolve_adapter_module(adapter) do
+          {:ok, module} -> module
+          {:error, _reason} -> current_adapter
+        end
+    end
+  end
+
+  defp sanitize_model_candidate(nil), do: nil
+  defp sanitize_model_candidate(candidate) when is_map(candidate), do: Map.take(candidate, [:adapter, :model])
+  defp sanitize_model_candidate(_candidate), do: nil
+
+  defp model_routing_exhaustion_interrupt(attempt_context, issue, turn_number, exhausted_info, reason) do
+    %{
+      "reason" => "model_routing_exhausted",
+      "question" => "Configured model candidates were exhausted after provider quota or rate-limit failures. Should Rondo pause and wait, or change routing?",
+      "issue" => %{"id" => issue.id, "identifier" => issue.identifier, "title" => issue.title},
+      "run_id" => Map.get(attempt_context, :run_id),
+      "run_dir" => Map.get(attempt_context, :run_dir),
+      "workspace" => attempt_context.workspace,
+      "turn_number" => turn_number,
+      "failed_candidate" => Map.get(exhausted_info, :failed_candidate),
+      "failure_class" => Map.get(exhausted_info, :failure_class),
+      "failure_reason" => Map.get(exhausted_info, :failure_reason),
+      "attempt_number" => Map.get(exhausted_info, :attempt_number),
+      "exhausted" => true,
+      "reason_detail" => inspect(reason)
+    }
   end
 
   defp compatibility_event_type(event) when is_map(event) do
@@ -190,6 +656,21 @@ defmodule Rondo.AgentRunner do
 
   defp send_phase_update(_recipient, _issue, _phase), do: :ok
 
+  defp maybe_record_provider_exhaustion_hint(nil, _event), do: :ok
+
+  defp maybe_record_provider_exhaustion_hint(failure_hint_ref, event) when is_reference(failure_hint_ref) do
+    case Process.get(failure_hint_ref) do
+      nil ->
+        case provider_exhaustion_hint(event) do
+          nil -> :ok
+          hint -> Process.put(failure_hint_ref, hint)
+        end
+
+      _existing ->
+        :ok
+    end
+  end
+
   defp run_agent_turns(workspace, issue, claude_update_recipient, opts) do
     with {:ok, provider} <- process_provider_module(opts),
          :ok <- preflight_process_provider(provider, opts),
@@ -199,6 +680,12 @@ defmodule Rondo.AgentRunner do
       issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
       issue_context_fetcher = Keyword.get(opts, :issue_context_fetcher, &Tracker.fetch_issue_contexts_by_ids/1)
       issue_context_snapshot = initial_issue_context_snapshot(issue, issue_context_fetcher)
+
+      run_dir =
+        case Keyword.get(opts, :run_dir) do
+          nil -> run_ledger_dir(Keyword.get(opts, :run_ledger))
+          dir -> dir
+        end
 
       context = %{
         workspace: workspace,
@@ -211,7 +698,7 @@ defmodule Rondo.AgentRunner do
         process_provider: provider,
         max_turns: Keyword.get(opts, :max_turns, Config.agent_max_turns()),
         gates: Keyword.get(opts, :gates),
-        run_dir: Keyword.get(opts, :run_dir)
+        run_dir: run_dir
       }
 
       do_run_agent_turns(context, issue, 1, Keyword.get(opts, :initial_run_ref))
@@ -389,47 +876,18 @@ defmodule Rondo.AgentRunner do
              turn_number
            ) do
       turn_context = %{context | opts: turn_opts}
-      routing = Keyword.get(turn_context.opts, :model_routing)
 
-      routing_source =
-        model_routing_source(
-          provider_id(turn_context.adapter),
-          Keyword.get(turn_context.opts, :model_routing_context, %{}),
-          turn_number
+      with {:ok, turn_context, completion_observed?, invocation_result} <-
+             invoke_turn_with_model_fallback(turn_context, issue, turn_number, run_ref) do
+        handle_invocation_result(
+          turn_context,
+          issue,
+          turn_number,
+          run_ref,
+          previous_final_report_fingerprint,
+          completion_observed?,
+          invocation_result
         )
-
-      :ok = dispatch_model_routing_decision(turn_context.claude_update_recipient, issue, routing, routing_source)
-      prompt = build_turn_prompt(turn_context.process_provider, issue, turn_context.opts, turn_number, turn_context.max_turns)
-
-      completion_ref = make_ref()
-      Process.put(completion_ref, false)
-
-      result =
-        turn_context.adapter.invoke(%{
-          prompt: prompt,
-          workspace: turn_context.workspace,
-          previous_run_ref: run_ref,
-          on_event: claude_event_handler(turn_context.claude_update_recipient, issue, completion_ref),
-          opts: turn_context.opts
-        })
-
-      completion_observed? = Process.get(completion_ref, false)
-      Process.delete(completion_ref)
-
-      case result do
-        {:ok, %{run_ref: _} = invocation_result} ->
-          handle_invocation_result(
-            turn_context,
-            issue,
-            turn_number,
-            run_ref,
-            previous_final_report_fingerprint,
-            completion_observed?,
-            invocation_result
-          )
-
-        {:error, reason} ->
-          {:error, reason}
       end
     end
   end
@@ -494,6 +952,9 @@ defmodule Rondo.AgentRunner do
       run_selected_gates(context, issue, turn_number, gate_selection)
     end
   end
+
+  defp run_ledger_dir(%{run_dir: run_dir}), do: run_dir
+  defp run_ledger_dir(_nil_or_other), do: nil
 
   defp run_selected_gates(%{run_dir: nil}, _issue, _turn_number, %{gates: []}), do: :ok
 

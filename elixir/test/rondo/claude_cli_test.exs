@@ -154,7 +154,7 @@ defmodule Rondo.Claude.CLITest do
         claude_command: claude_binary
       )
 
-      assert {:error, {:subprocess_exit, 1}} = ClaudeCLI.run("Fail test", workspace)
+      assert {:error, {:subprocess_exit, 1, _failure_lines}} = ClaudeCLI.run("Fail test", workspace)
     after
       File.rm_rf(test_root)
     end

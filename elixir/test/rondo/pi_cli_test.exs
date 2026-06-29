@@ -208,7 +208,7 @@ defmodule Rondo.Pi.CLITest do
         pi_command: pi_binary
       )
 
-      assert {:error, {:subprocess_exit, 2}} = PiCLI.run("Fail test", workspace)
+      assert {:error, {:subprocess_exit, 2, _failure_lines}} = PiCLI.run("Fail test", workspace)
     after
       File.rm_rf(test_root)
     end

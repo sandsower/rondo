@@ -138,6 +138,25 @@ defmodule Rondo.StatusDashboardSnapshotTest do
     Snapshot.assert_dashboard_snapshot!("backoff_queue", render_snapshot(snapshot_data, 15.4))
   end
 
+  test "running summary exposes fallback model state" do
+    summary =
+      StatusDashboard.format_running_summary_for_test(
+        running_entry(%{
+          identifier: "MT-888",
+          model_fallback: %{
+            failed_candidate: %{model: "openai-codex/gpt-5.4-mini"},
+            next_candidate: %{model: "openrouter/deepseek/deepseek-v4-pro"},
+            failure_class: "usage_limit",
+            failure_reason: "Codex error: The usage limit has been reached",
+            exhausted: false
+          }
+        }),
+        200
+      )
+
+    assert summary =~ "fallback openrouter/deepseek/deepseek-v4-pro after openai-codex/gpt-5.4-mini"
+  end
+
   test "backoff queue row escapes escaped newline sequences" do
     snapshot_data =
       {:ok,

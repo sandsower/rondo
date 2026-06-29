@@ -188,11 +188,36 @@ defmodule Rondo.Orchestrator do
         session_id = running_entry_session_id(running_entry)
 
         state =
-          if action_policy_guidance_exit?(reason) do
-            Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=action_policy_guidance")
-            pause_running_entry(state, issue_id, running_entry, reason)
-          else
-            handle_run_completion(state, issue_id, running_entry, reason, session_id)
+          cond do
+            reason == :normal ->
+              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+              state
+              |> archive_running_entry(running_entry, reason)
+              |> complete_issue(issue_id)
+              |> schedule_issue_retry(issue_id, 1, %{
+                identifier: running_entry.identifier,
+                delay_type: :continuation
+              })
+
+            action_policy_guidance_exit?(reason) ->
+              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=action_policy_guidance")
+              pause_running_entry(state, issue_id, running_entry, reason)
+
+            final_report_invalid_exit?(reason) ->
+              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=final_report_invalid")
+              pause_running_entry(state, issue_id, running_entry, reason)
+
+            pause_after_gate_failure?(running_entry, reason) ->
+              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=repeated_gate_failure")
+              pause_running_entry(state, issue_id, running_entry, reason)
+
+            model_routing_exhausted_exit?(reason) ->
+              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=model_routing_exhausted")
+              pause_running_entry(state, issue_id, running_entry, reason)
+
+            true ->
+              handle_run_completion(state, issue_id, running_entry, reason, session_id)
           end
 
         Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
@@ -1460,6 +1485,9 @@ defmodule Rondo.Orchestrator do
   defp final_report_invalid_exit?({:final_report_invalid, interrupt}) when is_map(interrupt), do: true
   defp final_report_invalid_exit?(_reason), do: false
 
+  defp model_routing_exhausted_exit?({:model_routing_exhausted, interrupt}) when is_map(interrupt), do: true
+  defp model_routing_exhausted_exit?(_reason), do: false
+
   defp retry_failure_reason(running_entry, reason) do
     if gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate)), do: :gate_failed
   end
@@ -1516,6 +1544,7 @@ defmodule Rondo.Orchestrator do
     )
   end
 
+  defp pause_interrupt_for_reason(_running_entry, {:model_routing_exhausted, interrupt}) when is_map(interrupt), do: interrupt
   defp pause_interrupt_for_reason(running_entry, _reason), do: Interrupt.repeated_gate_failure(interrupt_context(running_entry))
 
   defp interrupt_context(running_entry) do
@@ -2201,6 +2230,7 @@ defmodule Rondo.Orchestrator do
           latest_gate: Map.get(metadata, :latest_gate),
           model_routing: Map.get(metadata, :model_routing),
           adapter: Map.get(metadata, :adapter),
+          model_fallback: Map.get(metadata, :model_fallback),
           runtime_seconds: running_seconds(metadata.started_at, now),
           event_log: Map.get(metadata, :event_log, [])
         }
@@ -2236,6 +2266,7 @@ defmodule Rondo.Orchestrator do
           latest_gate: Map.get(metadata, :latest_gate),
           model_routing: Map.get(metadata, :model_routing),
           adapter: Map.get(metadata, :adapter),
+          model_fallback: Map.get(metadata, :model_fallback),
           interrupt: Map.get(metadata, :interrupt, %{}),
           final_report_status: get_in(metadata, [:interrupt, "final_report", "status"]),
           final_report_classification: get_in(metadata, [:interrupt, "classification"]),
@@ -2309,7 +2340,6 @@ defmodule Rondo.Orchestrator do
         session_id: session_id_for_update(running_entry.session_id, update),
         run_ref: run_ref_for_update(Map.get(running_entry, :run_ref), update),
         final_report: final_report_for_update(Map.get(running_entry, :final_report), update),
-        model_routing: model_routing_for_update(Map.get(running_entry, :model_routing), update),
         last_claude_event: event,
         claude_input_tokens: claude_input_tokens + token_delta.input_tokens,
         claude_output_tokens: claude_output_tokens + token_delta.output_tokens,
@@ -2321,6 +2351,8 @@ defmodule Rondo.Orchestrator do
         claude_usage_accounting_ref: usage_accounting_ref(update) || Map.get(running_entry, :claude_usage_accounting_ref),
         turn_count: turn_count_for_update(turn_count, running_entry.session_id, update),
         latest_gate: latest_gate_for_update(running_entry, update),
+        model_routing: model_routing_for_update(Map.get(running_entry, :model_routing), update),
+        model_fallback: model_fallback_for_update(Map.get(running_entry, :model_fallback), update),
         event_log: event_log
       }),
       token_delta
@@ -2415,6 +2447,10 @@ defmodule Rondo.Orchestrator do
   end
 
   defp latest_gate_for_update(running_entry, _update), do: Map.get(running_entry, :latest_gate)
+
+  defp model_fallback_for_update(_existing, %{model_routing: %{fallback: fallback}}) when is_map(fallback), do: fallback
+  defp model_fallback_for_update(_existing, %{"model_routing" => %{"fallback" => fallback}}) when is_map(fallback), do: fallback
+  defp model_fallback_for_update(existing, _update), do: existing
 
   defp gate_failed_results(results) when is_list(results) do
     results

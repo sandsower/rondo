@@ -6,7 +6,7 @@ defmodule Rondo.StatusDashboard do
   use GenServer
   require Logger
 
-  alias Rondo.{Config, HttpServer}
+  alias Rondo.{Config, HttpServer, ModelRouting}
   alias Rondo.Orchestrator
   alias RondoWeb.ObservabilityPubSub
 
@@ -645,11 +645,31 @@ defmodule Rondo.StatusDashboard do
   def tps_graph_for_test(samples, now_ms, current_tokens), do: tps_graph(samples, now_ms, current_tokens)
 
   defp running_event_label(running_entry) do
-    case Map.get(running_entry, :latest_gate) do
-      %{status: status} = gate when not is_nil(status) -> gate_summary(gate)
-      _ -> summarize_message(running_entry.last_claude_message)
+    base_label =
+      case Map.get(running_entry, :latest_gate) do
+        %{status: status} = gate when not is_nil(status) -> gate_summary(gate)
+        _ -> summarize_message(running_entry.last_claude_message)
+      end
+
+    case running_fallback_note(running_entry) do
+      nil -> base_label
+      note -> "#{base_label} · #{note}"
     end
   end
+
+  defp running_fallback_note(%{model_fallback: %{next_candidate: next_candidate, failed_candidate: failed_candidate, exhausted: exhausted}}) do
+    target = next_candidate || failed_candidate
+    target_label = ModelRouting.candidate_label(target)
+    failed_label = ModelRouting.candidate_label(failed_candidate)
+
+    if exhausted do
+      "fallback exhausted #{target_label} after #{failed_label}"
+    else
+      "fallback #{target_label} after #{failed_label}"
+    end
+  end
+
+  defp running_fallback_note(_running_entry), do: nil
 
   defp gate_summary(%{status: status, failed: failed}) when is_list(failed) and failed != [] do
     names = failed |> Enum.map_join(",", &(Map.get(&1, :name) || "gate")) |> truncate(48)

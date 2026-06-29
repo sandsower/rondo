@@ -3,6 +3,14 @@ defmodule Rondo.ModelRoutingTest do
 
   alias Rondo.ModelRouting
 
+  test "candidate labels are stable for observability" do
+    assert ModelRouting.candidate_label(%{adapter: "pi", model: "openrouter/deepseek/deepseek-v4-pro"}) ==
+             "pi/openrouter/deepseek/deepseek-v4-pro"
+
+    assert ModelRouting.candidate_label(%{model: "openai-codex/gpt-5.4-mini"}) == "openai-codex/gpt-5.4-mini"
+    assert ModelRouting.candidate_label(nil) == "unknown"
+  end
+
   test "source-contract broad hints override provider initial hints" do
     assert %{
              status: :honored,
