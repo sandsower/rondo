@@ -2370,6 +2370,7 @@ defmodule Rondo.Orchestrator do
     end
 
     ledger = update_run_ledger_agent_metadata(ledger, update)
+    ledger = link_run_ledger_gate_artifacts(ledger, update)
 
     ledger =
       case RunLedger.checkpoint_kind_for_agent_update(update) do
@@ -2384,8 +2385,6 @@ defmodule Rondo.Orchestrator do
             source: RunLedger.checkpoint_source_for_agent_update(update)
           )
       end
-
-    ledger = link_run_ledger_gate_artifacts(ledger, update)
 
     Map.merge(running_entry, %{ledger: ledger, run_id: run_ledger_id(ledger), run_dir: run_ledger_dir(ledger)})
   end
