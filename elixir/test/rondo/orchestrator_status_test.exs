@@ -1935,6 +1935,26 @@ defmodule Rondo.OrchestratorStatusTest do
     assert row =~ "gates: fail unit"
   end
 
+  test "status dashboard renders policy-blocked gate status distinctly" do
+    row =
+      StatusDashboard.format_running_summary_for_test(
+        %{
+          identifier: "MT-GATE-POLICY-BLOCKED",
+          state: "In Progress",
+          session_id: "session-gate-policy-blocked",
+          last_claude_event: :gates_completed,
+          last_claude_message: %{event: :gates_completed},
+          latest_gate: %{status: :policy_blocked, failed: [%{name: "read", status: :policy_blocked}]},
+          runtime_seconds: 12,
+          turn_count: 1,
+          claude_total_tokens: 42
+        },
+        140
+      )
+
+    assert row =~ "gates: policy_blocked read"
+  end
+
   test "status dashboard renders reused gate status distinctly" do
     row =
       StatusDashboard.format_running_summary_for_test(

@@ -12,7 +12,7 @@ defmodule Rondo.Gates do
   @reused_status :reused
 
   @type gate :: Config.gate()
-  @type gate_status :: :pass | :reused | :fail | :error | :timeout
+  @type gate_status :: :pass | :reused | :fail | :error | :timeout | :policy_blocked | :policy_denied
   @type gate_result :: %{
           name: String.t(),
           command: String.t(),
@@ -169,7 +169,7 @@ defmodule Rondo.Gates do
         build_result(
           name,
           command,
-          %{status: :error, exit_status: nil},
+          %{status: policy_block_status(reason), exit_status: nil},
           duration_ms,
           workspace,
           stdout_path,
@@ -341,6 +341,8 @@ defmodule Rondo.Gates do
   defp overall_status(results) do
     cond do
       Enum.all?(results, &(&1.status == :pass)) -> :pass
+      Enum.any?(results, &(&1.status == :policy_denied)) -> :policy_denied
+      Enum.any?(results, &(&1.status == :policy_blocked)) -> :policy_blocked
       Enum.any?(results, &(&1.status == :timeout)) -> :timeout
       Enum.any?(results, &(&1.status == :error)) -> :error
       true -> :fail
@@ -580,6 +582,10 @@ defmodule Rondo.Gates do
     |> Map.put("side_effect_status", "blocked")
     |> Map.put("block_reason", inspect(reason))
   end
+
+  defp policy_block_status({:action_policy_blocked, decision}) when decision in ["ask", :ask], do: :policy_blocked
+  defp policy_block_status({:action_policy_blocked, decision}) when decision in ["deny", :deny], do: :policy_denied
+  defp policy_block_status(_reason), do: :error
 
   defp drop_nil_values(map) do
     Map.reject(map, fn {_key, value} -> is_nil(value) end)

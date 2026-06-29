@@ -1203,6 +1203,10 @@ defmodule Rondo.Orchestrator do
       reason == :normal ->
         handle_normal_completion(state, issue_id, running_entry, session_id, has_ledger?)
 
+      action_policy_denied_exit?(reason) ->
+        Logger.warning("Agent task stopped for issue_id=#{issue_id} session_id=#{session_id} reason=action_policy_denied")
+        archive_running_entry(state, running_entry, reason)
+
       not escalation_enabled? ->
         handle_non_escalation_exit(state, issue_id, running_entry, reason, session_id, has_ledger?)
 
@@ -1519,6 +1523,9 @@ defmodule Rondo.Orchestrator do
 
   defp action_policy_guidance_exit?({:action_policy_guidance_required, interrupt}) when is_map(interrupt), do: true
   defp action_policy_guidance_exit?(_reason), do: false
+
+  defp action_policy_denied_exit?({:action_policy_denied, envelope}) when is_map(envelope), do: true
+  defp action_policy_denied_exit?(_reason), do: false
 
   defp final_report_invalid_exit?({:final_report_invalid, interrupt}) when is_map(interrupt), do: true
   defp final_report_invalid_exit?(_reason), do: false
@@ -2903,6 +2910,25 @@ defmodule Rondo.Orchestrator do
   defp maybe_put_non_active_state(entry, _reason, _issue), do: entry
 
   defp maybe_record_retry_run_decision(nil, _running_entry, _reason), do: nil
+
+  defp maybe_record_retry_run_decision(ledger, running_entry, {:action_policy_denied, envelope} = reason) when is_map(envelope) do
+    record_run_decision_checkpoint(
+      ledger,
+      :stop,
+      "action_policy_denied",
+      "stop because action-policy denied",
+      running_entry,
+      %{
+        "failure_reason" => inspect(reason),
+        "retry_attempt" => Map.get(running_entry, :retry_attempt),
+        "gate_status" => Map.get(Map.get(running_entry, :latest_gate), :status)
+      },
+      %{
+        "latest_gate" => Map.get(running_entry, :latest_gate),
+        "policy" => envelope
+      }
+    )
+  end
 
   defp maybe_record_retry_run_decision(ledger, running_entry, reason) do
     case retry_run_decision_reason_code(running_entry, reason) do
