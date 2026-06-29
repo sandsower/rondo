@@ -556,9 +556,10 @@ defmodule Rondo.ModelUsageTest do
       assert hd(ron29_roles.historical).model == "openai-codex/gpt-5.4-mini"
       assert hd(ron29_roles.historical).provider == "codex"
 
-      # RON-29 fallback candidates should include the unused codex candidate
+      # RON-29 fallback candidates should NOT include models already used historically
+      # (gpt-5.4-mini was used in prior attempts, so it stays in historical, not fallback)
       ron29_fallback_models = Enum.map(ron29_roles.fallback, & &1.model)
-      assert "openai-codex/gpt-5.4-mini" in ron29_fallback_models
+      refute "openai-codex/gpt-5.4-mini" in ron29_fallback_models
 
       # RON-59 model roles - similar switch pattern
       ron59_runs = Enum.filter(running ++ archived, &(&1["identifier"] == "RON-59"))

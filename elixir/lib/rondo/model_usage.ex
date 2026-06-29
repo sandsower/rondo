@@ -207,7 +207,7 @@ defmodule Rondo.ModelUsage do
           unused: [model_info()]
         }
   def model_roles(runs) when is_list(runs) do
-    sorted = Enum.sort_by(runs, &(&1[:started_at] || &1["started_at"] || ""), {:desc, DateTime})
+    sorted = Enum.sort_by(runs, &sortable_started_at/1, {:desc, DateTime})
     active = if sorted != [], do: extract_model_info(hd(sorted)), else: nil
 
     historical =
@@ -220,7 +220,15 @@ defmodule Rondo.ModelUsage do
       |> Enum.map(&extract_model_info/1)
       |> Enum.uniq_by(& &1.model_key)
 
-    fallback_candidates = extract_fallback_candidates(sorted)
+    used_model_keys =
+      [active | historical]
+      |> Enum.reject(&is_nil/1)
+      |> MapSet.new(& &1.model_key)
+
+    fallback_candidates =
+      sorted
+      |> extract_fallback_candidates()
+      |> Enum.reject(&MapSet.member?(used_model_keys, &1.model_key))
 
     %{
       active: active,
@@ -258,6 +266,22 @@ defmodule Rondo.ModelUsage do
   end
 
   # --- Helpers ---
+
+  defp sortable_started_at(run) do
+    case run[:started_at] || run["started_at"] do
+      %DateTime{} = dt ->
+        dt
+
+      ts when is_binary(ts) ->
+        case DateTime.from_iso8601(ts) do
+          {:ok, dt, _offset} -> dt
+          _ -> ~U[1970-01-01 00:00:00Z]
+        end
+
+      _ ->
+        ~U[1970-01-01 00:00:00Z]
+    end
+  end
 
   defp extract_model_info(entry) when is_map(entry) do
     stored = entry[:model_routing] || entry["model_routing"]

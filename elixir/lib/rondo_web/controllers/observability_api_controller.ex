@@ -69,6 +69,7 @@ defmodule RondoWeb.ObservabilityApiController do
         timelines =
           (running ++ archived)
           |> Enum.group_by(&(&1[:identifier] || &1["identifier"]), & &1)
+          |> Enum.sort_by(fn {identifier, _runs} -> identifier || "" end)
           |> Enum.map(fn {identifier, runs} ->
             %{
               identifier: identifier,
