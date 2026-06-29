@@ -235,6 +235,120 @@ defmodule Rondo.ModelRoutingTest do
              )
   end
 
+  test "repo step hints override repo defaults for initial spawn" do
+    assert %{
+             status: :honored,
+             requested_tier: "frontier",
+             resolved: %{adapter: "pi", model: "openrouter/frontier"},
+             context: %{stage: "initial_spawn", skill: "kickoff", phase: "context_discovery"},
+             reason: reason
+           } =
+             ModelRouting.resolve(
+               routing_context: %{stage: :initial_spawn},
+               repo_model_routing: %{
+                 defaults: %{tier: "standard", mode: "prefer"},
+                 step_hints: %{
+                   initial: %{
+                     skill: "kickoff",
+                     phase: "context_discovery",
+                     tier: "frontier"
+                   }
+                 },
+                 tiers: %{
+                   standard: [%{adapter: "pi", model: "openai-codex/gpt-5.4-mini"}],
+                   frontier: [%{adapter: "pi", model: "openrouter/frontier"}]
+                 }
+               }
+             )
+
+    assert reason =~ "initial_spawn/kickoff/context_discovery"
+    assert reason =~ "frontier"
+  end
+
+  test "source-contract hints override repo step hints" do
+    assert %{
+             status: :honored,
+             requested_tier: "heavy",
+             resolved: %{adapter: "pi", model: "openrouter/heavy"},
+             context: %{stage: "initial_spawn", skill: "kickoff", phase: "context_discovery"}
+           } =
+             ModelRouting.resolve(
+               routing_context: %{stage: :initial_spawn},
+               source_contract: %{model_routing: %{"tier" => "heavy"}},
+               repo_model_routing: %{
+                 defaults: %{tier: "standard", mode: "prefer"},
+                 step_hints: %{
+                   initial: %{
+                     skill: "kickoff",
+                     phase: "context_discovery",
+                     tier: "frontier"
+                   }
+                 },
+                 tiers: %{
+                   heavy: [%{adapter: "pi", model: "openrouter/heavy"}],
+                   frontier: [%{adapter: "pi", model: "openrouter/frontier"}]
+                 }
+               }
+             )
+  end
+
+  test "repo step explicit model survives higher-precedence tier-only context" do
+    assert %{
+             status: :honored,
+             requested_tier: "heavy",
+             resolved: %{adapter: nil, model: "repo-step-model"},
+             context: %{stage: "initial_spawn", skill: "kickoff"}
+           } =
+             ModelRouting.resolve(
+               routing_context: %{stage: :initial_spawn},
+               source_contract: %{
+                 model_routing_hints: %{"initial" => %{"skill" => "kickoff", "tier" => "heavy"}}
+               },
+               repo_model_routing: %{
+                 defaults: %{tier: "standard", mode: "prefer"},
+                 step_hints: %{
+                   initial: %{
+                     skill: "kickoff",
+                     tier: "heavy",
+                     model: "repo-step-model"
+                   }
+                 },
+                 tiers: %{
+                   heavy: [%{adapter: "pi", model: "repo-step-model"}],
+                   standard: [%{adapter: "pi", model: "openai-codex/gpt-5.4-mini"}]
+                 }
+               }
+             )
+  end
+
+  test "non-matching repo step hints fall back to defaults" do
+    assert %{
+             status: :honored,
+             requested_tier: "standard",
+             resolved: %{adapter: "pi", model: "openai-codex/gpt-5.4-mini"}
+           } =
+             ModelRouting.resolve(
+               routing_context: %{stage: :initial_spawn},
+               repo_model_routing: %{
+                 defaults: %{tier: "standard", mode: "prefer"},
+                 step_hints: %{
+                   steps: [
+                     %{
+                       stage: "turn",
+                       skill: "review-response",
+                       phase: "fresh_eyes",
+                       tier: "frontier"
+                     }
+                   ]
+                 },
+                 tiers: %{
+                   standard: [%{adapter: "pi", model: "openai-codex/gpt-5.4-mini"}],
+                   frontier: [%{adapter: "pi", model: "openrouter/frontier"}]
+                 }
+               }
+             )
+  end
+
   test "non-initial routing context matches step and phase hint lists" do
     assert %{
              status: :honored,

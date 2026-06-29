@@ -773,7 +773,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Config.process_provider() == %{kind: "native", required: false, artifact_path: nil}
     assert Config.process_provider_kind() == "native"
     assert Config.process_provider_required?() == false
-    assert Config.model_routing() == %{tiers: %{}, floor: %{}, defaults: %{}}
+    assert Config.model_routing() == %{tiers: %{}, floor: %{}, defaults: %{}, step_hints: %{}}
 
     write_workflow_file!(Workflow.workflow_file_path(),
       model_routing: %{
@@ -785,7 +785,8 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Config.model_routing() == %{
              tiers: %{light: [%{adapter: "pi", model: "openai/gpt-4o-mini"}]},
              floor: %{tier: "standard", mode: "require"},
-             defaults: %{}
+             defaults: %{},
+             step_hints: %{}
            }
 
     write_workflow_file!(Workflow.workflow_file_path(), process_provider_required: true)
@@ -896,6 +897,62 @@ defmodule Rondo.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), claude_command: "claude")
     assert Config.claude_command() == "claude"
+  end
+
+  test "config preserves model routing step hints" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      model_routing: %{
+        "defaults" => %{"tier" => "standard", "mode" => "prefer"},
+        "step_hints" => %{
+          "initial" => %{"skill" => "kickoff", "phase" => "context_discovery", "tier" => "frontier"}
+        }
+      }
+    )
+
+    assert :ok = Config.validate!()
+
+    assert Config.model_routing() == %{
+             tiers: %{},
+             floor: %{},
+             defaults: %{tier: "standard", mode: "prefer"},
+             step_hints: %{
+               initial: %{
+                 "skill" => "kickoff",
+                 "phase" => "context_discovery",
+                 "tier" => "frontier"
+               }
+             }
+           }
+  end
+
+  test "config prefers initial_spawn over initial when both aliases are present" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      model_routing: %{
+        "step_hints" => %{
+          "initial" => %{"skill" => "kickoff", "tier" => "standard"},
+          "initial_spawn" => %{"skill" => "kickoff", "tier" => "frontier"}
+        }
+      }
+    )
+
+    assert :ok = Config.validate!()
+
+    assert Config.model_routing() == %{
+             tiers: %{},
+             floor: %{},
+             defaults: %{},
+             step_hints: %{
+               initial: %{"skill" => "kickoff", "tier" => "frontier"}
+             }
+           }
+  end
+
+  test "config ignores malformed model routing step hints" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      model_routing: %{"step_hints" => "bad"}
+    )
+
+    assert Config.model_routing() == %{tiers: %{}, floor: %{}, defaults: %{}, step_hints: %{}}
   end
 
   test "config reads flat gate definitions" do
