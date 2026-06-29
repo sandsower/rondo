@@ -2386,10 +2386,10 @@ defmodule Rondo.Orchestrator do
   defp adapter_for_update(_existing, %{"adapter" => adapter}) when is_binary(adapter), do: adapter
   defp adapter_for_update(existing, _update), do: existing
 
-  defp model_routing_for_update(existing, %{model_routing: routing}) when is_map(routing) and map_size(routing) > 0,
+  defp model_routing_for_update(_existing, %{model_routing: routing}) when is_map(routing) and map_size(routing) > 0,
     do: routing
 
-  defp model_routing_for_update(existing, %{"model_routing" => routing}) when is_map(routing) and map_size(routing) > 0,
+  defp model_routing_for_update(_existing, %{"model_routing" => routing}) when is_map(routing) and map_size(routing) > 0,
     do: routing
 
   defp model_routing_for_update(existing, _update), do: existing
@@ -2986,12 +2986,6 @@ defmodule Rondo.Orchestrator do
     else
       _ -> nil
     end
-  end
-
-  defp debug_log(msg) do
-    line = "[#{DateTime.utc_now() |> DateTime.to_iso8601()}] #{msg}\n"
-    File.mkdir_p!("/tmp/rondo_workspaces")
-    File.write!("/tmp/rondo_workspaces/rondo_debug.log", line, [:append])
   end
 
   @archive_keys ~w(issue_id identifier session_id state started_at finished_at exit_reason non_active_state turn_count tokens latest_gate event_log model_routing adapter)

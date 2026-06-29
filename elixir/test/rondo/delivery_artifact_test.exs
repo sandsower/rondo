@@ -94,7 +94,7 @@ defmodule Rondo.DeliveryArtifactTest do
     assert File.exists?(delivery_path)
 
     manifest = decode_json!(ledger.manifest_path)
-    assert %{"kind" => "delivery_artifact", "path" => "artifacts/delivery-artifact.json"} in manifest["artifacts"]
+    assert %{"kind" => "delivery_artifact", "path" => "artifacts/delivery-artifact.json", "status" => "present"} in manifest["artifacts"]
 
     artifact = decode_json!(delivery_path)
     assert artifact["schema"] == "rondo-delivery-artifact-v0"

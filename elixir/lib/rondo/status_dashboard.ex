@@ -330,7 +330,6 @@ defmodule Rondo.StatusDashboard do
   defp format_snapshot_content(snapshot_data, tps, terminal_columns_override \\ nil) do
     case snapshot_data do
       {:ok, %{running: running, retrying: retrying, claude_totals: claude_totals} = snapshot} ->
-        rate_limits = Map.get(snapshot, :rate_limits)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
         claude_input_tokens = Map.get(claude_totals, :input_tokens, 0)
@@ -969,126 +968,11 @@ defmodule Rondo.StatusDashboard do
   defp in_bucket?(timestamp, bucket_start, bucket_end, false),
     do: timestamp >= bucket_start and timestamp < bucket_end
 
-  defp format_rate_limits(nil), do: colorize("unavailable", @ansi_gray)
-
-  defp format_rate_limits(rate_limits) when is_map(rate_limits) do
-    limit_id =
-      map_value(rate_limits, ["limit_id", :limit_id, "limit_name", :limit_name]) ||
-        "unknown"
-
-    primary = format_rate_limit_bucket(map_value(rate_limits, ["primary", :primary]))
-    secondary = format_rate_limit_bucket(map_value(rate_limits, ["secondary", :secondary]))
-    credits = format_rate_limit_credits(map_value(rate_limits, ["credits", :credits]))
-
-    colorize(to_string(limit_id), @ansi_yellow) <>
-      colorize(" | ", @ansi_gray) <>
-      colorize("primary #{primary}", @ansi_cyan) <>
-      colorize(" | ", @ansi_gray) <>
-      colorize("secondary #{secondary}", @ansi_cyan) <>
-      colorize(" | ", @ansi_gray) <>
-      colorize(credits, @ansi_green)
-  end
-
-  defp format_rate_limits(other) do
-    other
-    |> inspect(limit: 10)
-    |> truncate(80)
-    |> colorize(@ansi_gray)
-  end
-
-  defp format_rate_limit_bucket(nil), do: "n/a"
-
-  defp format_rate_limit_bucket(bucket) when is_map(bucket) do
-    remaining = map_value(bucket, ["remaining", :remaining])
-    limit = map_value(bucket, ["limit", :limit])
-
-    reset_value =
-      map_value(bucket, [
-        "reset_in_seconds",
-        :reset_in_seconds,
-        "resetInSeconds",
-        :resetInSeconds,
-        "reset_at",
-        :reset_at,
-        "resetAt",
-        :resetAt,
-        "resets_at",
-        :resets_at,
-        "resetsAt",
-        :resetsAt
-      ])
-
-    base =
-      cond do
-        integer_like?(remaining) and integer_like?(limit) ->
-          "#{format_count(remaining)}/#{format_count(limit)}"
-
-        integer_like?(remaining) ->
-          "remaining #{format_count(remaining)}"
-
-        integer_like?(limit) ->
-          "limit #{format_count(limit)}"
-
-        map_size(bucket) == 0 ->
-          "n/a"
-
-        true ->
-          bucket |> inspect(limit: 6) |> truncate(40)
-      end
-
-    if is_nil(reset_value) do
-      base
-    else
-      "#{base} reset #{format_reset_value(reset_value)}"
-    end
-  end
-
-  defp format_rate_limit_bucket(other), do: to_string(other)
-
-  defp format_rate_limit_credits(nil), do: "credits n/a"
-
-  defp format_rate_limit_credits(credits) when is_map(credits) do
-    unlimited = map_value(credits, ["unlimited", :unlimited]) == true
-    has_credits = map_value(credits, ["has_credits", :has_credits]) == true
-    balance = map_value(credits, ["balance", :balance])
-
-    cond do
-      unlimited ->
-        "credits unlimited"
-
-      has_credits and is_number(balance) ->
-        "credits #{format_number(balance)}"
-
-      has_credits ->
-        "credits available"
-
-      true ->
-        "credits none"
-    end
-  end
-
-  defp format_rate_limit_credits(other), do: "credits #{to_string(other)}"
-
-  defp format_reset_value(value) when is_integer(value), do: "#{format_count(value)}s"
-  defp format_reset_value(value) when is_binary(value), do: value
-  defp format_reset_value(value), do: to_string(value)
-
-  defp format_number(value) when is_integer(value), do: format_count(value)
-
-  defp format_number(value) when is_float(value) do
-    value
-    |> Float.round(2)
-    |> :erlang.float_to_binary(decimals: 2)
-  end
-
   defp map_value(map, keys) when is_map(map) and is_list(keys) do
     Enum.find_value(keys, &Map.get(map, &1))
   end
 
   defp map_value(_map, _keys), do: nil
-
-  defp integer_like?(value) when is_integer(value), do: true
-  defp integer_like?(_value), do: false
 
   defp status_dot(color_code) do
     colorize("●", color_code)

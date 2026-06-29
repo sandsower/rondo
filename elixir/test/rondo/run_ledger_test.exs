@@ -952,6 +952,299 @@ defmodule Rondo.RunLedgerTest do
     assert checkpoint["payload"]["note"] == "[REDACTED] in payload"
   end
 
+  test "concurrent checkpoint writes from stale ledger copies produce unique monotonic sequences" do
+    workspace_root = tmp_dir("ledger-concurrent")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "c0nc0001"
+             )
+
+    stale = ledger
+
+    tasks =
+      for i <- 1..8 do
+        Task.async(fn ->
+          kind = if rem(i, 2) == 0, do: :orchestrator_event, else: :worker_event
+          RunLedger.write_checkpoint(stale, kind, %{n: i}, timestamp: @now)
+        end)
+      end
+
+    results = Enum.map(tasks, &Task.await/1)
+
+    assert Enum.all?(results, fn
+             {:ok, _} -> true
+             _ -> false
+           end)
+
+    manifest = decode_json!(ledger.manifest_path)
+    seqs = Enum.map(manifest["checkpoints"], & &1["seq"])
+    assert length(seqs) == 8
+    assert seqs == Enum.uniq(seqs)
+    assert seqs == Enum.sort(seqs)
+
+    index_files = manifest["checkpoints"] |> Enum.map(&Path.basename(&1["path"])) |> Enum.sort()
+
+    disk_files =
+      ledger.run_dir
+      |> Path.join("checkpoints")
+      |> File.ls!()
+      |> Enum.filter(&String.ends_with?(&1, ".json"))
+      |> Enum.sort()
+
+    assert index_files == disk_files
+  end
+
+  test "regression: action_policy_decision and spawned do not collide on stale next_seq" do
+    workspace_root = tmp_dir("ledger-dogfood-dup")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "d0gf00d"
+             )
+
+    envelope = %{
+      "decision" => "deny",
+      "mode" => "unattended-auto",
+      "action" => "git.push",
+      "classes" => ["git-remote"],
+      "matched_rules" => [%{"type" => "class", "decision" => "deny"}],
+      "sandbox_status" => %{"baseline" => "separate-worktree"},
+      "requires_human" => false,
+      "log_level" => "error",
+      "reason" => "classes=git-remote",
+      "remediation" => ["Do not run this action"]
+    }
+
+    [spawned_task, policy_task] =
+      [
+        Task.async(fn -> RunLedger.write_checkpoint(ledger, :spawned, %{pid: "pid-1"}, timestamp: @now) end),
+        Task.async(fn -> RunLedger.record_action_policy_decision(ledger, envelope) end)
+      ]
+
+    results = Enum.map([spawned_task, policy_task], &Task.await/1)
+
+    assert Enum.all?(results, fn
+             {:ok, _} -> true
+             _ -> false
+           end)
+
+    manifest = decode_json!(ledger.manifest_path)
+
+    seqs_and_kinds =
+      manifest["checkpoints"]
+      |> Enum.map(&{&1["seq"], &1["kind"]})
+      |> Enum.sort()
+
+    seqs = Enum.map(seqs_and_kinds, &elem(&1, 0))
+    assert length(seqs) == 2
+    assert seqs == Enum.uniq(seqs)
+    assert Enum.sort(seqs) == seqs
+
+    kinds = Enum.map(seqs_and_kinds, &elem(&1, 1))
+    assert "spawned" in kinds
+    assert "action_policy_decision" in kinds
+
+    index_files = manifest["checkpoints"] |> Enum.map(&Path.basename(&1["path"])) |> Enum.sort()
+
+    disk_files =
+      ledger.run_dir
+      |> Path.join("checkpoints")
+      |> File.ls!()
+      |> Enum.filter(&String.ends_with?(&1, ".json"))
+      |> Enum.sort()
+
+    assert index_files == disk_files
+  end
+
+  test "link_artifacts records present, missing, skipped, and failed statuses" do
+    workspace_root = tmp_dir("ledger-artifact-status")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "a7t5t4t"
+             )
+
+    File.write!(Path.join(ledger.run_dir, "artifacts/exists.txt"), "x")
+
+    assert {:ok, ledger} =
+             RunLedger.link_artifacts(ledger, [
+               %{"kind" => "present_thing", "path" => "artifacts/exists.txt"},
+               %{"kind" => "missing_thing", "path" => "artifacts/nope.txt"},
+               %{"kind" => "skipped_thing", "path" => "artifacts/nope.txt", "status" => "skipped"},
+               %{"kind" => "failed_thing", "path" => "artifacts/nope.txt", "status" => "failed"}
+             ])
+
+    manifest = decode_json!(ledger.manifest_path)
+
+    assert %{
+             "kind" => "present_thing",
+             "path" => "artifacts/exists.txt",
+             "status" => "present"
+           } in manifest["artifacts"]
+
+    assert %{
+             "kind" => "missing_thing",
+             "path" => "artifacts/nope.txt",
+             "status" => "missing"
+           } in manifest["artifacts"]
+
+    assert %{
+             "kind" => "skipped_thing",
+             "path" => "artifacts/nope.txt",
+             "status" => "skipped"
+           } in manifest["artifacts"]
+
+    assert %{
+             "kind" => "failed_thing",
+             "path" => "artifacts/nope.txt",
+             "status" => "failed"
+           } in manifest["artifacts"]
+  end
+
+  test "manifest checkpoint index is reconciled against checkpoint files on disk" do
+    workspace_root = tmp_dir("ledger-reconcile")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "reconc1e"
+             )
+
+    # Simulate a partial write: a checkpoint file exists but the manifest
+    # index has not been updated yet. A subsequent write must observe the file
+    # and derive the next sequence from it, then repair the manifest index.
+    orphan_path = Path.join(ledger.run_dir, "checkpoints/0005-orphan.json")
+
+    orphan_checkpoint = %{
+      "seq" => 5,
+      "kind" => "orphan",
+      "timestamp" => "2026-05-10T15:30:12Z",
+      "source" => %{},
+      "payload" => %{}
+    }
+
+    File.write!(orphan_path, Jason.encode!(orphan_checkpoint))
+
+    assert {:ok, ledger} = RunLedger.write_checkpoint(ledger, :dispatch, %{}, timestamp: @now)
+
+    manifest = decode_json!(ledger.manifest_path)
+
+    seqs = Enum.map(manifest["checkpoints"], & &1["seq"])
+    assert 5 in seqs
+    assert 6 in seqs
+    assert seqs == Enum.uniq(seqs)
+    assert seqs == Enum.sort(seqs)
+
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "orphan"))
+
+    index_files = manifest["checkpoints"] |> Enum.map(&Path.basename(&1["path"])) |> Enum.sort()
+
+    disk_files =
+      ledger.run_dir
+      |> Path.join("checkpoints")
+      |> File.ls!()
+      |> Enum.filter(&String.ends_with?(&1, ".json"))
+      |> Enum.sort()
+
+    assert index_files == disk_files
+  end
+
+  test "reconciled_manifest deduplicates orphaned checkpoints that share seq numbers with the index" do
+    workspace_root = tmp_dir("ledger-reconcile-dedup")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "dedup001"
+             )
+
+    assert {:ok, ledger} = RunLedger.write_checkpoint(ledger, :dispatch, %{attempt: 1}, timestamp: @now)
+
+    # Plant an orphaned checkpoint file on disk with the same seq=1 as the
+    # existing dispatch checkpoint but a different kind.  Without deduplication
+    # the manifest would end up with two entries at seq=1.
+    orphan_path = Path.join(ledger.run_dir, "checkpoints/0001-orphan.json")
+
+    orphan_checkpoint = %{
+      "seq" => 1,
+      "kind" => "orphan",
+      "timestamp" => "2026-05-10T15:30:12Z",
+      "source" => %{},
+      "payload" => %{}
+    }
+
+    File.write!(orphan_path, Jason.encode!(orphan_checkpoint))
+
+    # A new write forces reconciliation and must NOT include the orphan with
+    # duplicate seq.
+    assert {:ok, ledger} = RunLedger.write_checkpoint(ledger, :spawned, %{pid: "pid-1"}, timestamp: @now)
+
+    manifest = decode_json!(ledger.manifest_path)
+    seqs = Enum.map(manifest["checkpoints"], & &1["seq"])
+    assert seqs == Enum.uniq(seqs)
+    assert seqs == Enum.sort(seqs)
+
+    # The orphaned file must still be present on disk; it is just excluded
+    # from the manifest checkpoint index.
+    assert File.exists?(orphan_path)
+  end
+
+  test "reconciled_manifest deduplicates duplicate-seq orphaned checkpoint files" do
+    workspace_root = tmp_dir("ledger-reconcile-duplicate-orphans")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "duporph1"
+             )
+
+    action_policy_path = Path.join(ledger.run_dir, "checkpoints/0003-action_policy_decision.json")
+    spawned_path = Path.join(ledger.run_dir, "checkpoints/0003-spawned.json")
+
+    File.write!(
+      action_policy_path,
+      Jason.encode!(%{
+        "seq" => 3,
+        "kind" => "action_policy_decision",
+        "timestamp" => "2026-05-10T15:30:12Z",
+        "source" => %{},
+        "payload" => %{}
+      })
+    )
+
+    File.write!(
+      spawned_path,
+      Jason.encode!(%{
+        "seq" => 3,
+        "kind" => "spawned",
+        "timestamp" => "2026-05-10T15:30:13Z",
+        "source" => %{},
+        "payload" => %{}
+      })
+    )
+
+    assert {:ok, ledger} = RunLedger.write_checkpoint(ledger, :dispatch, %{attempt: 1}, timestamp: @now)
+
+    manifest = decode_json!(ledger.manifest_path)
+    seqs = Enum.map(manifest["checkpoints"], & &1["seq"])
+
+    assert seqs == Enum.uniq(seqs)
+    assert seqs == [3, 4]
+    assert Enum.count(manifest["checkpoints"], &(&1["seq"] == 3)) == 1
+    assert File.exists?(action_policy_path)
+    assert File.exists?(spawned_path)
+  end
+
   test "record_final_report persists and links valid rondo.final_report/v0 reports" do
     workspace_root = tmp_dir("ledger-final-report-valid")
 
@@ -983,7 +1276,13 @@ defmodule Rondo.RunLedgerTest do
     manifest = decode_json!(ledger.manifest_path)
     assert manifest["final_report"] == %{"status" => "valid", "errors" => [], "path" => "artifacts/final-report.json"}
     refute Map.has_key?(manifest, "failure_classification")
-    assert %{"kind" => "final_report", "path" => "artifacts/final-report.json"} in manifest["artifacts"]
+
+    assert %{
+             "kind" => "final_report",
+             "path" => "artifacts/final-report.json",
+             "status" => "present"
+           } in manifest["artifacts"]
+
     assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "final_report_validated"))
   end
 
@@ -1069,6 +1368,316 @@ defmodule Rondo.RunLedgerTest do
     assert reason in [:eisdir, :eacces]
   end
 
+  test "checkpoint collision triggers retry and recovers with re-derived sequence" do
+    workspace_root = tmp_dir("ledger-collision-retry")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "c011151n"
+             )
+
+    run_dir = ledger.run_dir
+
+    # The manifest_update callback writes a file at the expected checkpoint
+    # path to simulate a TOCTOU race.  This forces do_write_checkpoint into
+    # the retry_on_collision path which re-derives the next seq from the
+    # on-disk manifest and reconciled checkpoint files.
+    # Note: the callback is invoked twice (once in do_write_checkpoint and
+    # once in retry_on_collision), so we only plant the collision on the
+    # first invocation.
+    collision_cb = fn manifest ->
+      checkpoints = Map.get(manifest, "checkpoints", [])
+
+      if length(checkpoints) == 1 do
+        [%{"path" => rel_path}] = checkpoints
+        File.write!(Path.join(run_dir, rel_path), Jason.encode!(%{"collision" => true}))
+      end
+
+      manifest
+    end
+
+    assert {:ok, ledger} =
+             RunLedger.write_checkpoint(ledger, :dispatch, %{attempt: 1},
+               timestamp: @now,
+               manifest_update: collision_cb
+             )
+
+    manifest = decode_json!(ledger.manifest_path)
+    seqs = Enum.map(manifest["checkpoints"], & &1["seq"])
+    assert seqs == [1, 2]
+    assert seqs == Enum.uniq(seqs)
+    assert seqs == Enum.sort(seqs)
+
+    kinds = Enum.map(manifest["checkpoints"], & &1["kind"])
+    assert "unknown" in kinds
+    assert "dispatch" in kinds
+
+    # The collision file (orphan) is still on disk.
+    assert File.exists?(Path.join(ledger.run_dir, "checkpoints/0001-dispatch.json"))
+    # The retry wrote the actual checkpoint with a bumped seq.
+    assert File.exists?(Path.join(ledger.run_dir, "checkpoints/0002-dispatch.json"))
+
+    retry_checkpoint = decode_json!(Path.join(ledger.run_dir, "checkpoints/0002-dispatch.json"))
+    assert retry_checkpoint["seq"] == 2
+    assert retry_checkpoint["kind"] == "dispatch"
+    assert retry_checkpoint["payload"] == %{"attempt" => 1}
+  end
+
+  test "lock timeout returns :lock_timeout when the lock cannot be acquired" do
+    workspace_root = tmp_dir("ledger-lock-timeout")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "10ckt0ut"
+             )
+
+    # Hold an exclusive lock on the ledger lock file.
+    lock_path = Path.join(ledger.run_dir, ".ledger.lock")
+    File.mkdir_p!(ledger.run_dir)
+    {:ok, _held_lock} = File.open(lock_path, [:write, :exclusive, :binary])
+
+    task =
+      Task.async(fn ->
+        RunLedger.write_checkpoint(ledger, :dispatch, %{attempt: 1}, timestamp: @now)
+      end)
+
+    result = Task.await(task, 5_000)
+    assert {:error, {:lock_failed, :lock_timeout}} = result
+  end
+
+  test "stale lock is detected and removed before acquisition" do
+    workspace_root = tmp_dir("ledger-stale-lock")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "57a1e10c"
+             )
+
+    # Write a lock file with a timestamp far in the past so it is considered stale.
+    lock_path = Path.join(ledger.run_dir, ".ledger.lock")
+    File.mkdir_p!(ledger.run_dir)
+    File.write!(lock_path, "0")
+
+    assert File.exists?(lock_path)
+    assert {:ok, _ledger} = RunLedger.write_checkpoint(ledger, :dispatch, %{attempt: 1}, timestamp: @now)
+    refute File.exists?(lock_path)
+  end
+
+  test "orchestrator/worker update paths produce unique monotonic sequences — stale write source" do
+    workspace_root = tmp_dir("ledger-stale-source")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "5ta1e5rc"
+             )
+
+    # Simulate the dogfood shape: a worker and orchestrator write at
+    # overlapping times via a stale ledger copy.  After the lock serialises
+    # them, there must be exactly two distinct seqs.
+    stale = %{ledger | next_seq: ledger.next_seq, manifest: ledger.manifest}
+
+    [worker_task, orch_task] =
+      [
+        Task.async(fn -> RunLedger.write_checkpoint(stale, :spawned, %{pid: "pid-1"}, timestamp: @now) end),
+        Task.async(fn ->
+          RunLedger.record_action_policy_decision(stale, %{
+            "decision" => "deny",
+            "mode" => "unattended-auto",
+            "action" => "git.push"
+          })
+        end)
+      ]
+
+    results = Enum.map([worker_task, orch_task], &Task.await/1)
+
+    assert Enum.all?(results, fn
+             {:ok, _} -> true
+             _ -> false
+           end)
+
+    manifest = decode_json!(ledger.manifest_path)
+    seqs = Enum.map(manifest["checkpoints"], & &1["seq"])
+    assert length(seqs) == 2
+    assert seqs == Enum.uniq(seqs)
+    assert seqs == Enum.sort(seqs)
+
+    index_files = manifest["checkpoints"] |> Enum.map(&Path.basename(&1["path"])) |> Enum.sort()
+
+    disk_files =
+      ledger.run_dir
+      |> Path.join("checkpoints")
+      |> File.ls!()
+      |> Enum.filter(&String.ends_with?(&1, ".json"))
+      |> Enum.sort()
+
+    assert index_files == disk_files
+  end
+
+  test "reconciled_manifest handles unreadable checkpoints directory gracefully" do
+    workspace_root = tmp_dir("ledger-reconcile-dir-error")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "d1r3rr0r"
+             )
+
+    # Remove the checkpoints directory so File.ls returns an error.
+    File.rm_rf!(Path.join(ledger.run_dir, "checkpoints"))
+
+    assert {:ok, ledger} = RunLedger.write_checkpoint(ledger, :dispatch, %{attempt: 1}, timestamp: @now)
+
+    manifest = decode_json!(ledger.manifest_path)
+    assert [%{"seq" => 1, "kind" => "dispatch"}] = manifest["checkpoints"]
+  end
+
+  test "reconciled_manifest handles malformed and non-digit-named checkpoint files on disk" do
+    workspace_root = tmp_dir("ledger-reconcile-malformed")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "ma1f0rme"
+             )
+
+    checkpoints_dir = Path.join(ledger.run_dir, "checkpoints")
+
+    # Plant a .json file whose name does not start with digits.
+    # Its content does NOT contain valid seq/kind/timestamp so
+    # parse_checkpoint_index falls through to synthesize_checkpoint_index,
+    # which returns nil because checkpoint_seq_from_filename fails.
+    # The nil entry is then rejected by orphan_index_eligible? (non-map clause).
+    non_digit_path = Path.join(checkpoints_dir, "orphan.json")
+    File.write!(non_digit_path, Jason.encode!(%{"note" => "no seq"}))
+
+    # Plant a file with a digit prefix but unparseable JSON body.
+    bad_json_path = Path.join(checkpoints_dir, "0007-malformed.json")
+    File.write!(bad_json_path, "not json at all")
+
+    assert {:ok, ledger} = RunLedger.write_checkpoint(ledger, :dispatch, %{attempt: 1}, timestamp: @now)
+
+    manifest = decode_json!(ledger.manifest_path)
+    seqs = Enum.map(manifest["checkpoints"], & &1["seq"])
+
+    # The 0007-malformed file is synthesised from filename → kind=unknown, seq=7.
+    # The orphan.json produces nil and is skipped.
+    # Then the dispatch checkpoint gets the next available seq (8).
+    assert 7 in seqs
+    assert 8 in seqs
+    assert seqs == Enum.uniq(seqs)
+    assert seqs == Enum.sort(seqs)
+
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "unknown" and &1["seq"] == 7))
+    assert File.exists?(non_digit_path)
+    assert File.exists?(bad_json_path)
+  end
+
+  test "link_artifacts handles non-list artifacts in the on-disk manifest" do
+    workspace_root = tmp_dir("ledger-artifacts-nonlist")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "n0n115t"
+             )
+
+    # Corrupt the on-disk manifest so artifacts is a string, not a list.
+    manifest = decode_json!(ledger.manifest_path)
+    manifest = Map.put(manifest, "artifacts", "corrupted")
+    File.write!(ledger.manifest_path, Jason.encode!(manifest))
+
+    File.write!(Path.join(ledger.run_dir, "artifacts/present.txt"), "content")
+
+    assert {:ok, ledger} =
+             RunLedger.link_artifacts(ledger, [
+               %{"kind" => "resolved_thing", "path" => "artifacts/present.txt"}
+             ])
+
+    updated_manifest = decode_json!(ledger.manifest_path)
+
+    assert %{
+             "kind" => "resolved_thing",
+             "path" => "artifacts/present.txt",
+             "status" => "present"
+           } in updated_manifest["artifacts"]
+  end
+
+  test "agent metadata update replaces non-map agent in on-disk manifest" do
+    workspace_root = tmp_dir("ledger-agent-nonmap")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "a6entnm"
+             )
+
+    # Write valid manifest to disk with agent set to a string.
+    manifest = decode_json!(ledger.manifest_path)
+    manifest = Map.put(manifest, "agent", "legacy-string-agent")
+    File.write!(ledger.manifest_path, Jason.encode!(manifest))
+
+    assert {:ok, updated_ledger} =
+             RunLedger.update_agent_metadata(ledger, %{
+               "adapter" => "pi",
+               "session_id" => "session-after-repair"
+             })
+
+    final_manifest = decode_json!(updated_ledger.manifest_path)
+    assert final_manifest["agent"]["adapter"] == "pi"
+    assert final_manifest["agent"]["session_id"] == "session-after-repair"
+  end
+
+  test "model_routing_decision replaces non-map agent in on-disk manifest" do
+    workspace_root = tmp_dir("ledger-mr-nonmap")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "mrn0nm4p"
+             )
+
+    # Write valid manifest to disk with agent set to a string.
+    manifest = decode_json!(ledger.manifest_path)
+    manifest = Map.put(manifest, "agent", "legacy-string-agent")
+    File.write!(ledger.manifest_path, Jason.encode!(manifest))
+
+    routing = %{
+      status: :honored,
+      mode: :prefer,
+      requested_tier: "heavy",
+      resolved: %{adapter: "pi", model: "heavy-model"},
+      reason: "resolved",
+      context: %{stage: "turn"}
+    }
+
+    assert {:ok, updated_ledger} =
+             RunLedger.record_model_routing_decision(ledger, routing, source: %{provider: "fake"})
+
+    final_manifest = decode_json!(updated_ledger.manifest_path)
+
+    assert final_manifest["agent"]["model_routing"] == %{
+             "status" => "honored",
+             "mode" => "prefer",
+             "requested_tier" => "heavy",
+             "resolved" => %{"adapter" => "pi", "model" => "heavy-model"},
+             "reason" => "resolved",
+             "context" => %{"stage" => "turn"}
+           }
+  end
+
   test "complete_run records task_failure classification distinct from final report classifications" do
     workspace_root = tmp_dir("ledger-classification")
 
@@ -1118,6 +1727,73 @@ defmodule Rondo.RunLedgerTest do
 
     assert {:ok, scan_ledger} = RunLedger.record_patch_secret_scan(scan_ledger, :pass)
     assert decode_json!(scan_ledger.manifest_path)["patch_secret_scan"]["status"] == "pass"
+  end
+
+  test "complete_run remains consistent when stale worker checkpoint writes overlap" do
+    workspace_root = tmp_dir("ledger-complete-concurrent")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "compconc"
+             )
+
+    stale = %{ledger | next_seq: ledger.next_seq, manifest: ledger.manifest}
+
+    tasks = [
+      Task.async(fn -> RunLedger.complete_run(stale, :completed, %{mode: "run_once"}, timestamp: @now) end),
+      Task.async(fn -> RunLedger.write_checkpoint(stale, :spawned, %{pid: "pid-1"}, timestamp: @now) end)
+    ]
+
+    assert Enum.all?(Task.await_many(tasks, 5_000), &match?({:ok, %RunLedger{}}, &1))
+
+    manifest = decode_json!(ledger.manifest_path)
+    seqs = Enum.map(manifest["checkpoints"], & &1["seq"])
+
+    assert manifest["status"] == "completed"
+    assert seqs == Enum.uniq(seqs)
+    assert seqs == Enum.sort(seqs)
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "completed"))
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "spawned"))
+
+    index_files = manifest["checkpoints"] |> Enum.map(&Path.basename(&1["path"])) |> Enum.sort()
+
+    disk_files =
+      ledger.run_dir
+      |> Path.join("checkpoints")
+      |> File.ls!()
+      |> Enum.filter(&String.ends_with?(&1, ".json"))
+      |> Enum.sort()
+
+    assert index_files == disk_files
+  end
+
+  test "link_artifacts refreshes completed-run delivery artifact without reentrant lock timeout" do
+    workspace_root = tmp_dir("ledger-delivery-refresh")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "de1e0k00"
+             )
+
+    assert {:ok, ledger} = RunLedger.complete_run(ledger, :completed, %{mode: "test"}, timestamp: @now)
+
+    archive_relative_path = "artifacts/archive/run.json"
+    File.mkdir_p!(Path.dirname(Path.join(ledger.run_dir, archive_relative_path)))
+    File.write!(Path.join(ledger.run_dir, archive_relative_path), Jason.encode!(%{"ok" => true}))
+
+    assert {:ok, ledger} = RunLedger.link_archive(ledger, archive_relative_path)
+
+    manifest = decode_json!(ledger.manifest_path)
+
+    assert %{"kind" => "archive", "path" => archive_relative_path, "status" => "present"} in manifest["artifacts"]
+    assert %{"kind" => "delivery_artifact", "path" => "artifacts/delivery-artifact.json", "status" => "present"} in manifest["artifacts"]
+
+    delivery_artifact = decode_json!(Path.join(ledger.run_dir, "artifacts/delivery-artifact.json"))
+    assert delivery_artifact["outputs"]["archive"] == archive_relative_path
   end
 
   test "delivery artifact write failures surface from completed ledgers" do
