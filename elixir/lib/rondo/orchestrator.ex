@@ -994,13 +994,22 @@ defmodule Rondo.Orchestrator do
 
   defp handle_release_loop_dispatch(%State{} = state, %Issue{} = issue, attempt, attempt_metadata, recipient, ledger, %{action: :fix} = decision) do
     issue = transition_issue_to_release_state(issue, release_loop_rework_state())
+    phase = release_loop_recovery_phase(decision)
 
     agent_opts = [
       operator_guidance: Map.get(decision, :guidance),
-      model_routing_context: %{stage: :turn, skill: "review-response", phase: "review"}
+      model_routing_context: %{stage: :turn, skill: "review-response", phase: phase}
     ]
 
-    ledger = write_run_ledger_checkpoint(ledger, :release_loop_action_selected, %{action: "fix", feedback_count: length(Map.get(decision, :feedback_queue, []))})
+    ledger =
+      write_run_ledger_checkpoint(ledger, :release_loop_action_selected, %{
+        action: "fix",
+        recovery_kind: Map.get(decision, :recovery_kind),
+        feedback_count: length(Map.get(decision, :feedback_queue, [])),
+        feedback_comment_ids: Map.get(decision, :feedback_comment_ids, []),
+        conflict_files: Map.get(decision, :conflict_files, [])
+      })
+
     start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger, agent_opts)
   end
 
@@ -3348,6 +3357,8 @@ defmodule Rondo.Orchestrator do
 
   defp release_loop_rework_state, do: Config.release_loop_rework_state()
   defp release_loop_review_state, do: Config.release_loop_review_state()
+  defp release_loop_recovery_phase(%{recovery_kind: recovery_kind}) when recovery_kind in [:conflict, :conflict_and_feedback], do: "rebase"
+  defp release_loop_recovery_phase(_), do: "review"
   defp release_loop_merge_state, do: Config.release_loop_merge_state()
 
   defp tracker_repo do

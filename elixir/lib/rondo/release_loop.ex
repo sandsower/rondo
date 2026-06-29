@@ -91,6 +91,10 @@ defmodule Rondo.ReleaseLoop do
   def build_review_response_prompt(pr, snapshot) when is_map(pr) and is_map(snapshot) do
     feedback = Map.get(snapshot, :feedback_queue, [])
     checks = Map.get(snapshot, :checks, %{})
+    mergeable = Map.get(snapshot, :mergeable)
+    merge_state_status = Map.get(snapshot, :merge_state_status)
+    conflict_files = Map.get(snapshot, :conflict_files, [])
+    recovery_kind = recovery_kind(snapshot)
 
     feedback_block =
       feedback
@@ -98,20 +102,40 @@ defmodule Rondo.ReleaseLoop do
         "- #{Map.get(item, :kind, "comment")}: #{Map.get(item, :summary, "")}" |> String.trim_trailing()
       end)
 
+    conflict_block =
+      if conflicting_mergeability?(mergeable, merge_state_status) do
+        conflict_file_block =
+          conflict_files
+          |> Enum.map_join("\n", fn path -> "- #{path}" end)
+
+        """
+        Mergeability conflict:
+        - mergeable: #{string_value(mergeable) || "unknown"}
+        - merge_state_status: #{string_value(merge_state_status) || "unknown"}
+        - conflict files:
+        #{if conflict_file_block == "", do: "- none", else: conflict_file_block}
+        """
+      else
+        ""
+      end
+
     """
-    You are handling PR review response and babysitting for this ticket.
+    You are handling PR recovery and review response for this ticket.
 
     PR: #{Map.get(pr, :number)} #{Map.get(pr, :url)}
     Branch: #{Map.get(pr, :head_ref_name, "")}
+    Recovery kind: #{recovery_kind || "none"}
 
     Current checks: #{Kernel.inspect(checks)}
 
+    #{conflict_block}
     Actionable feedback queue:
     #{if feedback_block == "", do: "- none", else: feedback_block}
 
     Tasks:
-    - Fix the actionable feedback in the workspace.
+    - If the PR is conflicting, resolve the merge/rebase conflict in the workspace, rerun verification, and push the updated branch.
     - If a comment is incorrect or not actionable, post a concise justified pushback reply.
+    - Fix actionable feedback in the workspace.
     - Re-run the configured gates before any push/merge boundary.
     - Keep the loop going until the PR is green or the configured merge policy blocks closeout.
     """
@@ -176,6 +200,7 @@ defmodule Rondo.ReleaseLoop do
       reviews: normalize_reviews(Map.get(pr_view, "reviews", [])),
       comments: normalize_comments(Map.get(pr_view, "comments", [])),
       inline_comments: normalize_inline_comments(inline_comments),
+      conflict_files: [],
       checks: normalize_checks(Map.get(pr_view, "statusCheckRollup", %{})),
       review_decision: Map.get(pr_view, "reviewDecision"),
       mergeable: Map.get(pr_view, "mergeable"),
@@ -190,6 +215,7 @@ defmodule Rondo.ReleaseLoop do
       reviews: normalize_reviews(first_present(snapshot, [:reviews, "reviews"]) || []),
       comments: normalize_comments(first_present(snapshot, [:comments, "comments"]) || []),
       inline_comments: normalize_inline_comments(first_present(snapshot, [:inline_comments, "inline_comments"]) || []),
+      conflict_files: normalize_conflict_files(first_present(snapshot, [:conflict_files, "conflict_files"]) || []),
       checks: normalize_checks(first_present(snapshot, [:checks, "checks"]) || %{}),
       review_decision: first_present(snapshot, [:review_decision, "review_decision", "reviewDecision"]),
       mergeable: first_present(snapshot, [:mergeable, "mergeable"]),
@@ -256,6 +282,14 @@ defmodule Rondo.ReleaseLoop do
     end)
   end
 
+  defp normalize_conflict_files(files) when is_list(files) do
+    files
+    |> Enum.map(&string_value/1)
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp normalize_conflict_files(_files), do: []
+
   defp normalize_checks(%{} = rollup) do
     entries = Map.get(rollup, "contexts", []) || Map.get(rollup, :contexts, [])
 
@@ -284,15 +318,19 @@ defmodule Rondo.ReleaseLoop do
     _review_decision = Map.get(snapshot, :review_decision)
     mergeable = Map.get(snapshot, :mergeable)
     merge_state_status = Map.get(snapshot, :merge_state_status)
+    recovery_kind = recovery_kind(snapshot)
 
     decision =
       cond do
-        feedback_queue != [] or requested_changes?(snapshot) ->
+        recovery_kind != nil ->
           %{
             action: :fix,
             pr: pr,
             review_snapshot: snapshot,
             feedback_queue: feedback_queue,
+            feedback_comment_ids: feedback_comment_ids(snapshot),
+            conflict_files: Map.get(snapshot, :conflict_files, []),
+            recovery_kind: recovery_kind,
             checks: checks,
             mergeable: mergeable,
             merge_state_status: merge_state_status,
@@ -307,6 +345,8 @@ defmodule Rondo.ReleaseLoop do
             pr: pr,
             review_snapshot: snapshot,
             feedback_queue: feedback_queue,
+            feedback_comment_ids: feedback_comment_ids(snapshot),
+            conflict_files: Map.get(snapshot, :conflict_files, []),
             checks: checks,
             mergeable: mergeable,
             merge_state_status: merge_state_status,
@@ -320,6 +360,8 @@ defmodule Rondo.ReleaseLoop do
             pr: pr,
             review_snapshot: snapshot,
             feedback_queue: feedback_queue,
+            feedback_comment_ids: feedback_comment_ids(snapshot),
+            conflict_files: Map.get(snapshot, :conflict_files, []),
             checks: checks,
             mergeable: mergeable,
             merge_state_status: merge_state_status,
@@ -333,6 +375,8 @@ defmodule Rondo.ReleaseLoop do
             pr: pr,
             review_snapshot: snapshot,
             feedback_queue: feedback_queue,
+            feedback_comment_ids: feedback_comment_ids(snapshot),
+            conflict_files: Map.get(snapshot, :conflict_files, []),
             checks: checks,
             mergeable: mergeable,
             merge_state_status: merge_state_status,
@@ -341,7 +385,7 @@ defmodule Rondo.ReleaseLoop do
           }
       end
 
-    ledger = record_planned_action(ledger, issue, decision, config)
+    ledger = record_planned_action(ledger, issue, pr, decision, config)
 
     maybe_post_reply(decision, Keyword.put(opts, :ledger, ledger))
 
@@ -489,6 +533,9 @@ defmodule Rondo.ReleaseLoop do
       mergeable: Map.get(snapshot, :mergeable),
       merge_state_status: Map.get(snapshot, :merge_state_status),
       feedback_queue: feedback_queue(snapshot),
+      feedback_comment_ids: feedback_comment_ids(snapshot),
+      conflict_files: Map.get(snapshot, :conflict_files, []),
+      recovery_kind: recovery_kind(snapshot),
       checks: Map.get(snapshot, :checks, %{}),
       action: plan_action_kind(snapshot)
     }
@@ -809,16 +856,22 @@ defmodule Rondo.ReleaseLoop do
   defp normalize_risk_level(value) when is_atom(value), do: value |> Atom.to_string() |> normalize_risk_level()
   defp normalize_risk_level(_value), do: "medium"
 
-  defp record_planned_action(nil, _issue, _decision, _config), do: nil
+  defp record_planned_action(nil, _issue, _pr, _decision, _config), do: nil
 
-  defp record_planned_action(%RunLedger{} = ledger, issue, decision, config) do
+  defp record_planned_action(%RunLedger{} = ledger, issue, pr, decision, config) do
     risk_assessment = Map.get(decision, :risk_assessment, %{})
 
     payload = %{
       issue: issue.identifier || issue.id,
+      pr: Map.take(pr, [:number, :url, :title, :head_ref_name, :base_ref_name]),
       action: Map.get(decision, :action),
+      recovery_kind: Map.get(decision, :recovery_kind),
       wait_interval_seconds: Map.get(decision, :wait_interval_seconds),
       feedback_count: length(Map.get(decision, :feedback_queue, [])),
+      feedback_comment_ids: Map.get(decision, :feedback_comment_ids, []),
+      conflict_files: Map.get(decision, :conflict_files, []),
+      mergeable: Map.get(decision, :mergeable),
+      merge_state_status: Map.get(decision, :merge_state_status),
       reply_preview: Map.get(decision, :reply_preview),
       risk_level: Map.get(risk_assessment, :level),
       risk_threshold: Map.get(risk_assessment, :threshold),
@@ -929,16 +982,40 @@ defmodule Rondo.ReleaseLoop do
     |> Enum.filter(&(&1 != nil))
   end
 
+  defp conflicting_mergeability?(mergeable, _merge_state_status) do
+    (string_value(mergeable) |> String.downcase()) in ["conflicting"]
+  end
+
+  defp recovery_kind(snapshot) do
+    feedback_queue = feedback_queue(snapshot)
+    conflict? = conflicting_mergeability?(Map.get(snapshot, :mergeable), Map.get(snapshot, :merge_state_status))
+
+    cond do
+      conflict? and feedback_queue != [] -> :conflict_and_feedback
+      conflict? -> :conflict
+      requested_changes?(snapshot) -> :review_feedback
+      feedback_queue != [] -> :review_feedback
+      true -> nil
+    end
+  end
+
+  defp feedback_comment_ids(snapshot) do
+    snapshot
+    |> feedback_queue()
+    |> Enum.map(&Map.get(&1, :id))
+    |> Enum.reject(&is_nil/1)
+  end
+
   defp feedback_from_review(review) do
     state = string_value(Map.get(review, :state) || Map.get(review, "state"))
     body = string_value(Map.get(review, :body) || Map.get(review, "body"))
 
     cond do
       String.downcase(state) == "changes_requested" ->
-        %{kind: "review", summary: body, author: author_login(review), actionable: true}
+        %{kind: "review", summary: body, author: author_login(review), actionable: true, id: string_value(Map.get(review, :id) || Map.get(review, "id"))}
 
       actionable_text?(body) ->
-        %{kind: "review", summary: body, author: author_login(review), actionable: true}
+        %{kind: "review", summary: body, author: author_login(review), actionable: true, id: string_value(Map.get(review, :id) || Map.get(review, "id"))}
 
       true ->
         nil
@@ -973,7 +1050,7 @@ defmodule Rondo.ReleaseLoop do
   end
 
   defp build_reply_preview(issue, pr, snapshot) do
-    body =
+    feedback =
       snapshot
       |> feedback_queue()
       |> Enum.take(@review_reply_limit)
@@ -982,10 +1059,31 @@ defmodule Rondo.ReleaseLoop do
         String.trim_trailing(line)
       end)
 
-    header = "Rondo is addressing review feedback for #{issue.identifier || issue.id} on PR ##{Map.get(pr, :number)}."
-    feedback = if body == "", do: "- no actionable feedback", else: body
+    conflict_note =
+      if conflicting_mergeability?(Map.get(snapshot, :mergeable), Map.get(snapshot, :merge_state_status)) do
+        conflict_files = Map.get(snapshot, :conflict_files, [])
 
-    "#{header}\n\n#{feedback}"
+        conflict_file_note =
+          conflict_files
+          |> Enum.take(@review_reply_limit)
+          |> Enum.map_join("\n", &"- #{&1}")
+
+        "- mergeability conflict detected (#{string_value(Map.get(snapshot, :mergeable)) || "unknown"}/#{string_value(Map.get(snapshot, :merge_state_status)) || "unknown"})\n#{if conflict_file_note == "", do: "- conflict files unavailable", else: conflict_file_note}"
+      else
+        nil
+      end
+
+    header = "Rondo is addressing PR recovery for #{issue.identifier || issue.id} on PR ##{Map.get(pr, :number)}."
+
+    details =
+      cond do
+        conflict_note && feedback == "" -> conflict_note
+        conflict_note -> conflict_note <> "\n" <> feedback
+        feedback == "" -> "- no actionable feedback"
+        true -> feedback
+      end
+
+    "#{header}\n\n#{details}"
   end
 
   defp actionable_comment(snapshot) do
@@ -1086,7 +1184,7 @@ defmodule Rondo.ReleaseLoop do
 
   defp plan_action_kind(snapshot) do
     cond do
-      requested_changes?(snapshot) ->
+      recovery_kind(snapshot) != nil ->
         :fix
 
       checks_pending?(Map.get(snapshot, :checks, %{})) or

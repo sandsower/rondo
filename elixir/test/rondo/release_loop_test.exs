@@ -20,7 +20,58 @@ defmodule Rondo.ReleaseLoopTest do
              ReleaseLoop.inspect(issue, repo: "sandsower/rondo", runner: release_loop_runner("[]"))
   end
 
-  test "includes actionable inline bot feedback and posts a review reply" do
+  test "treats conflicting mergeability as recovery work and records conflict evidence" do
+    pr = pr_map(42, "feature/conflicting-branch", "Conflict recovery", review_decision: "APPROVED", mergeable: "CONFLICTING", merge_state_status: "DIRTY")
+
+    source_json =
+      review_snapshot_json(pr,
+        reviews: [],
+        comments: [],
+        inline_comments: [],
+        conflict_files: ["elixir/lib/rondo/release_loop.ex", "elixir/lib/rondo/orchestrator.ex"],
+        checks: %{state: "SUCCESS", conclusion: "SUCCESS", entries: [%{name: "ci", state: "SUCCESS", conclusion: "SUCCESS"}]}
+      )
+
+    workspace_root = tmp_dir("release-loop-conflict")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      release_loop_enabled: true,
+      release_loop_pr_review_source: shell_print_json(source_json)
+    )
+
+    issue = %Issue{
+      id: "issue-conflict-recovery",
+      identifier: "MT-CONFLICT",
+      title: "Conflict recovery",
+      state: "In Progress",
+      branch_name: "feature/conflicting-branch"
+    }
+
+    {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root, random_suffix: "conflict001")
+
+    assert {:ok, decision, ledger} =
+             ReleaseLoop.inspect(issue,
+               repo: "sandsower/rondo",
+               ledger: ledger,
+               runner: release_loop_runner(Jason.encode!([pr]), source_json)
+             )
+
+    assert decision.action == :fix
+    assert decision.recovery_kind == :conflict
+    assert decision.guidance =~ "Mergeability conflict"
+    assert decision.guidance =~ "merge/rebase conflict"
+
+    payload = checkpoint_payload(ledger, "release_loop_plan")
+    assert payload["pr"]["url"] == "https://github.com/sandsower/rondo/pull/42"
+    assert payload["recovery_kind"] == "conflict"
+    assert payload["conflict_files"] == ["elixir/lib/rondo/release_loop.ex", "elixir/lib/rondo/orchestrator.ex"]
+    assert payload["feedback_comment_ids"] == []
+    assert payload["mergeable"] == "CONFLICTING"
+  end
+
+  test "includes actionable inline bot feedback, posts a review reply, and records comment ids" do
     pr = pr_map(42, "feature/review-loop", "Fix review feedback", review_decision: "REVIEW_REQUIRED", mergeable: "UNKNOWN", merge_state_status: "DIRTY")
 
     source_json =
@@ -33,11 +84,14 @@ defmodule Rondo.ReleaseLoopTest do
         checks: %{state: "PENDING", conclusion: nil, entries: [%{name: "ci", state: "PENDING", conclusion: nil}]}
       )
 
+    workspace_root = tmp_dir("release-loop-review")
     reply_body_file = tmp_file("release-loop-reply-body")
     reply_comment_file = tmp_file("release-loop-reply-comment")
     update_command = "printf '%s' \"$RONDO_PR_REVIEW_REPLY_BODY\" > #{reply_body_file} && printf '%s' \"$RONDO_PR_REVIEW_COMMENT_ID\" > #{reply_comment_file}"
 
     write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
       release_loop_enabled: true,
       release_loop_pr_review_source: shell_print_json(source_json),
       release_loop_pr_review_update: update_command
@@ -51,13 +105,25 @@ defmodule Rondo.ReleaseLoopTest do
       branch_name: "feature/review-loop"
     }
 
-    assert {:ok, decision, _ledger} =
-             ReleaseLoop.inspect(issue, repo: "sandsower/rondo", runner: release_loop_runner(Jason.encode!([pr]), source_json))
+    {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root, random_suffix: "review001")
+
+    assert {:ok, decision, ledger} =
+             ReleaseLoop.inspect(issue,
+               repo: "sandsower/rondo",
+               ledger: ledger,
+               runner: release_loop_runner(Jason.encode!([pr]), source_json)
+             )
 
     assert decision.action == :fix
+    assert decision.recovery_kind == :review_feedback
     assert Enum.any?(decision.feedback_queue, &(&1.kind == "inline"))
-    assert File.read!(reply_body_file) =~ "addressing review feedback"
+    assert File.read!(reply_body_file) =~ "addressing PR recovery"
     assert File.read!(reply_comment_file) == "c1"
+
+    payload = checkpoint_payload(ledger, "release_loop_plan")
+    assert payload["recovery_kind"] == "review_feedback"
+    assert payload["feedback_comment_ids"] == ["c1"]
+    assert payload["pr"]["number"] == 42
   end
 
   test "treats requested changes as blocking feedback" do
@@ -400,6 +466,7 @@ defmodule Rondo.ReleaseLoopTest do
         reviews: Keyword.get(extra, :reviews, []),
         comments: Keyword.get(extra, :comments, []),
         inline_comments: Keyword.get(extra, :inline_comments, []),
+        conflict_files: Keyword.get(extra, :conflict_files, []),
         checks: Keyword.get(extra, :checks, %{state: "SUCCESS", conclusion: "SUCCESS", entries: []}),
         review_decision: Map.get(pr, :reviewDecision),
         mergeable: Map.get(pr, :mergeable),
@@ -408,6 +475,16 @@ defmodule Rondo.ReleaseLoopTest do
       %{}
     )
     |> Jason.encode!()
+  end
+
+  defp checkpoint_payload(ledger, kind) do
+    manifest = Jason.decode!(File.read!(ledger.manifest_path))
+    checkpoint = Enum.find(manifest["checkpoints"], &(&1["kind"] == kind))
+
+    Path.join(ledger.run_dir, checkpoint["path"])
+    |> File.read!()
+    |> Jason.decode!()
+    |> Map.fetch!("payload")
   end
 
   defp shell_print_json(json) do
