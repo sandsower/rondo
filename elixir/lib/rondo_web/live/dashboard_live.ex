@@ -16,6 +16,7 @@ defmodule RondoWeb.DashboardLive do
       |> assign(:now, DateTime.utc_now())
       |> assign(:selected_issue, nil)
       |> assign(:selected_run_index, 0)
+      |> assign(:selected_run_projection, nil)
 
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
@@ -61,7 +62,14 @@ defmodule RondoWeb.DashboardLive do
         {identifier, _} ->
           # Viewing a live running issue — keep it updated
           entry = find_issue_entry(socket.assigns.payload, identifier)
-          if entry, do: assign(socket, :selected_issue_data, entry), else: socket
+
+          if entry do
+            socket
+            |> assign(:selected_issue_data, entry)
+            |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, entry))
+          else
+            socket
+          end
       end
 
     {:noreply, socket}
@@ -80,6 +88,7 @@ defmodule RondoWeb.DashboardLive do
       |> assign(:selected_issue_data, entry)
       |> assign(:selected_runs, nil)
       |> assign(:selected_run_index, 0)
+      |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, entry))
 
     {:noreply, socket}
   end
@@ -114,6 +123,7 @@ defmodule RondoWeb.DashboardLive do
        |> assign(:selected_issue_data, run_with_log)
        |> assign(:selected_run_index, latest_index)
        |> assign(:selected_runs, group.runs)
+       |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, latest_run))
        |> push_run_charts(group.runs)}
     else
       {:noreply, socket}
@@ -132,7 +142,8 @@ defmodule RondoWeb.DashboardLive do
       {:noreply,
        socket
        |> assign(:selected_issue_data, run_with_log)
-       |> assign(:selected_run_index, index)}
+       |> assign(:selected_run_index, index)
+       |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, run))}
     else
       {:noreply, socket}
     end
@@ -145,7 +156,8 @@ defmodule RondoWeb.DashboardLive do
      |> assign(:selected_issue, nil)
      |> assign(:selected_issue_data, nil)
      |> assign(:selected_runs, nil)
-     |> assign(:selected_run_index, 0)}
+     |> assign(:selected_run_index, 0)
+     |> assign(:selected_run_projection, nil)}
   end
 
   @impl true
@@ -622,6 +634,48 @@ defmodule RondoWeb.DashboardLive do
             </div>
           <% end %>
 
+          <%= if @selected_run_projection do %>
+            <div class="section-card" style="margin-bottom: 16px; padding: 16px;">
+              <p class="panel-metric-label">Ledger browser</p>
+              <p class="muted" style="font-size: 12px; margin-bottom: 12px;">
+                Manifest/checkpoint timeline for the selected run.
+              </p>
+
+              <div class="panel-metrics" style="margin-bottom: 12px;">
+                <div class="panel-metric">
+                  <span class="panel-metric-label">Run</span>
+                  <span class="mono" style="font-size: 11px;"><%= @selected_run_projection.run_id || "n/a" %></span>
+                </div>
+                <div class="panel-metric">
+                  <span class="panel-metric-label">Session</span>
+                  <span class="mono" style="font-size: 11px;"><%= @selected_run_projection.session_id || "n/a" %></span>
+                </div>
+                <div class="panel-metric">
+                  <span class="panel-metric-label">Status</span>
+                  <span class={state_badge_class(@selected_run_projection.status || @selected_run_projection.exit_reason || "n/a")}><%= @selected_run_projection.status || @selected_run_projection.exit_reason || "n/a" %></span>
+                </div>
+                <div class="panel-metric">
+                  <span class="panel-metric-label">Steps</span>
+                  <span class="numeric"><%= length(@selected_run_projection.timeline || []) %></span>
+                </div>
+              </div>
+
+              <div class="event-stream" style="max-height: 320px;">
+                <div :for={step <- Enum.reverse(@selected_run_projection.timeline || [])} class="event-row">
+                  <span class={ledger_step_class(step)}>
+                    <%= step.kind %>
+                  </span>
+                  <span class="event-row-message">
+                    <%= step.summary || step.outcome || step.kind %>
+                  </span>
+                  <span class="muted event-row-message" style="margin-left: auto; text-align: right;">
+                    <%= ledger_step_meta(step) %>
+                  </span>
+                </div>
+              </div>
+            </div>
+          <% end %>
+
           <%= if @selected_issue_data[:interrupt] do %>
             <div class="section-card" style="margin-bottom: 16px; padding: 16px;">
               <p class="panel-metric-label">Guidance</p>
@@ -706,6 +760,137 @@ defmodule RondoWeb.DashboardLive do
       Map.put(run, :event_log, [])
     end
   end
+
+  @spec selected_run_projection_for_test(map(), map() | nil) :: map() | nil
+  def selected_run_projection_for_test(payload, run), do: selected_run_projection_for(payload, run)
+
+  @spec ledger_step_class_for_test(map() | nil) :: String.t()
+  def ledger_step_class_for_test(step), do: ledger_step_class(step)
+
+  @spec ledger_step_meta_for_test(map() | nil) :: String.t()
+  def ledger_step_meta_for_test(step), do: ledger_step_meta(step)
+
+  defp selected_run_projection_for(_payload, nil), do: nil
+
+  defp selected_run_projection_for(payload, run) when is_map(payload) and is_map(run) do
+    projections = Map.get(payload, :run_timelines, Map.get(payload, "run_timelines", [])) || []
+
+    identifier = entry_value(run, :identifier) || entry_value(run, :issue_identifier)
+    run_id = entry_value(run, :run_id)
+    session_id = entry_value(run, :session_id)
+    started_at = entry_value(run, :started_at)
+
+    {score, projection} =
+      Enum.reduce(projections, {0, nil}, fn candidate, {best_score, best_projection} ->
+        candidate_score =
+          run_projection_match_score(candidate, identifier, run_id, session_id, started_at)
+
+        if candidate_score > best_score do
+          {candidate_score, candidate}
+        else
+          {best_score, best_projection}
+        end
+      end)
+
+    if score > 0, do: projection, else: nil
+  end
+
+  defp selected_run_projection_for(_payload, _run), do: nil
+
+  defp entry_value(entry, key) when is_map(entry) and is_atom(key) do
+    Map.get(entry, key) || Map.get(entry, Atom.to_string(key))
+  end
+
+  defp entry_value(_entry, _key), do: nil
+
+  defp run_projection_match_score(projection, identifier, run_id, session_id, started_at) do
+    proj_identifier = entry_value(projection, :identifier)
+    proj_run_id = entry_value(projection, :run_id)
+    proj_session_id = entry_value(projection, :session_id)
+    proj_started_at = entry_value(projection, :started_at)
+
+    cond do
+      run_id_match?(proj_run_id, run_id) -> 4
+      session_match?(proj_identifier, identifier, proj_session_id, session_id) -> 3
+      started_match?(proj_identifier, identifier, proj_started_at, started_at) -> 2
+      proj_identifier == identifier -> 1
+      true -> 0
+    end
+  end
+
+  defp run_id_match?(proj_run_id, run_id), do: is_binary(run_id) and proj_run_id == run_id
+
+  defp session_match?(proj_identifier, identifier, proj_session_id, session_id) do
+    is_binary(session_id) and is_binary(proj_session_id) and proj_identifier == identifier and
+      proj_session_id == session_id
+  end
+
+  defp started_match?(proj_identifier, identifier, proj_started_at, started_at) do
+    is_binary(started_at) and is_binary(proj_started_at) and proj_identifier == identifier and
+      proj_started_at == started_at
+  end
+
+  defp ledger_step_class(step) do
+    status = entry_value(step, :status) || entry_value(step, :kind) || "n/a"
+    state_badge_class(status)
+  end
+
+  defp ledger_step_meta(step) do
+    [ledger_source_label(step), ledger_artifact_summary(step)]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join(" · ")
+  end
+
+  defp ledger_source_label(step) do
+    step
+    |> entry_value(:source)
+    |> source_label()
+  end
+
+  defp source_label(source) when is_map(source) do
+    case entry_value(source, :kind) do
+      "checkpoint" -> checkpoint_source_label(source)
+      "event_log" -> event_log_source_label(source)
+      "manifest" -> "manifest"
+      kind when is_binary(kind) -> kind
+      _ -> nil
+    end
+  end
+
+  defp source_label(_source), do: nil
+
+  defp checkpoint_source_label(source) do
+    ["checkpoint", entry_value(source, :path)]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(": ")
+  end
+
+  defp event_log_source_label(source) do
+    index = entry_value(source, :event_index)
+    if is_integer(index), do: "event log ##{index + 1}", else: "event log"
+  end
+
+  defp ledger_artifact_summary(step) do
+    case entry_value(step, :artifacts) do
+      artifacts when is_list(artifacts) and artifacts != [] ->
+        artifacts
+        |> Enum.map(&artifact_summary/1)
+        |> Enum.uniq()
+        |> Enum.join(" · ")
+
+      _ ->
+        nil
+    end
+  end
+
+  defp artifact_summary(artifact) when is_map(artifact) do
+    kind = entry_value(artifact, :kind) || "artifact"
+    path = entry_value(artifact, :path)
+
+    if is_binary(path), do: "#{kind}: #{path}", else: to_string(kind)
+  end
+
+  defp artifact_summary(artifact), do: to_string(artifact)
 
   defp find_issue_entry(payload, identifier) do
     [:needs_guidance, :paused, :running, :retrying]
