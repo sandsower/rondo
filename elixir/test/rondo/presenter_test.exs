@@ -686,6 +686,8 @@ defmodule Rondo.PresenterTest do
           turn_count: 1,
           latest_gate: %{"status" => "fail"},
           tokens: %{total_tokens: 75},
+          cost: 0.0,
+          event_log: [%{tokens: %{cost: 0.42}}],
           adapter: "codex"
         }
       ],
@@ -703,6 +705,7 @@ defmodule Rondo.PresenterTest do
     assert failed.status == "failed"
     assert failed.last_meaningful_result == "gates fail"
     assert failed.model == "codex"
+    assert failed.cost == 0.0
     assert completed.issue_title == "Fix archive visibility"
     assert completed.cost == 0.015
     assert completed.provider == "openrouter"

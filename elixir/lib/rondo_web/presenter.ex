@@ -711,7 +711,7 @@ defmodule RondoWeb.Presenter do
       turn_count: Map.get(entry, :turn_count),
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       tokens: normalize_tokens(Map.get(entry, :tokens, %{})),
-      cost: archived_cost(entry) || log_cost(entry),
+      cost: archived_cost_or_log(entry),
       model: display_model(entry),
       provider: provider_from_entry(entry),
       model_routing: Map.get(entry, :model_routing),
@@ -937,13 +937,33 @@ defmodule RondoWeb.Presenter do
     |> ModelUsage.provider_from_model()
   end
 
+  defp archived_cost_or_log(entry) do
+    case archived_cost(entry) do
+      nil -> log_cost(entry)
+      cost -> cost
+    end
+  end
+
   defp archived_cost(entry) when is_map(entry) do
-    entry
-    |> Map.get(:cost)
-    |> normalize_cost()
+    cond do
+      Map.has_key?(entry, :cost) -> normalize_explicit_cost(Map.get(entry, :cost))
+      Map.has_key?(entry, "cost") -> normalize_explicit_cost(Map.get(entry, "cost"))
+      true -> nil
+    end
   end
 
   defp archived_cost(_entry), do: nil
+
+  defp normalize_explicit_cost(cost) when is_number(cost), do: Float.round(cost / 1.0, 6)
+
+  defp normalize_explicit_cost(cost) when is_binary(cost) do
+    case Float.parse(cost) do
+      {parsed, ""} -> Float.round(parsed, 6)
+      _ -> nil
+    end
+  end
+
+  defp normalize_explicit_cost(_cost), do: nil
 
   defp log_cost(entry) when is_map(entry) do
     entry
