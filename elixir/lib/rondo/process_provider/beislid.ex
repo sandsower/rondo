@@ -44,14 +44,16 @@ defmodule Rondo.ProcessProvider.Beislid do
   @impl true
   def select_gates(opts \\ []) do
     with {:ok, artifact} <- load_artifact(opts) do
-      gates = Enum.map(Map.get(artifact, :gates, []), &gate_definition/1)
+      selection = select_artifact_gates(artifact, opts)
 
       {:ok,
-       ProcessProvider.gate_selection_result(gates,
-         selected: Enum.map(Map.get(artifact, :gates, []), &selected_reason/1),
-         skipped: Map.get(artifact, :skipped, []),
-         warnings: Map.get(artifact, :warnings, []),
-         metadata: gate_metadata(artifact, opts)
+       ProcessProvider.gate_selection_result(selection.gates,
+         selected: selection.selected,
+         skipped: selection.skipped,
+         warnings: selection.warnings,
+         changed_files: selection.changed_files,
+         diff_source: selection.diff_source,
+         metadata: selection.metadata
        )}
     end
   end
@@ -168,6 +170,7 @@ defmodule Rondo.ProcessProvider.Beislid do
   defp normalize_artifact(%{"schema" => @artifact_schema, "id" => id, "status" => "approved"} = payload, path, source)
        when is_binary(id) do
     with {:ok, gates} <- normalize_gates(Map.get(payload, "gates", [])),
+         {:ok, gate_sets} <- normalize_gate_sets(Map.get(payload, "gate_sets", [])),
          {:ok, skipped} <- normalize_reasons(Map.get(payload, "skipped", [])),
          {:ok, warnings} <- normalize_warnings(Map.get(payload, "warnings", [])),
          {:ok, guides} <- normalize_maps(Map.get(payload, "guides", []), "guides"),
@@ -179,6 +182,7 @@ defmodule Rondo.ProcessProvider.Beislid do
          path: Path.expand(path),
          source: source,
          gates: gates,
+         gate_sets: gate_sets,
          skipped: skipped,
          warnings: warnings,
          guides: guides,
@@ -228,6 +232,39 @@ defmodule Rondo.ProcessProvider.Beislid do
 
   defp normalize_gate(_gate), do: {:error, {:invalid_artifact_field, "gates"}}
 
+  defp normalize_gate_sets(gate_sets) when is_list(gate_sets) do
+    gate_sets
+    |> Enum.reduce_while({:ok, []}, fn gate_set, {:ok, acc} ->
+      case normalize_gate_set(gate_set) do
+        {:ok, normalized} -> {:cont, {:ok, acc ++ [normalized]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp normalize_gate_sets(_gate_sets), do: {:error, {:invalid_artifact_field, "gate_sets"}}
+
+  defp normalize_gate_set(%{"id" => id, "paths" => paths, "gates" => gates} = gate_set) when is_binary(id) and is_list(paths) do
+    id = String.trim(id)
+    paths = paths |> Enum.filter(&(is_binary(&1) and String.trim(&1) != "")) |> Enum.map(&String.trim/1)
+
+    if id == "" or paths == [] do
+      {:error, {:invalid_artifact_field, "gate_sets"}}
+    else
+      with {:ok, gates} <- normalize_gates(gates) do
+        {:ok,
+         %{
+           id: id,
+           paths: paths,
+           gates: gates,
+           reason: string_or_nil(Map.get(gate_set, "reason")) || "matched changed-file selector #{id}"
+         }}
+      end
+    end
+  end
+
+  defp normalize_gate_set(_gate_set), do: {:error, {:invalid_artifact_field, "gate_sets"}}
+
   defp normalize_reasons(reasons) when is_list(reasons) do
     reasons
     |> Enum.reduce_while({:ok, []}, fn
@@ -276,6 +313,122 @@ defmodule Rondo.ProcessProvider.Beislid do
   defp normalize_metadata(value) when is_map(value), do: value
   defp normalize_metadata(_value), do: %{}
 
+  defp select_artifact_gates(%{gate_sets: gate_sets} = artifact, opts) when is_list(gate_sets) and gate_sets != [] do
+    changed_files = opts |> Keyword.get(:changed_files, []) |> normalize_changed_files()
+    diff_source = opts |> Keyword.get(:changed_files_metadata, %{}) |> Map.get(:source)
+    {matched_sets, unmatched_sets} = Enum.split_with(gate_sets, &gate_set_matches?(&1, changed_files))
+    {gates, selected} = selected_gates_from_sets(matched_sets)
+    unmatched_files = unmatched_changed_files(changed_files, matched_sets)
+
+    %{
+      gates: gates,
+      selected: selected,
+      skipped: artifact.skipped ++ skipped_gate_sets(unmatched_sets),
+      warnings: artifact.warnings ++ selector_warnings(unmatched_files),
+      changed_files: changed_files,
+      diff_source: diff_source,
+      metadata:
+        gate_metadata(artifact, opts)
+        |> Map.merge(%{
+          selector_mode: "changed_files",
+          matched_selectors: Enum.map(matched_sets, & &1.id),
+          unmatched_changed_files: unmatched_files
+        })
+    }
+  end
+
+  defp select_artifact_gates(artifact, opts) do
+    changed_files = opts |> Keyword.get(:changed_files, []) |> normalize_changed_files()
+    diff_source = opts |> Keyword.get(:changed_files_metadata, %{}) |> Map.get(:source)
+    gates = Enum.map(Map.get(artifact, :gates, []), &gate_definition/1)
+
+    %{
+      gates: gates,
+      selected: Enum.map(Map.get(artifact, :gates, []), &selected_reason/1),
+      skipped: Map.get(artifact, :skipped, []),
+      warnings: Map.get(artifact, :warnings, []),
+      changed_files: changed_files,
+      diff_source: diff_source,
+      metadata: gate_metadata(artifact, opts)
+    }
+  end
+
+  defp selected_gates_from_sets(gate_sets) do
+    gate_sets
+    |> Enum.flat_map(fn gate_set -> Enum.map(gate_set.gates, &{gate_set, &1}) end)
+    |> Enum.reduce({[], [], MapSet.new()}, fn {gate_set, gate}, {gates, selected, seen_names} ->
+      name = Map.fetch!(gate, :name)
+
+      if MapSet.member?(seen_names, name) do
+        {gates, selected, seen_names}
+      else
+        {gates ++ [gate_definition(gate)], selected ++ [selector_selected_reason(gate_set, gate)], MapSet.put(seen_names, name)}
+      end
+    end)
+    |> then(fn {gates, selected, _seen_names} -> {gates, selected} end)
+  end
+
+  defp selector_selected_reason(gate_set, gate) do
+    %{name: Map.fetch!(gate, :name), reason: Map.get(gate, :reason) || gate_set.reason <> " (#{Enum.join(gate_set.paths, ", ")})"}
+  end
+
+  defp skipped_gate_sets(gate_sets) do
+    Enum.map(gate_sets, &%{name: &1.id, reason: "no changed files matched selectors: #{Enum.join(&1.paths, ", ")}"})
+  end
+
+  defp selector_warnings(changed_files) do
+    Enum.map(changed_files, &%{message: "no provider gate selector matched changed file", path: &1})
+  end
+
+  defp unmatched_changed_files(changed_files, matched_sets) do
+    Enum.reject(changed_files, fn path -> Enum.any?(matched_sets, &path_matches_gate_set?(path, &1)) end)
+  end
+
+  defp gate_set_matches?(gate_set, changed_files), do: Enum.any?(changed_files, &path_matches_gate_set?(&1, gate_set))
+
+  defp path_matches_gate_set?(path, gate_set), do: Enum.any?(gate_set.paths, &path_matches_selector?(path, &1))
+
+  defp path_matches_selector?(path, selector) do
+    path = normalize_path(path)
+    selector = normalize_path(selector)
+
+    cond do
+      String.ends_with?(selector, "/") -> String.starts_with?(path, selector)
+      String.contains?(selector, ["*", "?"]) -> Regex.match?(glob_regex(selector), path)
+      true -> path == selector or String.starts_with?(path, selector <> "/")
+    end
+  end
+
+  defp glob_regex(selector) do
+    regex =
+      selector
+      |> Regex.escape()
+      |> String.replace("\\*\\*/", "(?:.*/)?")
+      |> String.replace("\\*\\*", ".*")
+      |> String.replace("\\*", "[^/]*")
+      |> String.replace("\\?", "[^/]")
+
+    Regex.compile!("^" <> regex <> "$")
+  end
+
+  defp normalize_changed_files(paths) when is_list(paths) do
+    paths
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&normalize_path/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp normalize_changed_files(_paths), do: []
+
+  defp normalize_path(path) do
+    path
+    |> String.trim()
+    |> String.replace("\\", "/")
+    |> String.trim_leading("./")
+  end
+
   defp gate_definition(gate) do
     Map.take(gate, [:name, :command, :timeout_ms, :action_id, :action_classes])
   end
@@ -296,7 +449,7 @@ defmodule Rondo.ProcessProvider.Beislid do
 
     - Artifact: #{artifact.id}
     - Source: #{artifact.source}
-    - Gate count: #{length(artifact.gates)}
+    - Gate count: #{length(artifact.gates)} flat, #{length(Map.get(artifact, :gate_sets, []))} selector sets
     - Guide/proof metadata: #{guide_status(artifact)}/#{proof_status(artifact)}
     """
   end
@@ -305,12 +458,16 @@ defmodule Rondo.ProcessProvider.Beislid do
     %{
       artifact: :ok,
       gate_selection: :ok,
+      changed_file_selectors: changed_file_selector_status(artifact),
       guide_selection: guide_status(artifact),
       proof_requirements: proof_status(artifact),
       model_routing_hints: model_routing_status(artifact),
       action_policy: action_policy_status(artifact)
     }
   end
+
+  defp changed_file_selector_status(%{gate_sets: gate_sets}) when is_list(gate_sets) and gate_sets != [], do: :ok
+  defp changed_file_selector_status(_artifact), do: :unsupported
 
   defp guide_status(%{guides: []}), do: :unsupported
   defp guide_status(%{guides: guides}) when is_list(guides), do: :deferred

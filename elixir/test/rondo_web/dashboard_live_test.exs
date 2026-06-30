@@ -1,7 +1,50 @@
 defmodule RondoWeb.DashboardLiveTest do
   use Rondo.TestSupport
 
-  alias RondoWeb.DashboardLive
+  alias RondoWeb.{ArchivedRuns, DashboardLive}
+
+  test "selecting an archived row opens the run inspector" do
+    socket = %Phoenix.LiveView.Socket{
+      assigns: %{
+        __changed__: %{},
+        payload: %{
+          archived: [
+            %{
+              issue_identifier: "MT-ARCH-1",
+              issue_title: "Archived visibility",
+              runs: [
+                %{
+                  filename: "2026-06-29T10-00-00Z.json",
+                  issue_identifier: "MT-ARCH-1",
+                  started_at: "2026-06-29T10:00:00Z",
+                  finished_at: "2026-06-29T10:10:00Z",
+                  exit_reason: "completed"
+                }
+              ]
+            }
+          ]
+        },
+        archived_filters: ArchivedRuns.default_filters(),
+        selected_issue: nil,
+        selected_issue_data: nil,
+        selected_runs: nil,
+        selected_run_index: 0
+      }
+    }
+
+    {:noreply, updated_socket} =
+      DashboardLive.handle_event(
+        "select_archived_run",
+        %{"identifier" => "MT-ARCH-1", "filename" => "2026-06-29T10-00-00Z.json"},
+        socket
+      )
+
+    assert updated_socket.assigns.selected_issue == "MT-ARCH-1"
+    assert updated_socket.assigns.selected_run_index == 0
+    assert [%{filename: "2026-06-29T10-00-00Z.json"}] = updated_socket.assigns.selected_runs
+    assert updated_socket.assigns.selected_issue_data.finished_at == "2026-06-29T10:10:00Z"
+    assert updated_socket.assigns.selected_issue_data.event_log == []
+  end
 
   test "renders readable last result summaries for active and archived runs" do
     report = %{
@@ -136,8 +179,26 @@ defmodule RondoWeb.DashboardLiveTest do
   end
 
   defp render_dashboard(assigns) do
-    DashboardLive.render(assigns)
+    DashboardLive.render(Map.merge(default_dashboard_assigns(), assigns))
     |> Phoenix.LiveViewTest.rendered_to_string()
+  end
+
+  defp default_dashboard_assigns do
+    %{
+      payload: dashboard_payload(),
+      now: DateTime.utc_now(),
+      log_filters: %{query: "", status: "all", window: "all", sort_by: "date", sort_dir: "desc"},
+      event_filters: %{query: "", role: "all"},
+      selected_event_index: 0,
+      selected_event_mode: :pretty,
+      selected_issue: nil,
+      selected_issue_data: nil,
+      selected_outcome: nil,
+      selected_runs: nil,
+      selected_run_index: 0,
+      selected_run_projection: nil,
+      archived_filters: ArchivedRuns.default_filters()
+    }
   end
 
   defp dashboard_payload do

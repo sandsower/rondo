@@ -38,21 +38,25 @@ defmodule Rondo.ReleaseLoop do
       is_nil(repo) or String.trim(to_string(repo)) == "" ->
         {:skip, :missing_repo, ledger}
 
-      is_nil(issue.branch_name) or String.trim(issue.branch_name) == "" ->
-        {:skip, :missing_branch, ledger}
-
       true ->
-        with {:ok, pr} <- find_pull_request(repo, issue.branch_name, opts),
-             {:ok, snapshot} <- fetch_review_snapshot(repo, pr, config, opts),
-             {:ok, ledger} <- record_snapshot(ledger, issue, pr, snapshot, config),
-             {:ok, risk_result, ledger} <- assess_risk_gate(issue, pr, snapshot, config, opts, ledger) do
-          case risk_result do
-            {:skip, reason} -> {:skip, reason, ledger}
-            risk_assessment -> plan_action(issue, pr, snapshot, config, opts, ledger, risk_assessment)
-          end
-        else
-          {:skip, reason} -> {:skip, reason, ledger}
-          {:error, reason} -> {:error, reason, ledger}
+        case find_pull_request(repo, issue, ledger, opts) do
+          {:ok, pr, ledger} ->
+            with {:ok, snapshot} <- fetch_review_snapshot(repo, pr, config, opts),
+                 {:ok, ledger} <- record_snapshot(ledger, issue, pr, snapshot, config),
+                 {:ok, risk_result, ledger} <- assess_risk_gate(issue, pr, snapshot, config, opts, ledger) do
+              case risk_result do
+                {:skip, reason} -> {:skip, reason, ledger}
+                risk_assessment -> plan_action(issue, pr, snapshot, config, opts, ledger, risk_assessment)
+              end
+            else
+              {:error, reason} -> {:error, reason, ledger}
+            end
+
+          {:skip, reason, ledger} ->
+            {:skip, reason, ledger}
+
+          {:error, reason} ->
+            {:error, reason, ledger}
         end
     end
   end
@@ -75,14 +79,51 @@ defmodule Rondo.ReleaseLoop do
       _ ->
         with {:ok, ledger} <- maybe_run_release_gates(workspace, decision, config, opts, ledger),
              {:ok, ledger} <- authorize_merge(issue, pr, config, opts, ledger),
-             :ok <- merge_pull_request(pr, config, opts),
-             :ok <- transition_issue_to_done(issue, config, opts),
+             {:ok, ledger} <- merge_pull_request(pr, config, opts, ledger),
+             {:ok, ledger} <- transition_issue_to_done(issue, config, opts, ledger),
              {:ok, ledger} <- record_closeout_success(ledger, issue, pr, review_snapshot, config) do
           {:ok, Map.put(decision, :closed_out?, true), ledger}
         else
-          {:skip, reason, ledger} -> {:skip, reason, ledger}
-          {:error, reason, ledger} -> {:error, reason, ledger}
-          {:error, reason} -> {:error, reason}
+          {:skip, reason, ledger} ->
+            case record_closeout_failure(ledger, issue, pr, reason, closeout_failure_stage(reason), config) do
+              {:ok, ledger} -> {:skip, reason, ledger}
+              {:error, write_reason, ledger} -> {:error, write_reason, ledger}
+            end
+
+          {:error, reason, ledger} ->
+            case record_closeout_failure(ledger, issue, pr, reason, closeout_failure_stage(reason), config) do
+              {:ok, ledger} -> {:error, reason, ledger}
+              {:error, write_reason, ledger} -> {:error, write_reason, ledger}
+            end
+
+          {:error, reason} ->
+            case record_closeout_failure(ledger, issue, pr, reason, closeout_failure_stage(reason), config) do
+              {:ok, ledger} -> {:error, reason, ledger}
+              {:error, write_reason, ledger} -> {:error, write_reason, ledger}
+            end
+        end
+    end
+  end
+
+  @spec execute_ready(Issue.t(), map(), keyword()) ::
+          {:ok, map(), RunLedger.t() | nil}
+          | {:skip, term(), RunLedger.t() | nil}
+          | {:error, term(), RunLedger.t() | nil}
+  def execute_ready(%Issue{} = issue, decision, opts \\ []) when is_map(decision) do
+    ledger = Keyword.get(opts, :ledger)
+    config = Keyword.get(opts, :release_loop) || Config.release_loop() || %{}
+    pr = Map.fetch!(decision, :pr)
+    review_snapshot = Map.fetch!(decision, :review_snapshot)
+
+    with {:ok, ledger} <- authorize_ready(issue, pr, config, opts, ledger),
+         {:ok, ledger} <- ready_pull_request(pr, opts, ledger),
+         {:ok, ledger} <- record_ready_success(ledger, issue, pr, review_snapshot, config) do
+      {:ok, Map.put(decision, :ready?, true), ledger}
+    else
+      {:error, reason, ledger} ->
+        case record_closeout_failure(ledger, issue, pr, reason, :ready, config) do
+          {:ok, ledger} -> {:error, reason, ledger}
+          {:error, write_reason, ledger} -> {:error, write_reason, ledger}
         end
     end
   end
@@ -133,7 +174,9 @@ defmodule Rondo.ReleaseLoop do
     #{if feedback_block == "", do: "- none", else: feedback_block}
 
     Tasks:
-    - If the PR is conflicting, resolve the merge/rebase conflict in the workspace, rerun verification, and push the updated branch.
+    #{if conflict_block == "", do: "", else: "- If the PR is conflicting, resolve the merge/rebase conflict in the workspace, rerun verification, and push the updated branch.\n"}
+    #{if checks_failed?(checks), do: "- Fix the failing checks and rerun the configured gates.\n", else: ""}
+    #{if branch_freshness_issue?(merge_state_status), do: "- Rebase or refresh the branch against the base branch, then rerun verification and push the updated branch.\n", else: ""}
     - If a comment is incorrect or not actionable, post a concise justified pushback reply.
     - Fix actionable feedback in the workspace.
     - Re-run the configured gates before any push/merge boundary.
@@ -152,11 +195,278 @@ defmodule Rondo.ReleaseLoop do
     end
   end
 
-  defp find_pull_request(repo, branch, opts) do
+  defp find_pull_request(repo, %Issue{} = issue, ledger, opts) do
+    candidates = pull_request_candidates(issue, ledger)
+
+    case resolve_pull_request_candidates(repo, candidates, opts) do
+      {:ok, discovery} ->
+        case record_pr_discovery(ledger, issue, discovery, candidates) do
+          {:ok, %{pr: pr, ledger: discovered_ledger}} -> {:ok, pr, discovered_ledger}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:skip, reason} ->
+        record_pr_discovery_missing(ledger, issue, candidates, reason)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp pull_request_candidates(%Issue{} = issue, ledger) do
+    []
+    |> maybe_add_branch_candidate(issue.branch_name)
+    |> Kernel.++(issue_context_pr_candidates(issue))
+    |> Kernel.++(ledger_pr_candidates(ledger))
+    |> Enum.uniq_by(fn candidate -> {Map.get(candidate, :kind), Map.get(candidate, :reference), Map.get(candidate, :number)} end)
+  end
+
+  defp maybe_add_branch_candidate(candidates, branch_name) when is_binary(branch_name) do
+    branch = String.trim(branch_name)
+
+    if branch == "" do
+      candidates
+    else
+      candidates ++ [%{kind: :branch, source: "branch", reference: branch}]
+    end
+  end
+
+  defp maybe_add_branch_candidate(candidates, _branch_name), do: candidates
+
+  defp issue_context_pr_candidates(%Issue{id: issue_id}) do
+    case Tracker.fetch_issue_contexts_by_ids([issue_id]) do
+      {:ok, [%{snapshot: snapshot} | _]} -> snapshot_pr_candidates(snapshot, "issue_context")
+      _ -> []
+    end
+  end
+
+  defp ledger_pr_candidates(nil), do: []
+
+  defp ledger_pr_candidates(%RunLedger{} = ledger) do
+    manifest = ledger.manifest || %{}
+
+    manifest
+    |> get_in(["agent", "final_report"])
+    |> snapshot_pr_candidates("final_report")
+  end
+
+  defp snapshot_pr_candidates(nil, _source), do: []
+
+  defp snapshot_pr_candidates(snapshot, source) when is_map(snapshot) do
+    snapshot
+    |> candidate_text_sources()
+    |> Enum.flat_map(&extract_pr_candidates_from_text/1)
+    |> Enum.map(&Map.put(&1, :source, source))
+  end
+
+  defp snapshot_pr_candidates(snapshot, source) when is_binary(snapshot) do
+    snapshot
+    |> extract_pr_candidates_from_text()
+    |> Enum.map(&Map.put(&1, :source, source))
+  end
+
+  defp snapshot_pr_candidates(snapshot, source) do
+    snapshot
+    |> to_candidate_text()
+    |> extract_pr_candidates_from_text()
+    |> Enum.map(&Map.put(&1, :source, source))
+  end
+
+  defp candidate_text_sources(snapshot) when is_map(snapshot) do
+    []
+    |> append_candidate_text(Map.get(snapshot, "title"))
+    |> append_candidate_text(Map.get(snapshot, "description"))
+    |> append_candidate_text(Map.get(snapshot, "body"))
+    |> append_comment_texts(Map.get(snapshot, "comments", []))
+    |> append_attachment_texts(Map.get(snapshot, "attachments", []))
+    |> append_custom_field_texts(Map.get(snapshot, "custom_fields", %{}))
+  end
+
+  defp append_candidate_text(texts, value) do
+    texts ++ maybe_wrap_candidate_text(to_candidate_text(value))
+  end
+
+  defp append_comment_texts(texts, comments) when is_list(comments) do
+    texts ++
+      Enum.flat_map(comments, fn comment ->
+        maybe_wrap_candidate_text(to_candidate_text(Map.get(comment, "body") || Map.get(comment, :body)))
+      end)
+  end
+
+  defp append_comment_texts(texts, _comments), do: texts
+
+  defp append_attachment_texts(texts, attachments) when is_list(attachments) do
+    texts ++
+      Enum.flat_map(attachments, fn attachment ->
+        [Map.get(attachment, "url"), Map.get(attachment, "title"), Map.get(attachment, "subtitle")]
+        |> Enum.flat_map(&maybe_wrap_candidate_text(to_candidate_text(&1)))
+      end)
+  end
+
+  defp append_attachment_texts(texts, _attachments), do: texts
+
+  defp append_custom_field_texts(texts, custom_fields) when is_map(custom_fields) do
+    texts ++
+      (custom_fields
+       |> Map.values()
+       |> Enum.flat_map(&maybe_wrap_candidate_text(to_candidate_text(&1))))
+  end
+
+  defp append_custom_field_texts(texts, _custom_fields), do: texts
+
+  defp maybe_wrap_candidate_text(nil), do: []
+  defp maybe_wrap_candidate_text(""), do: []
+  defp maybe_wrap_candidate_text(text), do: [text]
+
+  defp to_candidate_text(value) when is_binary(value), do: String.trim(value)
+  defp to_candidate_text(value) when is_atom(value), do: value |> Atom.to_string() |> String.trim()
+  defp to_candidate_text(value) when is_integer(value), do: Integer.to_string(value)
+  defp to_candidate_text(value) when is_float(value), do: :erlang.float_to_binary(value)
+  defp to_candidate_text(value) when is_map(value), do: Jason.encode!(value)
+  defp to_candidate_text(value) when is_list(value), do: Enum.map_join(value, " ", &to_candidate_text/1) |> String.trim()
+  defp to_candidate_text(_value), do: nil
+
+  @pr_reference_patterns [
+    ~r/(?:github\.com\/[^\/]+\/[^\/]+\/pull\/)(\d+)/i,
+    ~r/\b(?:pr|pull request)\s*#?(\d+)\b/i
+  ]
+
+  defp extract_pr_candidates_from_text(text) when is_binary(text) do
+    text
+    |> candidate_pr_numbers()
+    |> Enum.map(&%{kind: :number, number: &1, reference: text})
+  end
+
+  defp extract_pr_candidates_from_text(_text), do: []
+
+  defp candidate_pr_numbers(text) when is_binary(text) do
+    text
+    |> String.trim()
+    |> case do
+      "" ->
+        []
+
+      trimmed ->
+        @pr_reference_patterns
+        |> Enum.flat_map(fn pattern ->
+          Regex.scan(pattern, trimmed, capture: :all_but_first)
+          |> Enum.flat_map(fn captures ->
+            captures
+            |> List.wrap()
+            |> Enum.flat_map(fn
+              value when is_binary(value) ->
+                case Integer.parse(value) do
+                  {int, _} -> [int]
+                  :error -> []
+                end
+
+              _ ->
+                []
+            end)
+          end)
+        end)
+        |> Enum.uniq()
+    end
+  end
+
+  defp resolve_pull_request_candidates(_repo, [], _opts), do: {:skip, :no_pr}
+
+  defp resolve_pull_request_candidates(repo, [candidate | rest], opts) do
+    case resolve_pull_request_candidate(repo, candidate, opts) do
+      {:ok, pr} -> {:ok, %{pr: normalize_pr(pr), discovery: candidate}}
+      {:skip, _reason} -> resolve_pull_request_candidates(repo, rest, opts)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp resolve_pull_request_candidate(repo, %{kind: :branch, reference: branch}, opts) do
     case PullRequest.find_open_by_branch(repo, branch, opts) do
       {:ok, nil} -> {:skip, :no_pr}
-      {:ok, pr} when is_map(pr) -> {:ok, normalize_pr(pr)}
+      {:ok, pr} when is_map(pr) -> {:ok, pr}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp resolve_pull_request_candidate(repo, %{kind: :number, number: number}, opts) when is_integer(number) do
+    case PullRequest.view(number, repo, opts) do
+      {:ok, %{"state" => state} = pr} ->
+        if String.upcase(String.trim(to_string(state))) == "OPEN" do
+          {:ok, pr}
+        else
+          {:skip, {:closed_pr, state}}
+        end
+
+      {:ok, _pr} ->
+        {:skip, :no_pr}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp resolve_pull_request_candidate(_repo, _candidate, _opts), do: {:skip, :no_pr}
+
+  defp record_pr_discovery(nil, _issue, discovery, _candidates), do: {:ok, Map.put(discovery, :ledger, nil)}
+
+  defp record_pr_discovery(%RunLedger{} = ledger, issue, %{pr: pr, discovery: discovery}, candidates) do
+    payload = %{
+      issue: issue.identifier || issue.id,
+      pr: Map.take(pr, [:number, :url, :title, :head_ref_name, :base_ref_name]),
+      source: Map.get(discovery, :source),
+      reference: Map.get(discovery, :reference),
+      candidate_count: length(candidates)
+    }
+
+    manifest_update = fn manifest ->
+      update_in(manifest, ["release_loop"], fn release_loop ->
+        Map.merge(release_loop || %{}, %{
+          "pr_discovery" => %{
+            "source" => Map.get(discovery, :source),
+            "reference" => Map.get(discovery, :reference),
+            "candidate_count" => length(candidates),
+            "pr" => Map.take(pr, [:number, :url, :title, :head_ref_name, :base_ref_name])
+          }
+        })
+      end)
+    end
+
+    case RunLedger.write_checkpoint(ledger, :release_loop_pr_discovered, payload,
+           source: %{loop: "babysit"},
+           manifest_update: manifest_update
+         ) do
+      {:ok, ledger} -> {:ok, %{pr: pr, discovery: discovery, ledger: ledger}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp record_pr_discovery_missing(nil, _issue, _candidates, reason), do: {:skip, reason, nil}
+
+  defp record_pr_discovery_missing(%RunLedger{} = ledger, issue, candidates, reason) do
+    payload = %{
+      issue: issue.identifier || issue.id,
+      reason: Kernel.inspect(reason),
+      candidate_count: length(candidates),
+      candidates: Enum.map(candidates, fn candidate -> Map.take(candidate, [:kind, :source, :reference, :number]) end)
+    }
+
+    manifest_update = fn manifest ->
+      update_in(manifest, ["release_loop"], fn release_loop ->
+        Map.merge(release_loop || %{}, %{
+          "pr_discovery" => %{
+            "status" => "missing",
+            "reason" => Kernel.inspect(reason),
+            "candidate_count" => length(candidates)
+          }
+        })
+      end)
+    end
+
+    case RunLedger.write_checkpoint(ledger, :release_loop_pr_missing, payload,
+           source: %{loop: "babysit"},
+           manifest_update: manifest_update
+         ) do
+      {:ok, ledger} -> {:skip, reason, ledger}
+      {:error, write_reason} -> {:error, write_reason}
     end
   end
 
@@ -315,10 +625,10 @@ defmodule Rondo.ReleaseLoop do
   defp plan_action(issue, pr, snapshot, config, opts, ledger, risk_assessment) do
     feedback_queue = feedback_queue(snapshot)
     checks = Map.get(snapshot, :checks, %{})
-    _review_decision = Map.get(snapshot, :review_decision)
     mergeable = Map.get(snapshot, :mergeable)
     merge_state_status = Map.get(snapshot, :merge_state_status)
     recovery_kind = recovery_kind(snapshot)
+    closeout_mode = closeout_state(config)
 
     decision =
       cond do
@@ -336,10 +646,47 @@ defmodule Rondo.ReleaseLoop do
             merge_state_status: merge_state_status,
             risk_assessment: risk_assessment,
             guidance: build_review_response_prompt(pr, snapshot),
-            reply_preview: build_reply_preview(issue, pr, snapshot)
+            reply_preview: build_reply_preview(issue, pr, snapshot),
+            closeout_state: closeout_mode
           }
 
-        checks_pending?(checks) or mergeable_pending(mergeable, merge_state_status) ->
+        checks_failed?(checks) ->
+          %{
+            action: :fix,
+            pr: pr,
+            review_snapshot: snapshot,
+            feedback_queue: feedback_queue,
+            feedback_comment_ids: feedback_comment_ids(snapshot),
+            conflict_files: Map.get(snapshot, :conflict_files, []),
+            recovery_kind: :verification_failure,
+            checks: checks,
+            mergeable: mergeable,
+            merge_state_status: merge_state_status,
+            risk_assessment: risk_assessment,
+            guidance: build_review_response_prompt(pr, snapshot),
+            reply_preview: build_reply_preview(issue, pr, snapshot),
+            closeout_state: closeout_mode
+          }
+
+        branch_freshness_issue?(merge_state_status) ->
+          %{
+            action: :fix,
+            pr: pr,
+            review_snapshot: snapshot,
+            feedback_queue: feedback_queue,
+            feedback_comment_ids: feedback_comment_ids(snapshot),
+            conflict_files: Map.get(snapshot, :conflict_files, []),
+            recovery_kind: :rebase,
+            checks: checks,
+            mergeable: mergeable,
+            merge_state_status: merge_state_status,
+            risk_assessment: risk_assessment,
+            guidance: build_review_response_prompt(pr, snapshot),
+            reply_preview: build_reply_preview(issue, pr, snapshot),
+            closeout_state: closeout_mode
+          }
+
+        checks_pending?(checks) ->
           %{
             action: :wait,
             pr: pr,
@@ -351,10 +698,44 @@ defmodule Rondo.ReleaseLoop do
             mergeable: mergeable,
             merge_state_status: merge_state_status,
             risk_assessment: risk_assessment,
-            wait_interval_seconds: Map.get(config, :wait_interval_seconds, Config.release_loop_wait_interval_seconds())
+            blocked_reason: :checks_pending,
+            wait_interval_seconds: Map.get(config, :wait_interval_seconds, Config.release_loop_wait_interval_seconds()),
+            closeout_state: closeout_mode
           }
 
-        green_to_close?(snapshot) ->
+        mergeable_pending(mergeable, merge_state_status) ->
+          %{
+            action: :wait,
+            pr: pr,
+            review_snapshot: snapshot,
+            feedback_queue: feedback_queue,
+            feedback_comment_ids: feedback_comment_ids(snapshot),
+            conflict_files: Map.get(snapshot, :conflict_files, []),
+            checks: checks,
+            mergeable: mergeable,
+            merge_state_status: merge_state_status,
+            risk_assessment: risk_assessment,
+            blocked_reason: :mergeability_unknown,
+            wait_interval_seconds: Map.get(config, :wait_interval_seconds, Config.release_loop_wait_interval_seconds()),
+            closeout_state: closeout_mode
+          }
+
+        green_to_close?(snapshot) and draft_pull_request?(snapshot) ->
+          %{
+            action: :ready,
+            pr: pr,
+            review_snapshot: snapshot,
+            feedback_queue: feedback_queue,
+            feedback_comment_ids: feedback_comment_ids(snapshot),
+            conflict_files: Map.get(snapshot, :conflict_files, []),
+            checks: checks,
+            mergeable: mergeable,
+            merge_state_status: merge_state_status,
+            risk_assessment: risk_assessment,
+            closeout_state: closeout_mode
+          }
+
+        green_to_close?(snapshot) and closeout_mode == "merge" ->
           %{
             action: :merge,
             pr: pr,
@@ -366,7 +747,24 @@ defmodule Rondo.ReleaseLoop do
             mergeable: mergeable,
             merge_state_status: merge_state_status,
             risk_assessment: risk_assessment,
-            closeout_state: closeout_state(config)
+            closeout_state: closeout_mode
+          }
+
+        green_to_close?(snapshot) ->
+          %{
+            action: :wait,
+            pr: pr,
+            review_snapshot: snapshot,
+            feedback_queue: feedback_queue,
+            feedback_comment_ids: feedback_comment_ids(snapshot),
+            conflict_files: Map.get(snapshot, :conflict_files, []),
+            checks: checks,
+            mergeable: mergeable,
+            merge_state_status: merge_state_status,
+            risk_assessment: risk_assessment,
+            blocked_reason: "merge_mode_blocked:#{closeout_mode}",
+            wait_interval_seconds: Map.get(config, :wait_interval_seconds, Config.release_loop_wait_interval_seconds()),
+            closeout_state: closeout_mode
           }
 
         true ->
@@ -381,7 +779,9 @@ defmodule Rondo.ReleaseLoop do
             mergeable: mergeable,
             merge_state_status: merge_state_status,
             risk_assessment: risk_assessment,
-            wait_interval_seconds: Map.get(config, :wait_interval_seconds, Config.release_loop_wait_interval_seconds())
+            blocked_reason: :not_ready,
+            wait_interval_seconds: Map.get(config, :wait_interval_seconds, Config.release_loop_wait_interval_seconds()),
+            closeout_state: closeout_mode
           }
       end
 
@@ -406,10 +806,20 @@ defmodule Rondo.ReleaseLoop do
           decision
         else
           top_comment = actionable_comment(snapshot)
+          reply_side_effect = review_reply_side_effect(pr, top_comment)
 
-          case post_reply_via_command(command, repo, pr, top_comment, reply_preview, opts) do
-            {:ok, _output} -> record_reply_activity(ledger, decision, :posted, %{reply_preview: reply_preview, comment_id: Map.get(top_comment, :id)})
-            {:error, reason} -> record_reply_activity(ledger, decision, :failed, %{reply_preview: reply_preview, comment_id: Map.get(top_comment, :id), error: Kernel.inspect(reason)})
+          case SideEffectPolicy.evaluate(reply_side_effect, ledger: ledger, workspace: Keyword.get(opts, :workspace)) do
+            {:ok, policy} ->
+              policy_ledger = Map.get(policy, :ledger, ledger)
+
+              case post_reply_via_command(command, repo, pr, top_comment, reply_preview, opts) do
+                {:ok, _output} -> record_reply_activity(policy_ledger, decision, :posted, %{reply_preview: reply_preview, comment_id: Map.get(top_comment, :id)})
+                {:error, reason} -> record_reply_activity(policy_ledger, decision, :failed, %{reply_preview: reply_preview, comment_id: Map.get(top_comment, :id), error: Kernel.inspect(reason)})
+              end
+
+            {:blocked, %{block_reason: reason} = policy} ->
+              policy_ledger = Map.get(policy, :ledger, ledger)
+              record_reply_activity(policy_ledger, decision, :blocked, %{reply_preview: reply_preview, comment_id: Map.get(top_comment, :id), error: Kernel.inspect(reason)})
           end
 
           decision
@@ -422,6 +832,34 @@ defmodule Rondo.ReleaseLoop do
   end
 
   defp maybe_post_reply(decision, _opts), do: decision
+
+  defp release_side_effect(action, issue, pr, label, operation, resume_safe \\ false) do
+    %{
+      action: action,
+      classes: ["git-remote"],
+      label: label,
+      operation: "#{operation} PR #{Map.get(pr, :number)} for #{issue.identifier || issue.id}",
+      required: true,
+      resume_safe: resume_safe,
+      skip_behavior: "block",
+      side_effect_id: "#{action}:#{issue.id}:#{Map.get(pr, :number)}"
+    }
+  end
+
+  defp review_reply_side_effect(pr, comment) do
+    comment_id = Map.get(comment, :id, "no-comment")
+
+    %{
+      action: "pr.review.reply",
+      classes: ["git-remote"],
+      label: "Review reply",
+      operation: "Reply to review feedback for PR #{Map.get(pr, :number)}",
+      required: true,
+      resume_safe: true,
+      skip_behavior: "block",
+      side_effect_id: "pr-review-reply:#{Map.get(pr, :number)}:#{comment_id}"
+    }
+  end
 
   defp post_reply_via_command(command, repo, pr, comment, body, opts) do
     env =
@@ -444,13 +882,14 @@ defmodule Rondo.ReleaseLoop do
 
   defp maybe_run_release_gates(nil, _decision, _config, _opts, ledger), do: {:ok, ledger}
 
-  defp maybe_run_release_gates(workspace, %{action: :merge} = decision, config, _opts, ledger) when is_binary(workspace) do
+  defp maybe_run_release_gates(workspace, %{action: :merge} = decision, config, opts, ledger) when is_binary(workspace) do
     if Map.get(config, :run_configured_gates_before_push, true) do
       case Gates.run(Config.gates(), workspace,
              run_dir: Map.get(ledger || %{}, :run_dir),
              execution_id: "release-loop-merge",
              action_policy: true,
-             action_policy_evaluator: &ActionPolicy.evaluate/3
+             action_policy_evaluator: &ActionPolicy.evaluate/3,
+             worker_host: Keyword.get(opts, :worker_host)
            ) do
         {:ok, summary} ->
           ledger = record_release_gate_summary(ledger, decision, summary)
@@ -471,16 +910,25 @@ defmodule Rondo.ReleaseLoop do
   defp maybe_run_release_gates(_workspace, _decision, _config, _opts, ledger), do: {:ok, ledger}
 
   defp authorize_merge(issue, pr, _config, opts, ledger) do
-    side_effect = %{
-      action: "pr.merge",
-      classes: ["git-remote"],
-      label: "PR merge",
-      operation: "Merge PR #{Map.get(pr, :number)} for #{issue.identifier || issue.id}",
-      required: true,
-      resume_safe: false,
-      skip_behavior: "block",
-      side_effect_id: "pr-merge:#{issue.id}:#{Map.get(pr, :number)}"
-    }
+    side_effect = release_side_effect("gh.pr.merge", issue, pr, "PR merge", "Merge")
+
+    case SideEffectPolicy.evaluate(side_effect, ledger: ledger, workspace: Keyword.get(opts, :workspace), worker_host: Keyword.get(opts, :worker_host)) do
+      {:ok, decision} ->
+        {:ok, Map.get(decision, :ledger, ledger)}
+
+      {:blocked, %{block_reason: :action_policy_requires_guidance, interrupt: interrupt} = decision} ->
+        {:error, {:action_policy_guidance_required, interrupt}, Map.get(decision, :ledger, ledger)}
+
+      {:blocked, %{block_reason: :action_policy_denied, envelope: envelope} = decision} ->
+        {:error, {:action_policy_denied, envelope}, Map.get(decision, :ledger, ledger)}
+
+      {:blocked, %{block_reason: {:action_policy_failed, reason}} = decision} ->
+        {:error, {:action_policy_failed, reason}, Map.get(decision, :ledger, ledger)}
+    end
+  end
+
+  defp authorize_ready(issue, pr, _config, opts, ledger) do
+    side_effect = release_side_effect("gh.pr.ready", issue, pr, "PR ready", "Mark ready", true)
 
     case SideEffectPolicy.evaluate(side_effect, ledger: ledger, workspace: Keyword.get(opts, :workspace)) do
       {:ok, decision} ->
@@ -497,7 +945,7 @@ defmodule Rondo.ReleaseLoop do
     end
   end
 
-  defp merge_pull_request(pr, config, opts) do
+  defp merge_pull_request(pr, config, opts, ledger) do
     repo = Keyword.get(opts, :repo, Config.tracker_repo())
     merge_config = Map.get(config, :closeout, %{}) |> Map.get(:merge, %{})
     method = Map.get(merge_config, :method, "merge")
@@ -509,17 +957,29 @@ defmodule Rondo.ReleaseLoop do
            delete_branch: delete_branch?,
            runner: Keyword.get(opts, :runner, &System.cmd/3)
          ) do
-      :ok -> :ok
-      {:error, reason} -> {:error, reason}
+      :ok -> {:ok, ledger}
+      {:error, reason} -> {:error, reason, ledger}
     end
   end
 
-  defp transition_issue_to_done(%Issue{} = issue, config, _opts) do
+  defp ready_pull_request(pr, opts, ledger) do
+    repo = Keyword.get(opts, :repo, Config.tracker_repo())
+
+    case PullRequest.ready(Map.fetch!(pr, :number),
+           repo: repo,
+           runner: Keyword.get(opts, :runner, &System.cmd/3)
+         ) do
+      :ok -> {:ok, ledger}
+      {:error, reason} -> {:error, reason, ledger}
+    end
+  end
+
+  defp transition_issue_to_done(%Issue{} = issue, config, _opts, ledger) do
     done_state = Map.get(config, :done_state, Config.release_loop_done_state())
 
     case Tracker.update_issue_state(issue.id, done_state) do
-      :ok -> :ok
-      {:error, reason} -> {:error, {:issue_state_transition_failed, reason}}
+      :ok -> {:ok, ledger}
+      {:error, reason} -> {:error, {:issue_state_transition_failed, reason}, ledger}
     end
   end
 
@@ -528,7 +988,7 @@ defmodule Rondo.ReleaseLoop do
   defp record_snapshot(%RunLedger{} = ledger, issue, pr, snapshot, _config) do
     payload = %{
       issue: issue.identifier || issue.id,
-      pr: Map.take(pr, [:number, :url, :title, :head_ref_name, :base_ref_name]),
+      pr: Map.take(pr, [:number, :url, :title, :head_ref_name, :base_ref_name, :is_draft]),
       review_decision: Map.get(snapshot, :review_decision),
       mergeable: Map.get(snapshot, :mergeable),
       merge_state_status: Map.get(snapshot, :merge_state_status),
@@ -863,8 +1323,9 @@ defmodule Rondo.ReleaseLoop do
 
     payload = %{
       issue: issue.identifier || issue.id,
-      pr: Map.take(pr, [:number, :url, :title, :head_ref_name, :base_ref_name]),
+      pr: Map.take(pr, [:number, :url, :title, :head_ref_name, :base_ref_name, :is_draft]),
       action: Map.get(decision, :action),
+      blocked_reason: Map.get(decision, :blocked_reason),
       recovery_kind: Map.get(decision, :recovery_kind),
       wait_interval_seconds: Map.get(decision, :wait_interval_seconds),
       feedback_count: length(Map.get(decision, :feedback_queue, [])),
@@ -879,7 +1340,8 @@ defmodule Rondo.ReleaseLoop do
       review_state: Map.get(config, :review_state),
       rework_state: Map.get(config, :rework_state),
       merge_state: Map.get(config, :merge_state),
-      done_state: Map.get(config, :done_state)
+      done_state: Map.get(config, :done_state),
+      closeout_state: Map.get(decision, :closeout_state)
     }
 
     case RunLedger.write_checkpoint(ledger, :release_loop_plan, payload, source: %{loop: "babysit"}) do
@@ -925,9 +1387,54 @@ defmodule Rondo.ReleaseLoop do
 
     case RunLedger.write_checkpoint(ledger, :release_loop_closeout_completed, payload, source: %{loop: "babysit"}) do
       {:ok, ledger} -> {:ok, ledger}
-      {:error, reason} -> {:error, reason}
+      {:error, reason} -> {:error, reason, ledger}
     end
   end
+
+  defp record_ready_success(nil, _issue, _pr, _snapshot, _config), do: {:ok, nil}
+
+  defp record_ready_success(%RunLedger{} = ledger, issue, pr, snapshot, config) do
+    payload = %{
+      issue: issue.identifier || issue.id,
+      pr: Map.take(pr, [:number, :url, :title]),
+      review_decision: Map.get(snapshot, :review_decision),
+      mergeable: Map.get(snapshot, :mergeable),
+      review_state: Map.get(config, :review_state, Config.release_loop_review_state())
+    }
+
+    case RunLedger.write_checkpoint(ledger, :release_loop_ready_completed, payload, source: %{loop: "babysit"}) do
+      {:ok, ledger} -> {:ok, ledger}
+      {:error, reason} -> {:error, reason, ledger}
+    end
+  end
+
+  defp record_closeout_failure(nil, _issue, _pr, _reason, _stage, _config), do: {:ok, nil}
+
+  defp record_closeout_failure(%RunLedger{} = ledger, issue, pr, reason, stage, config) do
+    payload = %{
+      issue: issue.identifier || issue.id,
+      pr: Map.take(pr, [:number, :url, :title]),
+      stage: stage,
+      reason: Kernel.inspect(reason),
+      closeout_state: Map.get(config, :merge_state, Config.release_loop_merge_state()),
+      review_state: Map.get(config, :review_state, Config.release_loop_review_state())
+    }
+
+    case RunLedger.write_checkpoint(ledger, :release_loop_closeout_failed, payload, source: %{loop: "babysit"}) do
+      {:ok, ledger} -> {:ok, ledger}
+      {:error, write_reason} -> {:error, write_reason, ledger}
+    end
+  end
+
+  defp closeout_failure_stage({:github_cli_failed, ["pr", "merge" | _], _status, _output}), do: :merge
+  defp closeout_failure_stage({:github_cli_failed, ["pr", "ready" | _], _status, _output}), do: :ready
+  defp closeout_failure_stage({:release_loop_gate_failed, _summary}), do: :gates
+  defp closeout_failure_stage({:release_loop_gate_error, _reason}), do: :gates
+  defp closeout_failure_stage({:action_policy_guidance_required, _interrupt}), do: :policy
+  defp closeout_failure_stage({:action_policy_denied, _envelope}), do: :policy
+  defp closeout_failure_stage({:action_policy_failed, _reason}), do: :policy
+  defp closeout_failure_stage({:issue_state_transition_failed, _reason}), do: :transition
+  defp closeout_failure_stage(_reason), do: :closeout
 
   defp green_to_close?(snapshot) do
     checks = Map.get(snapshot, :checks, %{})
@@ -950,6 +1457,16 @@ defmodule Rondo.ReleaseLoop do
 
   defp checks_pending?(_), do: false
 
+  defp checks_failed?(%{state: state, conclusion: conclusion}) do
+    normalized_state = string_value(state) |> String.downcase()
+    normalized_conclusion = string_value(conclusion) |> String.downcase()
+
+    normalized_state in ["failure", "failed", "error"] or
+      normalized_conclusion in ["failure", "failed", "error", "cancelled", "timed_out", "stale", "action_required", "startup_failure"]
+  end
+
+  defp checks_failed?(_), do: false
+
   defp approved_review?(snapshot) do
     case Map.get(snapshot, :review_decision) do
       decision when is_binary(decision) -> String.downcase(String.trim(decision)) in ["approved", "approval", "ready"]
@@ -957,11 +1474,20 @@ defmodule Rondo.ReleaseLoop do
     end
   end
 
+  defp draft_pull_request?(snapshot) do
+    pr = Map.get(snapshot, :pr, %{})
+    boolean_value(first_present(pr, [:is_draft, "is_draft", "isDraft"])) == true
+  end
+
+  defp branch_freshness_issue?(merge_state_status) do
+    (string_value(merge_state_status) |> String.downcase()) in ["dirty", "behind"]
+  end
+
   defp mergeable_pending(mergeable, merge_state_status) do
     mergeable_value = string_value(mergeable) |> String.downcase()
     merge_state = string_value(merge_state_status) |> String.downcase()
 
-    mergeable_value in ["unknown", ""] or merge_state in ["dirty", "unknown", "behind"]
+    mergeable_value in ["unknown", ""] or merge_state in ["unknown"]
   end
 
   defp requested_changes?(snapshot) do
@@ -995,6 +1521,8 @@ defmodule Rondo.ReleaseLoop do
       conflict? -> :conflict
       requested_changes?(snapshot) -> :review_feedback
       feedback_queue != [] -> :review_feedback
+      checks_failed?(Map.get(snapshot, :checks, %{})) -> :verification_failure
+      branch_freshness_issue?(Map.get(snapshot, :merge_state_status)) -> :rebase
       true -> nil
     end
   end
@@ -1187,9 +1715,17 @@ defmodule Rondo.ReleaseLoop do
       recovery_kind(snapshot) != nil ->
         :fix
 
-      checks_pending?(Map.get(snapshot, :checks, %{})) or
-          mergeable_pending(Map.get(snapshot, :mergeable), Map.get(snapshot, :merge_state_status)) ->
+      branch_freshness_issue?(Map.get(snapshot, :merge_state_status)) ->
+        :fix
+
+      checks_pending?(Map.get(snapshot, :checks, %{})) ->
         :wait
+
+      mergeable_pending(Map.get(snapshot, :mergeable), Map.get(snapshot, :merge_state_status)) ->
+        :wait
+
+      green_to_close?(snapshot) and draft_pull_request?(snapshot) ->
+        :ready
 
       green_to_close?(snapshot) ->
         :merge
