@@ -5,6 +5,7 @@ defmodule RondoWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {RondoWeb.Layouts, :app}
 
+  alias Rondo.RunOutcome
   alias RondoWeb.{ArchivedRuns, Endpoint, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
@@ -20,8 +21,10 @@ defmodule RondoWeb.DashboardLive do
       |> assign(:selected_event_mode, :pretty)
       |> assign(:selected_issue, nil)
       |> assign(:selected_issue_data, nil)
+      |> assign(:selected_outcome, nil)
       |> assign(:selected_runs, nil)
       |> assign(:selected_run_index, 0)
+      |> assign(:selected_run_projection, nil)
       |> assign(:archived_filters, ArchivedRuns.default_filters())
 
     if connected?(socket) do
@@ -85,6 +88,7 @@ defmodule RondoWeb.DashboardLive do
       socket
       |> assign(:selected_issue, identifier)
       |> assign(:selected_issue_data, entry)
+      |> assign(:selected_outcome, nil)
       |> assign(:selected_runs, nil)
       |> assign(:selected_run_index, 0)
       |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, entry))
@@ -123,6 +127,7 @@ defmodule RondoWeb.DashboardLive do
        socket
        |> assign(:selected_issue, identifier)
        |> assign(:selected_issue_data, run_with_log)
+       |> assign(:selected_outcome, selected_outcome(run_with_log))
        |> assign(:selected_run_index, latest_index)
        |> assign(:selected_runs, group.runs)
        |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, latest_run))
@@ -150,6 +155,7 @@ defmodule RondoWeb.DashboardLive do
          socket
          |> assign(:selected_issue, identifier)
          |> assign(:selected_issue_data, run_with_log)
+         |> assign(:selected_outcome, selected_outcome(run_with_log))
          |> assign(:selected_run_index, selected_index)
          |> assign(:selected_runs, runs)
          |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, selected_run))
@@ -203,6 +209,7 @@ defmodule RondoWeb.DashboardLive do
       {:noreply,
        socket
        |> assign(:selected_issue_data, run_with_log)
+       |> assign(:selected_outcome, selected_outcome(run_with_log))
        |> assign(:selected_run_index, index)
        |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, run))
        |> assign(:selected_event_index, 0)
@@ -251,6 +258,7 @@ defmodule RondoWeb.DashboardLive do
      socket
      |> assign(:selected_issue, nil)
      |> assign(:selected_issue_data, nil)
+     |> assign(:selected_outcome, nil)
      |> assign(:selected_runs, nil)
      |> assign(:selected_run_index, 0)
      |> assign(:selected_run_projection, nil)
@@ -822,8 +830,9 @@ defmodule RondoWeb.DashboardLive do
                       </td>
                       <td>
                         <div class="detail-stack">
-                          <span class={exit_reason_class(run.exit_reason)}><%= run.status %></span>
-                          <span class="muted event-meta"><%= run.outcome || "n/a" %></span>
+                          <% outcome = run[:outcome_display] || %{class: exit_reason_class(run.exit_reason), label: run.status, detail: run.outcome} %>
+                          <span class={outcome.class}><%= outcome.label || run.status %></span>
+                          <span class="muted event-meta"><%= outcome.detail || run.outcome || "n/a" %></span>
                         </div>
                       </td>
                       <td class="mono muted"><%= format_archive_datetime(run.started_at) %></td>
@@ -944,12 +953,12 @@ defmodule RondoWeb.DashboardLive do
               </div>
             </div>
             <div class="panel-metric">
-              <%= if @selected_issue_data[:exit_reason] do %>
+              <%= if @selected_issue_data[:finished_at] && @selected_outcome do %>
                 <span class="panel-metric-label">Result</span>
                 <div class="detail-stack">
-                  <span class={exit_reason_class(@selected_issue_data[:exit_reason])}><%= @selected_issue_data[:exit_reason] %></span>
-                  <%= if @selected_issue_data[:exit_reason] == "handed_off" && @selected_issue_data[:non_active_state] do %>
-                    <span class="muted" style="font-size: 11px;">issue &rarr; <%= @selected_issue_data[:non_active_state] %></span>
+                  <span class={@selected_outcome.class}><%= @selected_outcome.label %></span>
+                  <%= if @selected_outcome.detail do %>
+                    <span class="muted" style="font-size: 11px;"><%= @selected_outcome.detail %></span>
                   <% end %>
                 </div>
               <% else %>
@@ -1951,6 +1960,12 @@ defmodule RondoWeb.DashboardLive do
   defp selected_event_log(selected_issue_data) do
     Map.get(selected_issue_data, :event_log, []) || []
   end
+
+  defp selected_outcome(entry) when is_map(entry) do
+    Map.get(entry, :outcome_display) || RunOutcome.display(entry)
+  end
+
+  defp selected_outcome(_entry), do: nil
 
   defp total_runtime_seconds(payload, now) do
     completed_runtime_seconds(payload) +

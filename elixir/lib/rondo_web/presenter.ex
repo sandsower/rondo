@@ -3,7 +3,7 @@ defmodule RondoWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias Rondo.{Config, ModelUsage, Orchestrator, RunLedger, RunTimeline}
+  alias Rondo.{Config, ModelUsage, Orchestrator, RunLedger, RunOutcome, RunTimeline}
 
   @dialyzer {:nowarn_function, archived_cost: 1}
 
@@ -689,7 +689,7 @@ defmodule RondoWeb.Presenter do
 
     failures =
       archived
-      |> Enum.filter(&(archived_status(Map.get(&1, :exit_reason)) == "failed"))
+      |> Enum.filter(&(RunOutcome.kind(&1) == :failed))
       |> Enum.take(@timeline_failure_limit)
 
     (recent ++ failures)
@@ -711,7 +711,7 @@ defmodule RondoWeb.Presenter do
 
     failures =
       archived
-      |> Enum.filter(&(archived_status(Map.get(&1, :exit_reason)) == "failed"))
+      |> Enum.filter(&(RunOutcome.kind(&1) == :failed))
       |> Enum.take(@archived_table_failure_limit)
 
     (recent ++ failures)
@@ -729,6 +729,7 @@ defmodule RondoWeb.Presenter do
         issue_identifier: identifier,
         issue_title: latest.issue_title,
         latest_result: latest.exit_reason,
+        latest_outcome: Map.get(latest, :outcome_display) || RunOutcome.display(latest),
         latest_finished_at: latest.finished_at,
         total_tokens: Enum.reduce(runs, 0, fn r, acc -> acc + total_tokens(r) end),
         run_count: length(runs),
@@ -745,6 +746,7 @@ defmodule RondoWeb.Presenter do
     started_at = timestamp_payload(started_value)
     finished_at = timestamp_payload(finished_value)
     outcome = Map.get(entry, :exit_reason)
+    outcome_display = RunOutcome.display(entry)
 
     %{
       issue_id: Map.get(entry, :issue_id),
@@ -758,8 +760,9 @@ defmodule RondoWeb.Presenter do
       workspace: Map.get(entry, :workspace),
       session_id: Map.get(entry, :session_id),
       state: Map.get(entry, :state),
-      status: archived_status(outcome),
+      status: outcome_display.label,
       outcome: outcome,
+      outcome_display: outcome_display,
       started_at: started_at,
       finished_at: finished_at,
       duration_ms: duration_ms(started_value, finished_value),
@@ -790,18 +793,6 @@ defmodule RondoWeb.Presenter do
   defp normalize_tokens(_tokens), do: %{input_tokens: 0, output_tokens: 0, total_tokens: 0}
 
   defp total_tokens(run), do: get_in(run, [:tokens, :total_tokens]) || 0
-
-  defp archived_status(outcome) when is_binary(outcome) do
-    cond do
-      outcome == "completed" -> "completed"
-      outcome == "terminated" -> "terminated"
-      outcome == "handed_off" -> "handed_off"
-      String.starts_with?(outcome, "exited") -> "failed"
-      true -> outcome
-    end
-  end
-
-  defp archived_status(_outcome), do: "unknown"
 
   defp last_meaningful_result(entry, outcome) do
     latest_gate = Map.get(entry, :latest_gate) || %{}
@@ -1127,11 +1118,16 @@ defmodule RondoWeb.Presenter do
     %{
       labels: Enum.map(archived_groups, & &1.issue_identifier),
       values: Enum.map(archived_groups, & &1.total_tokens),
-      colors: Enum.map(archived_groups, & &1.latest_result)
+      colors: Enum.map(archived_groups, &archived_outcome_kind/1)
     }
   end
 
   def run_outcomes(_), do: %{labels: [], values: [], colors: []}
+
+  defp archived_outcome_kind(%{latest_outcome: %{kind: kind}}) when is_binary(kind), do: kind
+  defp archived_outcome_kind(%{latest_outcome: %{kind: kind}}), do: to_string(kind)
+  defp archived_outcome_kind(%{latest_result: result}) when is_binary(result), do: result
+  defp archived_outcome_kind(_), do: "terminated"
 
   @spec run_token_comparison(list()) :: map()
   def run_token_comparison(runs) when is_list(runs) do
