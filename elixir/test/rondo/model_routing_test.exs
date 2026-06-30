@@ -633,6 +633,23 @@ defmodule Rondo.ModelRoutingTest do
                routing_context: %{stage: :turn, phase: :implementation},
                repo_model_routing: routing
              )
+
+    fallback_routing = %{
+      defaults: %{tier: "standard", mode: "prefer"},
+      tiers: %{
+        standard: [%{adapter: "pi", model: "standard-model"}]
+      }
+    }
+
+    assert %{
+             status: :honored,
+             requested_tier: "standard",
+             resolved: %{adapter: "pi", model: "standard-model"}
+           } =
+             ModelRouting.resolve(
+               routing_context: %{stage: :initial_spawn, phase: :planning},
+               repo_model_routing: fallback_routing
+             )
   end
 
   test "generic planning phase falls back to heavy when frontier is not configured" do

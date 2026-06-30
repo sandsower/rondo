@@ -1,4 +1,4 @@
-defmodule RondoWeb.DashboardLiveTest do
+defmodule RondoWeb.Live.DashboardLiveTest do
   use Rondo.TestSupport
 
   alias RondoWeb.DashboardLive
