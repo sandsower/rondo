@@ -711,7 +711,7 @@ defmodule RondoWeb.Presenter do
       turn_count: Map.get(entry, :turn_count),
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       tokens: normalize_tokens(Map.get(entry, :tokens, %{})),
-      cost: log_cost(entry),
+      cost: archived_cost(entry) || log_cost(entry),
       model: display_model(entry),
       provider: provider_from_entry(entry),
       model_routing: Map.get(entry, :model_routing),
@@ -936,6 +936,14 @@ defmodule RondoWeb.Presenter do
     display_model(entry)
     |> ModelUsage.provider_from_model()
   end
+
+  defp archived_cost(entry) when is_map(entry) do
+    entry
+    |> Map.get(:cost)
+    |> normalize_cost()
+  end
+
+  defp archived_cost(_entry), do: nil
 
   defp log_cost(entry) when is_map(entry) do
     entry

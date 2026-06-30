@@ -704,6 +704,7 @@ defmodule Rondo.PresenterTest do
     assert failed.last_meaningful_result == "gates fail"
     assert failed.model == "codex"
     assert completed.issue_title == "Fix archive visibility"
+    assert completed.cost == 0.015
     assert completed.provider == "openrouter"
     assert completed.duration_ms == 750_000
     assert completed.linear_url == "https://linear.app/example/MT-ARCH-1"
