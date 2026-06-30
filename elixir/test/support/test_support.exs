@@ -41,6 +41,7 @@ defmodule Rondo.TestSupport do
         System.put_env("OPENROUTER_API_KEY", "rondo-test-openrouter-key")
 
         on_exit(fn ->
+          stop_default_http_server()
           Workflow.clear_workflow_file_path()
           Application.delete_env(:rondo, :server_port_override)
           Application.delete_env(:rondo, :memory_tracker_issues)
@@ -74,14 +75,33 @@ defmodule Rondo.TestSupport do
   def restore_env(key, value), do: System.put_env(key, value)
 
   def stop_default_http_server do
-    try do
-      Supervisor.terminate_child(Rondo.Supervisor, Rondo.HttpServer)
-    catch
-      :exit, _ -> :ok
-    end
+    was_trapping = Process.flag(:trap_exit, true)
 
+    try do
+      stop_http_server_child()
+      stop_http_server_endpoint()
+      drain_exit_messages()
+    after
+      Process.flag(:trap_exit, was_trapping)
+    end
+  end
+
+  defp stop_http_server_child do
+    if supervisor = Process.whereis(Rondo.Supervisor) do
+      if Process.alive?(supervisor) do
+        try do
+          _ = Supervisor.terminate_child(supervisor, Rondo.HttpServer)
+        catch
+          :exit, _ -> :ok
+        end
+      end
+    end
+  end
+
+  defp stop_http_server_endpoint do
     case Process.whereis(RondoWeb.Endpoint) do
       pid when is_pid(pid) ->
+        ref = Process.monitor(pid)
         Process.unlink(pid)
 
         try do
@@ -90,10 +110,50 @@ defmodule Rondo.TestSupport do
           :exit, _ -> :ok
         end
 
-        :ok
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+        after
+          2_000 -> :ok
+        end
+
+        wait_for_http_server_shutdown()
 
       _ ->
-        :ok
+        wait_for_http_server_shutdown()
+    end
+  end
+
+  @spec wait_for_http_server_shutdown() :: :ok
+  def wait_for_http_server_shutdown do
+    wait_for_http_server_shutdown(fn -> is_nil(Rondo.HttpServer.bound_port()) end, 40, 25)
+  end
+
+  @spec wait_for_http_server_shutdown((-> boolean())) :: :ok
+  def wait_for_http_server_shutdown(check_fun) when is_function(check_fun, 0) do
+    wait_for_http_server_shutdown(check_fun, 40, 25)
+  end
+
+  @spec wait_for_http_server_shutdown((-> boolean()), non_neg_integer(), non_neg_integer()) :: :ok
+  def wait_for_http_server_shutdown(check_fun, attempts, sleep_ms) when is_function(check_fun, 0) do
+    wait_until(check_fun, attempts, sleep_ms)
+  end
+
+  defp wait_until(_fun, 0, _sleep_ms), do: raise("HTTP server did not shut down in time")
+
+  defp wait_until(fun, attempts, sleep_ms) when attempts > 0 do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(sleep_ms)
+      wait_until(fun, attempts - 1, sleep_ms)
+    end
+  end
+
+  defp drain_exit_messages do
+    receive do
+      {:EXIT, _pid, _reason} -> drain_exit_messages()
+    after
+      50 -> :ok
     end
   end
 
