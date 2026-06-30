@@ -1,4 +1,4 @@
-defmodule RondoWeb.DashboardLiveTest do
+defmodule RondoWeb.DashboardLiveArchivedSelectionTest do
   use Rondo.TestSupport
 
   alias RondoWeb.ArchivedRuns

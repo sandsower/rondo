@@ -440,7 +440,6 @@ defmodule RondoWeb.EventInspector do
 
   defp path_key?(key), do: normalize_key(key) in @artifact_path_keys
 
-  defp normalize_key(key) when is_atom(key), do: Atom.to_string(key)
   defp normalize_key(key), do: to_string(key)
 
   defp lookup(term, []), do: term

@@ -1981,11 +1981,7 @@ defmodule RondoWeb.DashboardLive do
     |> assign(:event_category, :all)
   end
 
-  defp selected_outcome(entry) when is_map(entry) do
-    Map.get(entry, :outcome_display) || RunOutcome.display(entry)
-  end
-
-  defp selected_outcome(_entry), do: nil
+  defp selected_outcome(entry), do: Map.get(entry, :outcome_display) || RunOutcome.display(entry)
 
   defp total_runtime_seconds(payload, now) do
     completed_runtime_seconds(payload) +

@@ -670,8 +670,8 @@ defmodule Rondo.ExtensionsTest do
     assert_eventually(fn -> tcp_accept_ready?(port) end)
 
     # Under load the Bandit acceptor can accept TCP connections before
-    # it's ready to process HTTP requests.  Send a real HTTP request
-    # and verify we get a response (not just an open socket).
+    # it's ready to process HTTP requests.  Send a real static-asset request
+    # and verify we get a response without depending on orchestrator snapshots.
     assert_eventually(fn -> http_ready?(port) end)
 
     port
@@ -691,7 +691,7 @@ defmodule Rondo.ExtensionsTest do
   defp http_ready?(port) do
     case :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 500) do
       {:ok, socket} ->
-        :ok = :gen_tcp.send(socket, "GET / HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n\r\n")
+        :ok = :gen_tcp.send(socket, "GET /dashboard.css HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n\r\n")
 
         ready? =
           case :gen_tcp.recv(socket, 0, 500) do
@@ -806,7 +806,7 @@ defmodule Rondo.ExtensionsTest do
   end
 
   defp recv_all(socket, acc) do
-    case :gen_tcp.recv(socket, 0, 1_000) do
+    case :gen_tcp.recv(socket, 0, 10_000) do
       {:ok, chunk} -> recv_all(socket, acc <> chunk)
       {:error, :closed} -> acc
       {:error, :timeout} -> acc

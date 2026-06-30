@@ -36,6 +36,7 @@ defmodule RondoWeb.EventInspectorTest do
     }
 
     assert Enum.map(EventInspector.event_entries(issue_data, %{category: "not-a-real-category"}), & &1.index) == [0, 1]
+    assert Enum.map(EventInspector.event_entries(issue_data, %{category: 123}), & &1.index) == [0, 1]
     assert Enum.map(EventInspector.event_entries(issue_data, %{query: "mix", category: "not-a-real-category"}), & &1.index) == [1]
   end
 
@@ -535,6 +536,118 @@ defmodule RondoWeb.EventInspectorTest do
     assert detail.raw_json =~ "[REDACTED]"
     refute detail.raw_json =~ "sk-1234567890abcdef"
     assert detail.has_redacted_content?
+  end
+
+  test "system and result details cover fallback summaries and structured fields" do
+    run_dir = tmp_event_dir("system-result-details")
+
+    write_event_log!(run_dir, [
+      %{"timestamp" => "2026-06-29T22:05:00Z", "event" => "warning", "subtype" => "rate_limit", "status" => "degraded"},
+      %{"timestamp" => "2026-06-29T22:05:01Z", "event" => "result", "raw" => %{"subtype" => "terminal"}}
+    ])
+
+    issue_data = %{
+      run_id: "run-system-result",
+      run_dir: run_dir,
+      session_id: :session_atom,
+      adapter: :pi,
+      event_log: [
+        %{at: "2026-06-29T22:05:00Z", event: :warning, message: ""},
+        %{at: "2026-06-29T22:05:01Z", event: :result, message: ""}
+      ]
+    }
+
+    on_exit(fn -> File.rm_rf(run_dir) end)
+
+    assert {:ok, system_detail} = EventInspector.select_event_detail(issue_data, 0)
+    assert system_detail.category == :system
+    assert system_detail.summary == "degraded"
+    assert Enum.any?(system_detail.structured_fields, &(&1 == {"Subtype", "rate_limit"}))
+    assert Enum.any?(system_detail.structured_fields, &(&1 == {"Status", "degraded"}))
+    assert Enum.any?(system_detail.structured_fields, &(&1 == {"Adapter", "pi"}))
+
+    assert {:ok, result_detail} = EventInspector.select_event_detail(issue_data, 1)
+    assert result_detail.category == :result
+    assert result_detail.summary == "terminal"
+  end
+
+  test "gate details filter passing results and summarize unusual result shapes" do
+    run_dir = tmp_event_dir("gate-detail-results")
+
+    write_event_log!(run_dir, [
+      %{
+        "timestamp" => "2026-06-29T22:06:00Z",
+        "event" => "gates_completed",
+        "results" => [
+          %{"name" => "passed-gate", "status" => "passed"},
+          %{"name" => "ok-gate", "status" => "ok"},
+          %{"name" => "success-gate", "status" => "success"},
+          %{"name" => "name-only"},
+          %{"name" => "numeric-status", "status" => 123},
+          %{"name" => "atom-status", "status" => "fail"},
+          %{"status" => "failed"},
+          %{"unexpected" => "shape"},
+          "raw failure"
+        ],
+        "artifact_path" => "artifacts/gates/results.json"
+      },
+      %{"timestamp" => "2026-06-29T22:06:01Z", "event" => "gates_completed", "failed" => %{"not" => "a-list"}}
+    ])
+
+    issue_data = %{
+      run_id: "run-gates",
+      run_dir: run_dir,
+      event_log: [
+        %{at: "2026-06-29T22:06:00Z", event: :gates_completed, message: "gates"},
+        %{at: "2026-06-29T22:06:01Z", event: :gates_completed, message: "failed map"}
+      ]
+    }
+
+    on_exit(fn -> File.rm_rf(run_dir) end)
+
+    assert {:ok, detail} = EventInspector.select_event_detail(issue_data, 0)
+    failed_field = Enum.find(detail.structured_fields, fn {label, _value} -> label == "Failed gates" end)
+    assert {"Failed gates", failed_gates} = failed_field
+    refute failed_gates =~ "passed-gate"
+    refute failed_gates =~ "ok-gate"
+    refute failed_gates =~ "success-gate"
+    assert failed_gates =~ "name-only"
+    assert failed_gates =~ "numeric-status: 123"
+    assert failed_gates =~ "atom-status: fail"
+    assert failed_gates =~ "%{\"unexpected\" => \"shape\"}"
+    assert failed_gates =~ "raw failure"
+    assert Enum.any?(detail.artifact_links, &(&1.path == "artifacts/gates/results.json"))
+
+    assert {:ok, map_failed_detail} = EventInspector.select_event_detail(issue_data, 1)
+    assert Enum.any?(map_failed_detail.structured_fields, fn {label, value} -> label == "Failed gates" and value =~ "not" end)
+  end
+
+  test "tool details can read fields from list payloads and redact non-json raw values" do
+    run_dir = tmp_event_dir("list-and-raw-details")
+
+    write_event_log!(run_dir, [
+      [%{"status" => nil}, %{"command" => "mix test", "input" => [], "source_path" => "artifacts/tool.log"}],
+      12_345
+    ])
+
+    issue_data = %{
+      run_id: "run-list-raw",
+      run_dir: run_dir,
+      event_log: [
+        %{at: "2026-06-29T22:07:00Z", event: :tool, message: "mix test"},
+        %{at: "2026-06-29T22:07:01Z", event: :assistant, message: "numeric raw"}
+      ]
+    }
+
+    on_exit(fn -> File.rm_rf(run_dir) end)
+
+    assert {:ok, tool_detail} = EventInspector.select_event_detail(issue_data, 0)
+    assert Enum.any?(tool_detail.structured_fields, &(&1 == {"Command", "mix test"}))
+    assert Enum.any?(tool_detail.artifact_links, &(&1.path == "artifacts/tool.log"))
+
+    assert {:ok, raw_detail} = EventInspector.select_event_detail(issue_data, 1)
+    assert raw_detail.raw == 12_345
+    assert raw_detail.raw_json == "12345"
   end
 
   defp tmp_event_dir(prefix) do
