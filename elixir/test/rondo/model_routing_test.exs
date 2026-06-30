@@ -635,6 +635,21 @@ defmodule Rondo.ModelRoutingTest do
              )
   end
 
+  test "planning phase without frontier or heavy tiers leaves the default tier unset" do
+    routing = %{tiers: %{standard: [%{adapter: "pi", model: "standard-model"}]}}
+
+    assert %{
+             status: :unsupported,
+             requested_tier: nil,
+             resolved: nil,
+             reason: "no model routing hint resolved"
+           } =
+             ModelRouting.resolve(
+               routing_context: %{stage: :initial_spawn, phase: :planning},
+               repo_model_routing: routing
+             )
+  end
+
   test "generic planning phase falls back to heavy when frontier is not configured" do
     routing = %{
       defaults: %{tier: "standard", mode: "prefer"},
