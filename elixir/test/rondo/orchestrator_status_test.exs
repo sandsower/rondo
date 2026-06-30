@@ -3329,14 +3329,13 @@ defmodule Rondo.OrchestratorStatusTest do
     :sys.replace_state(pid, fn _ -> state end)
 
     send(pid, {:tick, state.tick_token})
+    Process.sleep(4_000)
 
     paused_entry =
-      wait_until(fn ->
-        case GenServer.call(pid, :snapshot).paused do
-          [entry | _] -> entry
-          _ -> nil
-        end
-      end)
+      case GenServer.call(pid, :snapshot, 15_000).paused do
+        [entry | _] -> entry
+        _ -> flunk("timed out waiting for paused entry")
+      end
 
     assert paused_entry.issue_id == "issue-transition-ask"
     paused_state = :sys.get_state(pid)
@@ -3374,13 +3373,160 @@ defmodule Rondo.OrchestratorStatusTest do
 
     assert Enum.any?(resumed_manifest["checkpoints"], &(&1["kind"] == "guidance_submitted"))
     assert Enum.any?(resumed_manifest["checkpoints"], &(&1["kind"] == "spawned"))
+  end
+
+  test "review-state issues with no PR evidence move back to rework and start an agent" do
+    workspace_root = tmp_dir("orchestrator-review-state-rework")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      release_loop_enabled: true,
+      release_loop_rework_state: "In Progress",
+      tracker_review_states: ["In Review"],
+      claude_command: fake_claude_script(workspace_root, "review-state-rework-session", 1)
+    )
+
+    assert Config.tracker_review_states() == ["In Review"]
+    assert Config.release_loop_enabled?() == true
+
+    issue = %Issue{
+      id: "issue-review-rework",
+      identifier: "MT-REVIEW-REWORK",
+      title: "Review rework test",
+      description: "Should resume implementation when the PR is missing",
+      state: "In Review",
+      branch_name: nil,
+      url: "https://example.org/issues/MT-REVIEW-REWORK"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+    Application.put_env(:rondo, :memory_tracker_recipient, self())
+
+    orchestrator_name = Module.concat(__MODULE__, :ReviewStateReworkOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_recipient)
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    state = :sys.get_state(pid)
+    state = %{state | max_concurrent_agents: 1, poll_interval_ms: 60_000}
+    :sys.replace_state(pid, fn _ -> state end)
+
+    send(pid, {:tick, state.tick_token})
+
+    assert_receive {:memory_tracker_state_update, "issue-review-rework", "In Progress"}, 10_000
 
     wait_until(fn ->
       case GenServer.call(pid, :snapshot) do
-        %{paused: [], running: []} -> true
+        %{running: [%{issue_id: "issue-review-rework"} | _], retrying: []} -> true
         _ -> nil
       end
     end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert Enum.any?(snapshot.running, &(&1.issue_id == "issue-review-rework"))
+    assert snapshot.retrying == []
+
+    [running_entry] = Enum.filter(snapshot.running, &(&1.issue_id == "issue-review-rework"))
+    manifest = running_entry.run_dir |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
+    checkpoint_kinds = Enum.map(manifest["checkpoints"], & &1["kind"])
+
+    assert "release_loop_pr_missing" in checkpoint_kinds
+    assert "release_loop_action_selected" in checkpoint_kinds
+
+    action_checkpoint_path =
+      manifest["checkpoints"]
+      |> Enum.find(&(&1["kind"] == "release_loop_action_selected"))
+      |> Map.fetch!("path")
+
+    action_checkpoint =
+      running_entry.run_dir
+      |> Path.join(action_checkpoint_path)
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert action_checkpoint["payload"]["action"] == "rework"
+
+    state_after = :sys.get_state(pid)
+    assert MapSet.member?(state_after.claimed, issue.id)
+  end
+
+  test "review-state retries expose release-loop lifecycle metadata" do
+    workspace_root = tmp_dir("orchestrator-review-state-metadata")
+
+    pr =
+      %{
+        number: 15,
+        url: "https://github.com/sandsower/rondo/pull/15",
+        title: "Review wait",
+        state: "OPEN",
+        headRefName: "feature/review-wait",
+        baseRefName: "main",
+        isDraft: false,
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        reviewDecision: "APPROVED"
+      }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      release_loop_enabled: true
+    )
+
+    issue = %Issue{
+      id: "issue-review-metadata",
+      identifier: "MT-REVIEW-META",
+      title: "Review metadata test",
+      description: "Should surface PR lifecycle metadata in the retry queue",
+      state: "In Review",
+      branch_name: "feature/review-wait",
+      url: "https://example.org/issues/MT-REVIEW-META"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+    Application.put_env(:rondo, :memory_tracker_recipient, self())
+
+    orchestrator_name = Module.concat(__MODULE__, :ReviewStateMetadataOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_recipient)
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    state = :sys.get_state(pid)
+
+    retry_entry = %{
+      attempt: 2,
+      due_at_ms: System.monotonic_time(:millisecond) + 60_000,
+      identifier: issue.identifier,
+      error: "release loop waiting for PR checks",
+      delay_type: :release_loop_wait,
+      release_loop: %{
+        phase: :wait,
+        pr: %{number: pr.number, url: pr.url},
+        wait_interval_seconds: 9,
+        blocked_reason: :checks_pending
+      }
+    }
+
+    :sys.replace_state(pid, fn _ -> %{state | retry_attempts: %{issue.id => retry_entry}} end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+    [retry] = Enum.filter(snapshot.retrying, &(&1.issue_id == issue.id))
+    assert retry.error =~ "release loop waiting for PR checks"
+    assert retry.delay_type == :release_loop_wait
+    assert get_in(retry, [:release_loop, :phase]) == :wait
+    assert get_in(retry, [:release_loop, :pr, :url]) == pr.url
+    assert get_in(retry, [:release_loop, :pr, :number]) == 15
   end
 
   test "freeform guidance resumes paused run with operator prompt and previous run ref" do

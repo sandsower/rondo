@@ -10,6 +10,7 @@ defmodule Rondo.AgentRunner do
   alias Rondo.Agent.PiAdapter
 
   alias Rondo.{
+    ChangedFiles,
     Config,
     FinalReport,
     Gates,
@@ -1102,14 +1103,25 @@ defmodule Rondo.AgentRunner do
   end
 
   defp gate_selection_opts(context, issue, turn_number) do
+    changed_files_snapshot = changed_files_snapshot(context)
+
     [
       issue: issue,
       workspace: context.workspace,
       run_dir: context.run_dir,
       stage: :post_turn,
-      turn_number: turn_number
+      turn_number: turn_number,
+      changed_files: Map.get(changed_files_snapshot, :changed_files, []),
+      changed_files_metadata: Map.drop(changed_files_snapshot, [:changed_files])
     ]
     |> maybe_put_source_contract(context.opts)
+  end
+
+  defp changed_files_snapshot(context) do
+    case ChangedFiles.collect(context.workspace, run_dir: context.run_dir) do
+      {:ok, snapshot} -> snapshot
+      {:error, reason} -> %{changed_files: [], source: "error", reason: inspect(reason)}
+    end
   end
 
   defp handle_gate_selection_failure(Native, reason, _opts), do: {:error, {:process_provider_gate_selection_failed, reason}}

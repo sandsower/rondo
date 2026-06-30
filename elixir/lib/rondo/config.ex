@@ -80,6 +80,10 @@ defmodule Rondo.Config do
                                    type: {:list, :string},
                                    default: @default_active_states
                                  ],
+                                 review_states: [
+                                   type: {:list, :string},
+                                   default: []
+                                 ],
                                  terminal_states: [
                                    type: {:list, :string},
                                    default: @default_terminal_states
@@ -424,6 +428,11 @@ defmodule Rondo.Config do
     get_in(validated_workflow_options(), [:tracker, :active_states])
   end
 
+  @spec tracker_review_states() :: [String.t()]
+  def tracker_review_states do
+    get_in(validated_workflow_options(), [:tracker, :review_states])
+  end
+
   @spec tracker_terminal_states() :: [String.t()]
   def tracker_terminal_states do
     get_in(validated_workflow_options(), [:tracker, :terminal_states])
@@ -431,6 +440,9 @@ defmodule Rondo.Config do
 
   @spec linear_active_states() :: [String.t()]
   def linear_active_states, do: tracker_active_states()
+
+  @spec linear_review_states() :: [String.t()]
+  def linear_review_states, do: tracker_review_states()
 
   @spec linear_terminal_states() :: [String.t()]
   def linear_terminal_states, do: tracker_terminal_states()
@@ -1130,6 +1142,7 @@ defmodule Rondo.Config do
     |> put_if_present(:repo, scalar_string_value(Map.get(section, "repo")))
     |> put_if_present(:state_label_prefix, scalar_string_value(Map.get(section, "state_label_prefix")))
     |> put_if_present(:active_states, csv_value(Map.get(section, "active_states")))
+    |> put_if_present(:review_states, csv_value(Map.get(section, "review_states")))
     |> put_if_present(:terminal_states, csv_value(Map.get(section, "terminal_states")))
     |> put_if_present(:label_filter, label_filter_value(Map.get(section, "label_filter")))
   end
@@ -1541,6 +1554,7 @@ defmodule Rondo.Config do
       validate_string_field(tracker, "tracker.state_label_prefix"),
       validate_string_field(tracker, "tracker.assignee"),
       validate_non_empty_string_or_string_list_field(tracker, "tracker.active_states"),
+      validate_non_empty_string_or_string_list_field(tracker, "tracker.review_states"),
       validate_non_empty_string_or_string_list_field(tracker, "tracker.terminal_states"),
       validate_string_or_string_list_field(tracker, "tracker.label_filter"),
       validate_positive_integer_field(polling, "polling.interval_ms"),

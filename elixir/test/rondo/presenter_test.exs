@@ -49,6 +49,8 @@ defmodule Rondo.PresenterTest do
           exit_reason: "exited: gate failed",
           turn_count: 1,
           latest_gate: latest_gate,
+          run_id: "archived-run-id",
+          run_dir: "/tmp/rondo/.rondo_runs/MT-ARCHIVE-GATE/run",
           tokens: %{input_tokens: 1, output_tokens: 2, total_tokens: 3}
         }
       ],
@@ -60,11 +62,138 @@ defmodule Rondo.PresenterTest do
     on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
 
     payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
-    assert payload.running |> hd() |> Map.fetch!(:latest_gate) |> Map.fetch!(:status) == :fail
-    assert payload.archived |> hd() |> Map.fetch!(:runs) |> hd() |> Map.fetch!(:latest_gate) |> Map.fetch!(:status) == :fail
+    running_entry = hd(payload.running)
+    archived_entry = payload.archived |> hd() |> Map.fetch!(:runs) |> hd()
+
+    assert running_entry.run_id == nil
+    assert running_entry.run_dir == nil
+    assert running_entry.latest_gate.status == :fail
+    assert archived_entry.run_id == "archived-run-id"
+    assert archived_entry.run_dir == "/tmp/rondo/.rondo_runs/MT-ARCHIVE-GATE/run"
+    assert archived_entry.latest_gate.status == :fail
 
     assert {:ok, issue_payload} = RondoWeb.Presenter.issue_payload("MT-GATE", server_name, 1_000)
     assert issue_payload.running.latest_gate.status == :fail
+  end
+
+  test "archived payload normalizes finished outcomes for rows, charts, and detail drawers" do
+    snapshot = %{
+      running: [],
+      retrying: [],
+      archived: [
+        archived_run("MT-SUCCESS", "completed", "In Progress", ~U[2026-05-27 11:10:00Z], 10),
+        archived_run("MT-REVIEW", "terminated", Rondo.Config.release_loop_review_state(), ~U[2026-05-27 11:20:00Z], 20),
+        archived_run("MT-DONE", "terminated", Rondo.Config.release_loop_done_state(), ~U[2026-05-27 11:30:00Z], 30),
+        archived_run("MT-FAILED", "failed", "In Progress", ~U[2026-05-27 11:40:00Z], 40),
+        archived_run("MT-PAUSED", "paused", "Blocked", ~U[2026-05-27 11:50:00Z], 50),
+        archived_run("MT-CANCELED", "terminated", "Canceled", ~U[2026-05-27 11:55:00Z], 55),
+        archived_run("MT-TERM", "terminated", "In Progress", ~U[2026-05-27 12:00:00Z], 60)
+      ],
+      claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    server_name = Module.concat(__MODULE__, :OutcomeSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+    outcomes = payload.archived |> Enum.map(&{&1.issue_identifier, &1.latest_outcome}) |> Map.new()
+    rows = payload.archived_table |> Enum.map(&{&1.issue_identifier, &1}) |> Map.new()
+
+    assert outcomes["MT-SUCCESS"] == %{
+             kind: "success",
+             label: "success",
+             class: "state-badge state-badge-active",
+             detail: nil
+           }
+
+    assert outcomes["MT-REVIEW"] == %{
+             kind: "review_handoff",
+             label: "review handoff",
+             class: "state-badge state-badge-handoff",
+             detail: "issue → #{Rondo.Config.release_loop_review_state()}"
+           }
+
+    assert outcomes["MT-DONE"] == %{
+             kind: "merged_done",
+             label: "merged/done",
+             class: "state-badge state-badge-active",
+             detail: "issue → #{Rondo.Config.release_loop_done_state()}"
+           }
+
+    assert outcomes["MT-FAILED"].kind == "failed"
+    assert outcomes["MT-PAUSED"].kind == "blocked_paused"
+    assert outcomes["MT-CANCELED"].kind == "canceled"
+    assert outcomes["MT-TERM"].kind == "terminated"
+
+    assert rows["MT-REVIEW"].status == "review handoff"
+    assert rows["MT-REVIEW"].outcome_display == outcomes["MT-REVIEW"]
+    assert rows["MT-DONE"].status == "merged/done"
+
+    assert RondoWeb.Presenter.run_outcomes(payload.archived) == %{
+             labels: ["MT-TERM", "MT-CANCELED", "MT-PAUSED", "MT-FAILED", "MT-DONE", "MT-REVIEW", "MT-SUCCESS"],
+             values: [60, 55, 50, 40, 30, 20, 10],
+             colors: ["terminated", "canceled", "blocked_paused", "failed", "merged_done", "review_handoff", "success"]
+           }
+  end
+
+  test "retry payloads expose release-loop lifecycle metadata" do
+    snapshot = %{
+      running: [],
+      retrying: [
+        %{
+          issue_id: "issue-release-loop",
+          identifier: "MT-RELEASE-LOOP",
+          attempt: 3,
+          due_in_ms: 9_000,
+          error: "release loop waiting for PR checks",
+          release_loop: %{
+            phase: :wait,
+            action: :wait,
+            blocked_reason: :checks_pending,
+            wait_interval_seconds: 9,
+            recovery_kind: :verification_failure,
+            closeout_state: "review",
+            feedback_count: 2,
+            feedback_comment_ids: ["c1", "c2"],
+            mergeable: "UNKNOWN",
+            merge_state_status: "DIRTY",
+            pr: %{
+              number: 15,
+              url: "https://github.com/sandsower/rondo/pull/15",
+              title: "Release loop metadata",
+              head_ref_name: "feature/review-loop",
+              base_ref_name: "main",
+              is_draft: false
+            },
+            checks: %{state: :pending, conclusion: nil}
+          }
+        }
+      ],
+      archived: [],
+      claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    server_name = Module.concat(__MODULE__, :ReleaseLoopRetrySnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+    [retry] = payload.retrying
+    assert is_binary(retry.due_at)
+    assert retry.release_loop.phase == :wait
+    assert retry.release_loop.action == :wait
+    assert retry.release_loop.blocked_reason == :checks_pending
+    assert retry.release_loop.pr.number == 15
+    assert retry.release_loop.pr.url == "https://github.com/sandsower/rondo/pull/15"
+
+    assert {:ok, issue_payload} = RondoWeb.Presenter.issue_payload("MT-RELEASE-LOOP", server_name, 1_000)
+    assert is_binary(issue_payload.retry.due_at)
+    assert issue_payload.retry.release_loop.phase == :wait
+    assert issue_payload.retry.release_loop.action == :wait
+    assert issue_payload.retry.release_loop.blocked_reason == :checks_pending
+    assert issue_payload.retry.release_loop.recovery_kind == :verification_failure
+    assert issue_payload.retry.release_loop.pr.number == 15
   end
 
   test "state payload exposes tracker, PR, branch, and final report links" do
@@ -268,6 +397,9 @@ defmodule Rondo.PresenterTest do
 
     payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
     assert [%{identifier: "MT-PRESENTER-TL", timeline: timeline}] = payload.run_timelines
+    [running_entry] = payload.running
+    assert running_entry.run_id == ledger.run_id
+    assert running_entry.run_dir == ledger.run_dir
     kinds = Enum.map(timeline, & &1.kind)
     assert "dispatch" in kinds
     assert "turn_started" in kinds
@@ -521,6 +653,29 @@ defmodule Rondo.PresenterTest do
     assert issue_payload.paused.interrupt.blocked_side_effect.label == "Tracker update"
   end
 
+  test "format_event_log_public preserves token deltas and model change metadata" do
+    log = [
+      %{
+        at: ~U[2026-06-29 10:05:00Z],
+        event: :warning,
+        message: "model changed: openrouter/openrouter/moonshotai/kimi-k2.7-code",
+        tokens: %{input_tokens: 4, output_tokens: 5, total_tokens: 11, cache_read_tokens: 2}
+      },
+      %{
+        at: ~U[2026-06-29 10:00:00Z],
+        event: :assistant,
+        message: "Turn 1 complete",
+        tokens: %{input_tokens: 1, output_tokens: 2, total_tokens: 3}
+      }
+    ]
+
+    assert [turn, model_change] = RondoWeb.Presenter.format_event_log_public(log)
+    assert turn.message == "Turn 1 complete"
+    assert turn.tokens == %{input_tokens: 1, output_tokens: 2, total_tokens: 3, cache_read_tokens: 0, cache_write_tokens: 0, cached_tokens: 0, cost: nil}
+    assert model_change.model_change == %{provider: "openrouter", model: "openrouter/moonshotai/kimi-k2.7-code"}
+    assert model_change.tokens == %{input_tokens: 4, output_tokens: 5, total_tokens: 11, cache_read_tokens: 2, cache_write_tokens: 0, cached_tokens: 2, cost: nil}
+  end
+
   test "state API tolerates disk-reconstructed paused entries with missing or string keys" do
     snapshot = %{
       running: [],
@@ -663,6 +818,8 @@ defmodule Rondo.PresenterTest do
           turn_count: 1,
           latest_gate: %{"status" => "fail"},
           tokens: %{total_tokens: 75},
+          cost: 0.0,
+          event_log: [%{tokens: %{cost: 0.42}}],
           adapter: "codex"
         }
       ],
@@ -680,7 +837,11 @@ defmodule Rondo.PresenterTest do
     assert failed.status == "failed"
     assert failed.last_meaningful_result == "gates fail"
     assert failed.model == "codex"
+    assert failed.cost == 0.0
     assert completed.issue_title == "Fix archive visibility"
+    assert completed.status == "merged/done"
+    assert completed.outcome_display.kind == "merged_done"
+    assert completed.cost == 0.015
     assert completed.provider == "openrouter"
     assert completed.duration_ms == 750_000
     assert completed.linear_url == "https://linear.app/example/MT-ARCH-1"
@@ -741,6 +902,21 @@ defmodule Rondo.PresenterTest do
     assert view.total == 2
     assert view.page_count == 2
     assert [%{issue_identifier: "MT-3"}] = view.rows
+  end
+
+  defp archived_run(identifier, exit_reason, state, finished_at, total_tokens) do
+    %{
+      issue_id: "issue-#{identifier}",
+      identifier: identifier,
+      session_id: "session-#{identifier}",
+      state: state,
+      started_at: DateTime.add(finished_at, -600, :second),
+      finished_at: finished_at,
+      exit_reason: exit_reason,
+      turn_count: 1,
+      tokens: %{input_tokens: total_tokens, output_tokens: total_tokens, total_tokens: total_tokens},
+      latest_gate: %{status: :pass, failed: []}
+    }
   end
 
   defp tmp_dir(name) do

@@ -78,6 +78,156 @@ defmodule Rondo.ReleaseLoopTest do
              ReleaseLoop.inspect(issue, repo: "sandsower/rondo", runner: release_loop_runner("[]"))
   end
 
+  test "discovers a PR from Linear issue attachments when the branch is missing" do
+    pr =
+      pr_map(42, "feature/from-attachment", "Attachment discovery",
+        review_decision: "APPROVED",
+        mergeable: "MERGEABLE",
+        merge_state_status: "CLEAN"
+      )
+
+    source_json =
+      review_snapshot_json(pr,
+        reviews: [%{state: "APPROVED", body: "Looks good.", author: %{login: "reviewer"}}],
+        comments: [],
+        inline_comments: [],
+        checks: %{state: "SUCCESS", conclusion: "SUCCESS", entries: []}
+      )
+
+    workspace_root = tmp_dir("release-loop-attachment-discovery")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      release_loop_enabled: true,
+      release_loop_pr_review_source: shell_print_json(source_json)
+    )
+
+    issue = %Issue{
+      id: "issue-attachment-discovery",
+      identifier: "MT-ATTACHMENT",
+      title: "Attachment discovery",
+      state: "In Review",
+      branch_name: nil
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+
+    Application.put_env(:rondo, :memory_tracker_issue_contexts, %{
+      issue.id => %{
+        attachments: [
+          %{
+            "id" => "att-1",
+            "title" => "GitHub PR #42",
+            "subtitle" => "via Linear attachment",
+            "url" => "https://github.com/sandsower/rondo/pull/42"
+          }
+        ]
+      }
+    })
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      Application.delete_env(:rondo, :memory_tracker_issue_contexts)
+      File.rm_rf(workspace_root)
+    end)
+
+    {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root, random_suffix: "attachment001")
+
+    assert {:ok, decision, ledger} =
+             ReleaseLoop.inspect(issue,
+               ledger: ledger,
+               repo: "sandsower/rondo",
+               runner:
+                 release_loop_runner("[]", source_json,
+                   pr_view_json: Jason.encode!(pr),
+                   inline_comments_json: "[]"
+                 )
+             )
+
+    assert decision.action == :merge
+    assert decision.pr.number == 42
+    assert decision.pr.head_ref_name == "feature/from-attachment"
+
+    payload = checkpoint_payload(ledger, "release_loop_pr_discovered")
+    assert payload["source"] == "issue_context"
+    assert payload["reference"] == "https://github.com/sandsower/rondo/pull/42"
+    assert payload["pr"]["number"] == 42
+  end
+
+  test "discovers a PR from Linear issue custom fields when the branch is missing" do
+    pr =
+      pr_map(43, "feature/from-custom-field", "Custom field discovery",
+        review_decision: "APPROVED",
+        mergeable: "MERGEABLE",
+        merge_state_status: "CLEAN"
+      )
+
+    source_json =
+      review_snapshot_json(pr,
+        reviews: [%{state: "APPROVED", body: "Looks good.", author: %{login: "reviewer"}}],
+        comments: [],
+        inline_comments: [],
+        checks: %{state: "SUCCESS", conclusion: "SUCCESS", entries: []}
+      )
+
+    workspace_root = tmp_dir("release-loop-custom-field-discovery")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      release_loop_enabled: true,
+      release_loop_pr_review_source: shell_print_json(source_json)
+    )
+
+    issue = %Issue{
+      id: "issue-custom-field-discovery",
+      identifier: "MT-CUSTOM-FIELD",
+      title: "Custom field discovery",
+      state: "In Review",
+      branch_name: nil
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+
+    Application.put_env(:rondo, :memory_tracker_issue_contexts, %{
+      issue.id => %{
+        custom_fields: %{
+          "GitHub PR" => "https://github.com/sandsower/rondo/pull/43",
+          "Notes" => "ready for review"
+        }
+      }
+    })
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      Application.delete_env(:rondo, :memory_tracker_issue_contexts)
+      File.rm_rf(workspace_root)
+    end)
+
+    {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root, random_suffix: "customfield001")
+
+    assert {:ok, decision, ledger} =
+             ReleaseLoop.inspect(issue,
+               ledger: ledger,
+               repo: "sandsower/rondo",
+               runner:
+                 release_loop_runner("[]", source_json,
+                   pr_view_json: Jason.encode!(pr),
+                   inline_comments_json: "[]"
+                 )
+             )
+
+    assert decision.action == :merge
+    assert decision.pr.number == 43
+    assert decision.pr.head_ref_name == "feature/from-custom-field"
+
+    payload = checkpoint_payload(ledger, "release_loop_pr_discovered")
+    assert payload["source"] == "issue_context"
+    assert payload["reference"] == "https://github.com/sandsower/rondo/pull/43"
+    assert payload["pr"]["number"] == 43
+  end
+
   test "treats conflicting mergeability as recovery work and records conflict evidence" do
     pr = pr_map(42, "feature/conflicting-branch", "Conflict recovery", review_decision: "APPROVED", mergeable: "CONFLICTING", merge_state_status: "DIRTY")
 
@@ -145,6 +295,7 @@ defmodule Rondo.ReleaseLoopTest do
     workspace_root = tmp_dir("release-loop-review")
     reply_body_file = tmp_file("release-loop-reply-body")
     reply_comment_file = tmp_file("release-loop-reply-comment")
+    reply_policy_log = tmp_file("release-loop-reply-policy")
     update_command = "printf '%s' \"$RONDO_PR_REVIEW_REPLY_BODY\" > #{reply_body_file} && printf '%s' \"$RONDO_PR_REVIEW_COMMENT_ID\" > #{reply_comment_file}"
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -152,7 +303,8 @@ defmodule Rondo.ReleaseLoopTest do
       workspace_root: workspace_root,
       release_loop_enabled: true,
       release_loop_pr_review_source: shell_print_json(source_json),
-      release_loop_pr_review_update: update_command
+      release_loop_pr_review_update: update_command,
+      action_policy_command: fake_action_policy_capture(workspace_root, "allow", reply_policy_log)
     )
 
     issue = %Issue{
@@ -175,6 +327,7 @@ defmodule Rondo.ReleaseLoopTest do
     assert decision.action == :fix
     assert decision.recovery_kind == :review_feedback
     assert Enum.any?(decision.feedback_queue, &(&1.kind == "inline"))
+    assert File.read!(reply_policy_log) == "pr.review.reply"
     assert File.read!(reply_body_file) =~ "addressing PR recovery"
     assert File.read!(reply_comment_file) == "c1"
 
@@ -216,7 +369,7 @@ defmodule Rondo.ReleaseLoopTest do
   end
 
   test "waits while checks are pending" do
-    pr = pr_map(8, "feature/pending-checks", "Pending checks", review_decision: "APPROVED", mergeable: "UNKNOWN", merge_state_status: "BEHIND")
+    pr = pr_map(8, "feature/pending-checks", "Pending checks", review_decision: "APPROVED", mergeable: "MERGEABLE", merge_state_status: "CLEAN")
 
     source_json =
       review_snapshot_json(pr,
@@ -245,6 +398,354 @@ defmodule Rondo.ReleaseLoopTest do
 
     assert decision.action == :wait
     assert decision.wait_interval_seconds == 9
+  end
+
+  test "treats terminal failed checks as recovery work" do
+    workspace_root = tmp_dir("release-loop-failed-checks")
+    workspace = Path.join(workspace_root, "MT-FAILED-CHECKS")
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    pr =
+      pr_map(9, "feature/failed-checks", "Failed checks",
+        review_decision: "APPROVED",
+        mergeable: "MERGEABLE",
+        merge_state_status: "CLEAN"
+      )
+
+    source_json =
+      review_snapshot_json(pr,
+        reviews: [],
+        comments: [],
+        inline_comments: [],
+        checks: %{state: "FAILURE", conclusion: "FAILURE", entries: [%{name: "ci", state: "FAILURE", conclusion: "FAILURE"}]}
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      release_loop_enabled: true,
+      release_loop_pr_review_source: shell_print_json(source_json)
+    )
+
+    issue = %Issue{
+      id: "issue-failed-checks",
+      identifier: "MT-FAILED-CHECKS",
+      title: "Failed checks",
+      state: "In Progress",
+      branch_name: "feature/failed-checks"
+    }
+
+    {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root, workspace: workspace, random_suffix: "failed001")
+
+    assert {:ok, decision, ledger} =
+             ReleaseLoop.inspect(issue,
+               ledger: ledger,
+               repo: "sandsower/rondo",
+               runner: release_loop_runner(Jason.encode!([pr]), source_json)
+             )
+
+    assert decision.action == :fix
+    assert decision.recovery_kind == :verification_failure
+    assert decision.guidance =~ "failing checks"
+
+    payload = checkpoint_payload(ledger, "release_loop_plan")
+    assert payload["recovery_kind"] == "verification_failure"
+  end
+
+  test "treats behind branches as rebase recovery work" do
+    workspace_root = tmp_dir("release-loop-behind-branch")
+    workspace = Path.join(workspace_root, "MT-BEHIND-BRANCH")
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    pr =
+      pr_map(10, "feature/behind-branch", "Behind branch",
+        review_decision: "APPROVED",
+        mergeable: "MERGEABLE",
+        merge_state_status: "BEHIND"
+      )
+
+    source_json =
+      review_snapshot_json(pr,
+        reviews: [],
+        comments: [],
+        inline_comments: [],
+        checks: %{state: "SUCCESS", conclusion: "SUCCESS", entries: [%{name: "ci", state: "SUCCESS", conclusion: "SUCCESS"}]}
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      release_loop_enabled: true,
+      release_loop_pr_review_source: shell_print_json(source_json)
+    )
+
+    issue = %Issue{
+      id: "issue-behind-branch",
+      identifier: "MT-BEHIND-BRANCH",
+      title: "Behind branch",
+      state: "In Progress",
+      branch_name: "feature/behind-branch"
+    }
+
+    {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root, workspace: workspace, random_suffix: "behind001")
+
+    assert {:ok, decision, ledger} =
+             ReleaseLoop.inspect(issue,
+               ledger: ledger,
+               repo: "sandsower/rondo",
+               runner: release_loop_runner(Jason.encode!([pr]), source_json)
+             )
+
+    assert decision.action == :fix
+    assert decision.recovery_kind == :rebase
+    assert decision.guidance =~ "rebase"
+
+    payload = checkpoint_payload(ledger, "release_loop_plan")
+    assert payload["recovery_kind"] == "rebase"
+  end
+
+  test "marks green draft PRs as ready before merge" do
+    pr =
+      pr_map(11, "feature/draft-ready", "Draft ready",
+        review_decision: "APPROVED",
+        mergeable: "MERGEABLE",
+        merge_state_status: "CLEAN",
+        isDraft: true
+      )
+
+    source_json =
+      review_snapshot_json(pr,
+        reviews: [%{state: "APPROVED", body: "Looks good.", author: %{login: "reviewer"}}],
+        comments: [],
+        inline_comments: [],
+        checks: %{state: "SUCCESS", conclusion: "SUCCESS", entries: []}
+      )
+
+    workspace_root = tmp_dir("release-loop-draft-ready")
+    workspace = Path.join(workspace_root, "MT-DRAFT-READY")
+    File.mkdir_p!(workspace)
+    ready_policy_log = tmp_file("release-loop-ready-policy")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      release_loop_enabled: true,
+      release_loop_pr_review_source: shell_print_json(source_json),
+      action_policy_command: fake_action_policy_capture(workspace_root, "allow", ready_policy_log)
+    )
+
+    issue = %Issue{
+      id: "issue-draft-ready",
+      identifier: "MT-DRAFT-READY",
+      title: "Draft ready",
+      state: "In Review",
+      branch_name: "feature/draft-ready"
+    }
+
+    {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root, workspace: workspace, random_suffix: "ready001")
+
+    assert {:ok, decision, ledger} =
+             ReleaseLoop.inspect(issue,
+               ledger: ledger,
+               repo: "sandsower/rondo",
+               workspace: workspace,
+               runner: release_loop_runner(Jason.encode!([pr]), source_json)
+             )
+
+    assert decision.action == :ready
+    assert decision.pr.is_draft == true
+
+    assert {:ok, result, ledger} =
+             ReleaseLoop.execute_ready(issue, decision,
+               ledger: ledger,
+               repo: "sandsower/rondo",
+               workspace: workspace,
+               runner: release_loop_runner(Jason.encode!([pr]), source_json)
+             )
+
+    assert result.ready? == true
+    assert File.read!(ready_policy_log) == "gh.pr.ready"
+    payload = checkpoint_payload(ledger, "release_loop_ready_completed")
+    assert payload["pr"]["number"] == 11
+  end
+
+  test "holds green PRs when merge mode is ask or deny" do
+    for mode <- ["ask", "deny"] do
+      pr =
+        pr_map(12, "feature/#{mode}-blocked", "Merge mode #{mode}",
+          review_decision: "APPROVED",
+          mergeable: "MERGEABLE",
+          merge_state_status: "CLEAN"
+        )
+
+      source_json =
+        review_snapshot_json(pr,
+          reviews: [%{state: "APPROVED", body: "Looks good.", author: %{login: "reviewer"}}],
+          comments: [],
+          inline_comments: [],
+          checks: %{state: "SUCCESS", conclusion: "SUCCESS", entries: []}
+        )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        release_loop_enabled: true,
+        release_loop_merge_mode: mode,
+        release_loop_pr_review_source: shell_print_json(source_json)
+      )
+
+      issue = %Issue{
+        id: "issue-merge-mode-#{mode}",
+        identifier: "MT-MERGE-#{String.upcase(mode)}",
+        title: "Merge mode #{mode}",
+        state: "In Review",
+        branch_name: "feature/#{mode}-blocked"
+      }
+
+      assert {:ok, decision, _ledger} =
+               ReleaseLoop.inspect(issue, repo: "sandsower/rondo", runner: release_loop_runner(Jason.encode!([pr]), source_json))
+
+      assert decision.action == :wait
+      assert decision.closeout_state == "review"
+      assert decision.blocked_reason == "merge_mode_blocked:review"
+    end
+  end
+
+  test "records ready failure evidence when ready CLI fails" do
+    pr =
+      pr_map(13, "feature/ready-fails", "Ready failure",
+        review_decision: "APPROVED",
+        mergeable: "MERGEABLE",
+        merge_state_status: "CLEAN",
+        is_draft: true
+      )
+
+    source_json =
+      review_snapshot_json(pr,
+        reviews: [%{state: "APPROVED", body: "Looks good.", author: %{login: "reviewer"}}],
+        comments: [],
+        inline_comments: [],
+        checks: %{state: "SUCCESS", conclusion: "SUCCESS", entries: []}
+      )
+
+    workspace_root = tmp_dir("release-loop-ready-failure")
+    workspace = Path.join(workspace_root, "MT-READY-FAIL")
+    File.mkdir_p!(workspace)
+    policy_log = tmp_file("release-loop-ready-policy")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      release_loop_enabled: true,
+      release_loop_pr_review_source: shell_print_json(source_json),
+      action_policy_command: fake_action_policy_capture(workspace_root, "allow", policy_log)
+    )
+
+    issue = %Issue{
+      id: "issue-ready-failure",
+      identifier: "MT-READY-FAIL",
+      title: "Ready failure",
+      state: "In Review",
+      branch_name: "feature/ready-fails"
+    }
+
+    {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root, workspace: workspace, random_suffix: "readyfail001")
+
+    runner =
+      fn
+        "gh", ["pr", "list" | _], _opts -> {Jason.encode!([pr]), 0}
+        "gh", ["pr", "view" | _], _opts -> {Jason.encode!(pr), 0}
+        "gh", ["api", _path | _], _opts -> {"[]", 0}
+        "gh", ["pr", "ready" | _], _opts -> {"ready failed", 1}
+        cmd, args, opts -> System.cmd(cmd, args, opts)
+      end
+
+    assert {:ok, decision, ledger} =
+             ReleaseLoop.inspect(issue,
+               ledger: ledger,
+               repo: "sandsower/rondo",
+               runner: runner
+             )
+
+    assert decision.action == :ready
+
+    assert {:error, _reason, ledger} =
+             ReleaseLoop.execute_ready(issue, decision,
+               ledger: ledger,
+               repo: "sandsower/rondo",
+               workspace: workspace,
+               runner: runner
+             )
+
+    assert File.read!(policy_log) == "gh.pr.ready"
+    payload = checkpoint_payload(ledger, "release_loop_closeout_failed")
+    assert payload["stage"] == "ready"
+  end
+
+  test "records closeout failure evidence when merge CLI fails" do
+    pr =
+      pr_map(13, "feature/merge-fails", "Merge failure",
+        review_decision: "APPROVED",
+        mergeable: "MERGEABLE",
+        merge_state_status: "CLEAN"
+      )
+
+    source_json =
+      review_snapshot_json(pr,
+        reviews: [%{state: "APPROVED", body: "Looks good.", author: %{login: "reviewer"}}],
+        comments: [],
+        inline_comments: [],
+        checks: %{state: "SUCCESS", conclusion: "SUCCESS", entries: []}
+      )
+
+    workspace_root = tmp_dir("release-loop-merge-failure")
+    workspace = Path.join(workspace_root, "MT-MERGE-FAIL")
+    File.mkdir_p!(workspace)
+    policy_log = tmp_file("release-loop-merge-policy")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      release_loop_enabled: true,
+      release_loop_pr_review_source: shell_print_json(source_json),
+      action_policy_command: fake_action_policy_capture(workspace_root, "allow", policy_log)
+    )
+
+    issue = %Issue{
+      id: "issue-merge-failure",
+      identifier: "MT-MERGE-FAIL",
+      title: "Merge failure",
+      state: "In Review",
+      branch_name: "feature/merge-fails"
+    }
+
+    {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root, workspace: workspace, random_suffix: "mergefail001")
+
+    runner =
+      fn
+        "gh", ["pr", "list" | _], _opts -> {Jason.encode!([pr]), 0}
+        "gh", ["pr", "view" | _], _opts -> {Jason.encode!(pr), 0}
+        "gh", ["api", _path | _], _opts -> {"[]", 0}
+        "gh", ["pr", "merge" | _], _opts -> {"merge failed", 1}
+        "gh", ["pr", "ready" | _], _opts -> {"readied", 0}
+        cmd, args, opts -> System.cmd(cmd, args, opts)
+      end
+
+    assert {:ok, decision, ledger} =
+             ReleaseLoop.inspect(issue,
+               ledger: ledger,
+               repo: "sandsower/rondo",
+               runner: runner
+             )
+
+    assert decision.action == :merge
+
+    assert {:error, _reason, ledger} =
+             ReleaseLoop.execute_closeout(issue, decision,
+               ledger: ledger,
+               repo: "sandsower/rondo",
+               workspace: workspace,
+               runner: runner,
+               release_loop: release_loop_config()
+             )
+
+    assert File.read!(policy_log) == "gh.pr.merge"
+    payload = checkpoint_payload(ledger, "release_loop_closeout_failed")
+    assert payload["stage"] == "merge"
   end
 
   test "skips automated closeout when PR risk exceeds the automation threshold" do
@@ -368,6 +869,7 @@ defmodule Rondo.ReleaseLoopTest do
     workspace_root = tmp_dir("release-loop-closeout")
     workspace = Path.join(workspace_root, "MT-GREEN-CLOSEOUT")
     File.mkdir_p!(workspace)
+    merge_policy_log = tmp_file("release-loop-merge-policy")
     on_exit(fn -> File.rm_rf(workspace_root) end)
 
     issue = %Issue{
@@ -391,7 +893,7 @@ defmodule Rondo.ReleaseLoopTest do
       workspace_root: workspace_root,
       release_loop_enabled: true,
       release_loop_pr_review_source: shell_print_json(source_json),
-      action_policy_command: fake_action_policy("allow"),
+      action_policy_command: fake_action_policy_capture(workspace_root, "allow", merge_policy_log),
       gates: [%{name: "format", command: "exit 0", timeout_ms: 1000}]
     )
 
@@ -413,6 +915,7 @@ defmodule Rondo.ReleaseLoopTest do
              )
 
     assert result.closed_out?
+    assert File.read!(merge_policy_log) == "gh.pr.merge"
     assert_received {:memory_tracker_state_update, "issue-green-closeout", "Done"}
   end
 
@@ -467,10 +970,21 @@ defmodule Rondo.ReleaseLoopTest do
 
   defp release_loop_runner(pr_list_json, source_json \\ nil, opts \\ []) do
     git_responses = Keyword.get(opts, :git, %{})
+    pr_view_json = Keyword.get(opts, :pr_view_json, pr_list_json)
+    inline_comments_json = Keyword.get(opts, :inline_comments_json, "[]")
 
     fn
       "gh", ["pr", "list" | _], _opts ->
         {pr_list_json, 0}
+
+      "gh", ["pr", "view" | _], _opts ->
+        {pr_view_json, 0}
+
+      "gh", ["api", _path | _], _opts ->
+        {inline_comments_json, 0}
+
+      "gh", ["pr", "ready" | _], _opts ->
+        {"readied", 0}
 
       "gh", ["pr", "merge" | _], _opts ->
         {"merged", 0}
@@ -503,6 +1017,8 @@ defmodule Rondo.ReleaseLoopTest do
   end
 
   defp pr_map(number, branch, title, opts) do
+    is_draft = Keyword.get(opts, :is_draft, Keyword.get(opts, :isDraft, false))
+
     %{
       number: number,
       url: "https://github.com/sandsower/rondo/pull/#{number}",
@@ -510,7 +1026,7 @@ defmodule Rondo.ReleaseLoopTest do
       state: "OPEN",
       headRefName: branch,
       baseRefName: "main",
-      isDraft: false,
+      isDraft: is_draft,
       mergeable: Keyword.get(opts, :mergeable, "MERGEABLE"),
       mergeStateStatus: Keyword.get(opts, :merge_state_status, "CLEAN"),
       reviewDecision: Keyword.get(opts, :review_decision, "REVIEW_REQUIRED")
@@ -559,6 +1075,28 @@ defmodule Rondo.ReleaseLoopTest do
 
     File.chmod!(script, 0o755)
     script
+  end
+
+  defp fake_action_policy_capture(root, decision, log_file) do
+    path = Path.join(root, "fake-action-policy.sh")
+
+    File.write!(path, """
+    #!/bin/sh
+    action=""
+    classes=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --action) action="$2"; shift 2 ;;
+        --class) classes="$classes${classes:+,}$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '%s' "$action" > "#{log_file}"
+    printf '{"decision":"#{decision}","action":"%s","classes":["%s"],"mode":"unattended-auto","log_level":"warning","requires_human":true,"reason":"test #{decision}","matched_rules":[]}' "$action" "$classes"
+    """)
+
+    File.chmod!(path, 0o755)
+    path
   end
 
   defp release_loop_config do
