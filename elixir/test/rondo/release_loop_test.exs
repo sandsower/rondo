@@ -3,6 +3,64 @@ defmodule Rondo.ReleaseLoopTest do
 
   alias Rondo.{Linear.Issue, ReleaseLoop, RunLedger}
 
+  defmodule FakeLinearClient do
+    def fetch_candidate_issues do
+      send(self(), {:fake_linear_client, :fetch_candidate_issues})
+      {:ok, []}
+    end
+
+    def fetch_issues_by_states(states) do
+      send(self(), {:fake_linear_client, :fetch_issues_by_states, states})
+      {:ok, []}
+    end
+
+    def fetch_issue_states_by_ids(issue_ids) do
+      send(self(), {:fake_linear_client, :fetch_issue_states_by_ids, issue_ids})
+      {:ok, []}
+    end
+
+    def fetch_issue_contexts_by_ids(issue_ids) do
+      send(self(), {:fake_linear_client, :fetch_issue_contexts_by_ids, issue_ids})
+      {:ok, []}
+    end
+
+    def graphql(query, variables) do
+      send(self(), {:fake_linear_client, :graphql, query, variables})
+
+      cond do
+        String.contains?(query, "issueUpdate") ->
+          {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}}
+
+        String.contains?(query, "commentCreate") ->
+          {:ok, %{"data" => %{"commentCreate" => %{"success" => true}}}}
+
+        String.contains?(query, "RondoResolveStateId") ->
+          state_id = Process.get({__MODULE__, :state_id}, "state-1")
+
+          {:ok, %{"data" => %{"issue" => %{"team" => %{"states" => %{"nodes" => [%{"id" => state_id}]}}}}}}
+
+        true ->
+          {:ok, %{"data" => %{}}}
+      end
+    end
+  end
+
+  setup do
+    previous_linear_client_module = Application.get_env(:rondo, :linear_client_module)
+    Application.put_env(:rondo, :linear_client_module, FakeLinearClient)
+
+    on_exit(fn ->
+      case previous_linear_client_module do
+        nil -> Application.delete_env(:rondo, :linear_client_module)
+        module -> Application.put_env(:rondo, :linear_client_module, module)
+      end
+
+      Process.delete({FakeLinearClient, :state_id})
+    end)
+
+    :ok
+  end
+
   test "returns skip when no PR is found for the branch" do
     write_workflow_file!(Workflow.workflow_file_path(),
       release_loop_enabled: true
