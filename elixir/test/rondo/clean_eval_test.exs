@@ -4,6 +4,106 @@ defmodule Rondo.CleanEvalTest do
   alias Rondo.CleanEval
   alias Rondo.RunLedger
 
+  defmodule PrePrProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "test_pre_pr"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: Rondo.ProcessProvider.probe_result(:ok, %{gate_selection: :ok})
+
+    @impl true
+    def select_gates(opts \\ []) do
+      if parent = Process.get(:clean_eval_test_parent) do
+        send(parent, {:clean_eval_select_gates, opts})
+      end
+
+      gates = [
+        %{
+          name: "provider pre-pr",
+          command: "test -f new.txt",
+          timeout_ms: 10_000,
+          action_id: "gate.provider-pre-pr",
+          action_classes: ["read"]
+        }
+      ]
+
+      {:ok,
+       Rondo.ProcessProvider.gate_selection_result(gates,
+         selected: [%{name: "provider pre-pr", reason: "selected for pre-PR clean evaluation"}],
+         metadata: %{provider: id(), stage: Keyword.get(opts, :stage)}
+       )}
+    end
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Provider prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []), do: %{}
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(action, classes, opts \\ []) do
+      {:ok,
+       %{
+         "decision" => "allow",
+         "action" => action,
+         "classes" => classes,
+         "mode" => Keyword.get(opts, :mode, "unattended-auto"),
+         "provider" => id()
+       }}
+    end
+  end
+
+  defmodule FailingProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "failing_pre_pr"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: Rondo.ProcessProvider.probe_result(:ok, %{gate_selection: :ok})
+
+    @impl true
+    def select_gates(_opts \\ []), do: {:error, :provider_unavailable}
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Provider prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []), do: %{}
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(action, classes, opts \\ []) do
+      {:ok,
+       %{
+         "decision" => "allow",
+         "action" => action,
+         "classes" => classes,
+         "mode" => Keyword.get(opts, :mode, "unattended-auto"),
+         "provider" => id()
+       }}
+    end
+  end
+
   test "exposes the clean-eval artifact contract" do
     assert CleanEval.schema() == "rondo.clean_eval/v0"
     assert CleanEval.result_relative_path() == "clean_eval/result.json"
@@ -104,18 +204,134 @@ defmodule Rondo.CleanEvalTest do
     assert "clean_eval_gate_results" in artifact_kinds
   end
 
-  test "uses configured clean_eval gates when no gates are passed" do
+  test "uses the configured process provider pre-PR gate selection in the clean worktree" do
+    context = setup_run("clean-eval-provider-pre-pr", clean_eval_enabled: true)
+    write_patch_artifacts!(context)
+    Process.put(:clean_eval_test_parent, self())
+
+    assert {:ok, _ledger, result} = CleanEval.run(context.ledger, process_provider: PrePrProcessProvider, source_contract: %{path: Path.join(context.root, "request.json")})
+    assert result.status == :pass
+    assert [%{"name" => "provider pre-pr", "status" => "pass"}] = read_result_json!(context)["gates"]["results"]
+
+    assert_received {:clean_eval_select_gates, opts}
+    assert Keyword.fetch!(opts, :stage) == :pre_pr
+    assert Keyword.fetch!(opts, :source_workspace) == context.workspace
+    assert Keyword.fetch!(opts, :workspace) == eval_workspace(context)
+    assert Keyword.fetch!(opts, :source_contract) == %{path: Path.join(context.root, "request.json")}
+
+    gate_selection = read_result_json!(context)["gates"]["gate_selection"]
+    assert gate_selection["metadata"]["provider"] == "test_pre_pr"
+    assert gate_selection["metadata"]["stage"] == "pre_pr"
+  after
+    Process.delete(:clean_eval_test_parent)
+  end
+
+  test "falls back to native pre-PR gates when an optional provider gate selection fails" do
     context =
-      setup_run("clean-eval-config-gates",
+      setup_run("clean-eval-provider-fallback",
         clean_eval_enabled: true,
-        clean_eval_gates: [%{name: "configured", command: "test -f new.txt", timeout_ms: 10_000}]
+        clean_eval_gates: [%{name: "native fallback", command: "test -f new.txt", timeout_ms: 10_000}]
       )
 
     write_patch_artifacts!(context)
 
-    assert {:ok, _ledger, result} = CleanEval.run(context.ledger)
+    assert {:ok, _ledger, result} = CleanEval.run(context.ledger, process_provider: FailingProcessProvider)
     assert result.status == :pass
-    assert [%{"name" => "configured", "status" => "pass"}] = read_result_json!(context)["gates"]["results"]
+
+    gate_selection = read_result_json!(context)["gates"]["gate_selection"]
+    assert gate_selection["metadata"]["fallback_from"] == "failing_pre_pr"
+    assert gate_selection["metadata"]["fallback_reason"] =~ "provider_unavailable"
+    assert gate_selection["metadata"]["action_policy_provider"] == "native"
+    assert [%{"message" => message}] = gate_selection["warnings"]
+    assert message =~ "fell back to native gates"
+  end
+
+  test "returns an error when a Beislið artifact is invalid" do
+    artifact_path = beislid_fixture_path("unapproved.json")
+
+    context =
+      setup_run("clean-eval-beislid-invalid-artifact",
+        clean_eval_enabled: true,
+        process_provider_kind: "beislid",
+        process_provider_artifact_path: artifact_path
+      )
+
+    write_patch_artifacts!(context)
+
+    assert {:ok, _ledger, result} =
+             CleanEval.run(context.ledger,
+               process_provider: Rondo.ProcessProvider.Beislid,
+               source_contract: %{path: Path.join(context.root, "request.json")}
+             )
+
+    assert result.status == :error
+    assert result.reason =~ "gate_selection_failed"
+    assert result.reason =~ "artifact_not_approved"
+    assert read_result_json!(context)["status"] == "error"
+  end
+
+  test "returns an error when provider gate selection is required and fails" do
+    context =
+      setup_run("clean-eval-provider-required",
+        clean_eval_enabled: true,
+        process_provider_required: true,
+        clean_eval_gates: [%{name: "native fallback", command: "test -f new.txt", timeout_ms: 10_000}]
+      )
+
+    write_patch_artifacts!(context)
+
+    assert {:ok, _ledger, result} = CleanEval.run(context.ledger, process_provider: FailingProcessProvider)
+    assert result.status == :error
+    assert result.reason =~ "gate_selection_failed"
+  end
+
+  test "uses Beislið pre-PR gates and action policy when the artifact provides policy" do
+    artifact_path = beislid_fixture_path("approved.json")
+
+    context =
+      setup_run("clean-eval-beislid-allow",
+        clean_eval_enabled: true,
+        process_provider_kind: "beislid",
+        process_provider_artifact_path: artifact_path
+      )
+
+    write_patch_artifacts!(context)
+
+    assert {:ok, _ledger, result} =
+             CleanEval.run(context.ledger,
+               process_provider: Rondo.ProcessProvider.Beislid,
+               source_contract: %{path: Path.join(context.root, "request.json")}
+             )
+
+    assert result.status == :pass
+    gate_selection = read_result_json!(context)["gates"]["gate_selection"]
+    assert gate_selection["metadata"]["provider"] == "beislid"
+    assert gate_selection["metadata"]["action_policy_provider"] == "beislid"
+    assert gate_selection["metadata"]["stage"] == "pre_pr"
+  end
+
+  test "uses native action policy when a Beislið artifact lacks policy" do
+    artifact_path = beislid_fixture_path("no_policy.json")
+
+    context =
+      setup_run("clean-eval-beislid-native-policy",
+        clean_eval_enabled: true,
+        process_provider_kind: "beislid",
+        process_provider_artifact_path: artifact_path
+      )
+
+    write_patch_artifacts!(context)
+
+    assert {:ok, _ledger, result} =
+             CleanEval.run(context.ledger,
+               process_provider: Rondo.ProcessProvider.Beislid
+             )
+
+    assert result.status == :pass
+    gate_selection = read_result_json!(context)["gates"]["gate_selection"]
+    assert gate_selection["metadata"]["provider"] == "beislid"
+    assert gate_selection["metadata"]["action_policy_provider"] == "native"
+    assert gate_selection["metadata"]["stage"] == "pre_pr"
   end
 
   test "passes with apply-only evaluation when no gates are configured" do
@@ -358,6 +574,10 @@ defmodule Rondo.CleanEvalTest do
   defp git!(workspace, args) do
     {output, 0} = System.cmd("git", args, cd: workspace, stderr_to_stdout: true)
     output
+  end
+
+  defp beislid_fixture_path(filename) do
+    Path.expand(Path.join([__DIR__, "..", "fixtures", "beislid_process_provider", filename]))
   end
 
   defp tmp_dir(name) do

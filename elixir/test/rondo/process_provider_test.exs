@@ -18,6 +18,7 @@ defmodule Rondo.ProcessProviderTest do
   test "native provider exposes current workflow gates and unsupported rich features" do
     write_workflow_file!(Workflow.workflow_file_path(),
       gates: [%{name: "unit", command: "mix test", timeout_ms: 120_000}],
+      clean_eval_gates: [%{name: "clean-eval", command: "mix test --list", timeout_ms: 30_000}],
       claude_model: "claude-test",
       claude_allowed_tools: ["Read", "Bash"]
     )
@@ -35,6 +36,15 @@ defmodule Rondo.ProcessProviderTest do
             }} = Native.select_gates()
 
     assert reason =~ "WORKFLOW.md"
+
+    assert {:ok,
+            %{
+              gates: [%{name: "clean-eval", command: "mix test --list", timeout_ms: 30_000, action_classes: ["read"]}],
+              selected: [%{name: "clean-eval", reason: pre_pr_reason}],
+              metadata: %{stage: "pre_pr"}
+            }} = Native.select_gates(stage: "pre_pr")
+
+    assert pre_pr_reason =~ "pre-PR"
 
     assert {:ok, []} = Native.select_guides()
     assert {:ok, []} = Native.proof_requirements()
@@ -113,6 +123,36 @@ defmodule Rondo.ProcessProviderTest do
                 stage: :post_turn
               }
             }} = Beislid.select_gates(stage: :post_turn)
+  end
+
+  test "beislid provider filters staged gates for pre-PR selection" do
+    temp_dir = Path.join(System.tmp_dir!(), "rondo-beislid-provider-stages-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(temp_dir)
+    on_exit(fn -> File.rm_rf(temp_dir) end)
+
+    artifact_path =
+      write_json!(temp_dir, "staged.json", %{
+        "schema" => "beislid-process-artifact-v1",
+        "id" => "staged-fixture",
+        "status" => "approved",
+        "gates" => [
+          %{"name" => "turn", "command" => "true", "stage" => "post_turn"},
+          %{"name" => "pre-pr", "command" => "true", "stage" => "pre_pr"},
+          %{"name" => "shared", "command" => "true", "stage" => "shared"},
+          %{"name" => "unstaged", "command" => "true"}
+        ]
+      })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      process_provider_kind: "beislid",
+      process_provider_artifact_path: artifact_path
+    )
+
+    assert {:ok, %{gates: pre_pr_gates, metadata: %{stage: :pre_pr}}} = Beislid.select_gates(stage: :pre_pr)
+    assert Enum.map(pre_pr_gates, & &1.name) == ["pre-pr", "shared", "unstaged"]
+
+    assert {:ok, %{gates: post_turn_gates}} = Beislid.select_gates(stage: :post_turn)
+    assert Enum.map(post_turn_gates, & &1.name) == ["turn", "shared", "unstaged"]
   end
 
   test "beislid provider augments native prompt and evaluates fixture action policy" do

@@ -289,7 +289,7 @@ defmodule Rondo.RunOnce do
     result = deps.agent_runner.(issue, agent_opts)
     {ledger, updates} = record_queued_updates(ledger, issue.id)
     ledger = finalize_run_artifacts(ledger, result, updates)
-    ledger = maybe_run_clean_eval(ledger, result)
+    {ledger, result} = maybe_run_clean_eval(ledger, result)
     complete_run_once_ledger_result(ledger, result)
   rescue
     error ->
@@ -322,28 +322,36 @@ defmodule Rondo.RunOnce do
     if CleanEval.enabled?() do
       run_clean_eval(ledger)
     else
-      ledger
+      {ledger, :ok}
     end
   end
 
-  defp maybe_run_clean_eval(ledger, _result), do: ledger
+  defp maybe_run_clean_eval(ledger, result), do: {ledger, result}
 
   defp run_clean_eval(ledger) do
     case CleanEval.run(ledger) do
-      {:ok, ledger, result} ->
+      {:ok, ledger, %{status: status} = result} when status in [:pass, :skipped] ->
         Logger.info("Run-once clean eval #{ledger_context(ledger)} status=#{result.status}")
-        ledger
+        {ledger, :ok}
+
+      {:ok, ledger, %{status: status} = result} ->
+        Logger.warning("Run-once clean eval blocked #{ledger_context(ledger)} status=#{result.status}")
+        {ledger, {:error, {:clean_eval_failed, status, clean_eval_failure_summary(result)}}}
 
       {:error, reason} ->
         Logger.warning("Failed to record run-once clean eval #{ledger_context(ledger)} reason=#{inspect(reason)}")
-        ledger
+        {ledger, {:error, {:clean_eval_record_failed, reason}}}
     end
   rescue
-    # Clean eval is reporting-only: it must never change the run result, even
-    # if it crashes. Log and keep the ledger unchanged.
     error ->
       Logger.warning("Run-once clean eval crashed #{ledger_context(ledger)} reason=#{Exception.message(error)}")
-      ledger
+      {ledger, {:error, {:clean_eval_crashed, Exception.message(error)}}}
+  end
+
+  defp clean_eval_failure_summary(result) do
+    result
+    |> Map.take([:status, :reason, :base_ref, :base_branch, :patch_status, :apply_exit_status, :gates])
+    |> Map.reject(fn {_key, value} -> is_nil(value) end)
   end
 
   defp finalize_run_artifacts(ledger, :ok, updates) do

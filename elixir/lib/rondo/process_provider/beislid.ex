@@ -44,11 +44,12 @@ defmodule Rondo.ProcessProvider.Beislid do
   @impl true
   def select_gates(opts \\ []) do
     with {:ok, artifact} <- load_artifact(opts) do
-      gates = Enum.map(Map.get(artifact, :gates, []), &gate_definition/1)
+      selected_artifact_gates = gates_for_stage(Map.get(artifact, :gates, []), Keyword.get(opts, :stage))
+      gates = Enum.map(selected_artifact_gates, &gate_definition/1)
 
       {:ok,
        ProcessProvider.gate_selection_result(gates,
-         selected: Enum.map(Map.get(artifact, :gates, []), &selected_reason/1),
+         selected: Enum.map(selected_artifact_gates, &selected_reason/1),
          skipped: Map.get(artifact, :skipped, []),
          warnings: Map.get(artifact, :warnings, []),
          metadata: gate_metadata(artifact, opts)
@@ -221,6 +222,7 @@ defmodule Rondo.ProcessProvider.Beislid do
          timeout_ms: positive_integer(Map.get(gate, "timeout_ms"), Config.gates() |> default_gate_timeout()),
          action_id: string_or_nil(Map.get(gate, "action_id")),
          action_classes: string_list(Map.get(gate, "action_classes"), ["read"]),
+         stage: string_or_nil(Map.get(gate, "stage")),
          reason: string_or_nil(Map.get(gate, "reason")) || "selected by Beislið process artifact"
        }}
     end
@@ -275,6 +277,23 @@ defmodule Rondo.ProcessProvider.Beislid do
 
   defp normalize_metadata(value) when is_map(value), do: value
   defp normalize_metadata(_value), do: %{}
+
+  defp gates_for_stage(gates, nil), do: gates
+
+  defp gates_for_stage(gates, stage) when is_atom(stage), do: gates_for_stage(gates, Atom.to_string(stage))
+
+  defp gates_for_stage(gates, stage) when is_binary(stage) do
+    Enum.filter(gates, fn gate -> gate_selected_for_stage?(gate, stage) end)
+  end
+
+  defp gate_selected_for_stage?(gate, stage) do
+    case Map.get(gate, :stage) do
+      nil -> true
+      "shared" -> true
+      ^stage -> true
+      _other -> false
+    end
+  end
 
   defp gate_definition(gate) do
     Map.take(gate, [:name, :command, :timeout_ms, :action_id, :action_classes])
