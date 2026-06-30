@@ -133,6 +133,8 @@ Runs classified as `patch_contains_secret` do not emit a delivery artifact; the 
 
 When workflow gates are configured, Rondo stores structured gate summaries and raw command output under `artifacts/gates/`. Agent-turn gate runs are namespaced by turn, for example `artifacts/gates/turn-0001/results.json`, so later continuation turns do not overwrite earlier evidence.
 
+Each `results.json` includes the ProcessProvider gate-selection envelope when available. For changed-file-aware providers this envelope records `changed_files`, selected/skipped explanations, unmatched-path warnings, and selector/provider metadata alongside the gates that actually ran. Changed paths are collected from the git workspace before post-turn gates using the run-start base commit when available, plus committed, staged, unstaged, and untracked paths.
+
 Gate artifact links use these kinds in the manifest:
 
 - `gate_results` for the structured JSON summary
