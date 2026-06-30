@@ -82,6 +82,7 @@ defmodule RondoWeb.Presenter do
       issue_identifier: issue_identifier,
       issue_id: issue_id_from_entries(running, retry, paused),
       status: issue_status(running, retry, paused),
+      project: Config.linear_project_slug(),
       workspace: workspace_payload(issue_identifier, paused),
       attempts: attempts_payload(retry),
       running: maybe_running_issue_payload(running),
@@ -152,6 +153,7 @@ defmodule RondoWeb.Presenter do
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       model_routing: Map.get(entry, :model_routing),
       model_fallback: Map.get(entry, :model_fallback),
+      project: Config.linear_project_slug(),
       tokens: %{
         input_tokens: entry.claude_input_tokens,
         output_tokens: entry.claude_output_tokens,
@@ -167,6 +169,7 @@ defmodule RondoWeb.Presenter do
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       attempt: entry.attempt,
+      project: Config.linear_project_slug(),
       due_at: due_at_iso8601(entry.due_in_ms),
       error: entry.error
     }
@@ -181,6 +184,7 @@ defmodule RondoWeb.Presenter do
       issue_id: entry_value(entry, :issue_id),
       issue_identifier: entry_value(entry, :identifier),
       state: entry_value(entry, :state),
+      project: Config.linear_project_slug(),
       paused_state: paused_state,
       tracker_state: tracker_state,
       tracker_state_mismatch: state_mismatch?(paused_state, tracker_state),
@@ -219,6 +223,7 @@ defmodule RondoWeb.Presenter do
       :issue_id,
       :issue_identifier,
       :state,
+      :project,
       :session_id,
       :run_id,
       :run_dir,
@@ -257,6 +262,7 @@ defmodule RondoWeb.Presenter do
       latest_gate: gate_payload(Map.get(running, :latest_gate)),
       model_routing: Map.get(running, :model_routing),
       model_fallback: Map.get(running, :model_fallback),
+      project: Config.linear_project_slug(),
       tokens: %{
         input_tokens: running.claude_input_tokens,
         output_tokens: running.claude_output_tokens,
@@ -268,6 +274,7 @@ defmodule RondoWeb.Presenter do
   defp retry_issue_payload(retry) do
     %{
       attempt: retry.attempt,
+      project: Config.linear_project_slug(),
       due_at: due_at_iso8601(retry.due_in_ms),
       error: retry.error
     }
@@ -419,6 +426,7 @@ defmodule RondoWeb.Presenter do
       issue_identifier: entry.identifier,
       session_id: entry.session_id,
       state: entry.state,
+      project: Config.linear_project_slug(),
       started_at: started_at,
       finished_at: iso8601(entry.finished_at) || to_string(entry.finished_at),
       exit_reason: entry.exit_reason,

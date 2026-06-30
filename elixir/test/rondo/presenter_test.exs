@@ -61,10 +61,14 @@ defmodule Rondo.PresenterTest do
 
     payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
     assert payload.running |> hd() |> Map.fetch!(:latest_gate) |> Map.fetch!(:status) == :fail
+    assert payload.running |> hd() |> Map.fetch!(:project) == Rondo.Config.linear_project_slug()
     assert payload.archived |> hd() |> Map.fetch!(:runs) |> hd() |> Map.fetch!(:latest_gate) |> Map.fetch!(:status) == :fail
+    assert payload.archived |> hd() |> Map.fetch!(:runs) |> hd() |> Map.fetch!(:project) == Rondo.Config.linear_project_slug()
 
     assert {:ok, issue_payload} = RondoWeb.Presenter.issue_payload("MT-GATE", server_name, 1_000)
+    assert issue_payload.project == Rondo.Config.linear_project_slug()
     assert issue_payload.running.latest_gate.status == :fail
+    assert issue_payload.running.project == Rondo.Config.linear_project_slug()
   end
 
   test "state payload includes projected run timelines" do

@@ -5,7 +5,7 @@ defmodule RondoWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {RondoWeb.Layouts, :app}
 
-  alias RondoWeb.{Endpoint, ObservabilityPubSub, Presenter}
+  alias RondoWeb.{DashboardEventStream, Endpoint, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
   @impl true
@@ -15,7 +15,11 @@ defmodule RondoWeb.DashboardLive do
       |> assign(:payload, load_payload())
       |> assign(:now, DateTime.utc_now())
       |> assign(:selected_issue, nil)
+      |> assign(:selected_runs, nil)
       |> assign(:selected_run_index, 0)
+      |> assign(:selected_issue_data, nil)
+      |> assign(:dashboard_params, %{})
+      |> assign(:event_stream_view, DashboardEventStream.build(%{}, nil, nil, 0, %{}))
 
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
@@ -26,6 +30,19 @@ defmodule RondoWeb.DashboardLive do
     end
 
     {:ok, socket}
+  end
+
+  @impl true
+  def handle_params(params, _uri, socket) do
+    dashboard_params = dashboard_query_params(params)
+    socket = apply_dashboard_params(socket, dashboard_params)
+
+    if connected?(socket) and is_list(socket.assigns.selected_runs) and socket.assigns.selected_runs != [] do
+      socket = push_run_charts(socket, socket.assigns.selected_runs)
+      {:noreply, socket}
+    else
+      {:noreply, socket}
+    end
   end
 
   @impl true
@@ -47,22 +64,7 @@ defmodule RondoWeb.DashboardLive do
       socket
       |> assign(:payload, load_payload())
       |> assign(:now, DateTime.utc_now())
-
-    # Only update panel data for live running issues, not archived views
-    socket =
-      case {socket.assigns.selected_issue, socket.assigns[:selected_runs]} do
-        {nil, _} ->
-          socket
-
-        {_identifier, runs} when is_list(runs) ->
-          # Viewing an archived run — don't overwrite with live data
-          socket
-
-        {identifier, _} ->
-          # Viewing a live running issue — keep it updated
-          entry = find_issue_entry(socket.assigns.payload, identifier)
-          if entry, do: assign(socket, :selected_issue_data, entry), else: socket
-      end
+      |> apply_dashboard_params(socket.assigns.dashboard_params)
 
     {:noreply, socket}
   end
@@ -72,16 +74,10 @@ defmodule RondoWeb.DashboardLive do
 
   @impl true
   def handle_event("select_issue", %{"identifier" => identifier}, socket) do
-    entry = find_issue_entry(socket.assigns.payload, identifier)
-
-    socket =
-      socket
-      |> assign(:selected_issue, identifier)
-      |> assign(:selected_issue_data, entry)
-      |> assign(:selected_runs, nil)
-      |> assign(:selected_run_index, 0)
-
-    {:noreply, socket}
+    case find_issue_entry(socket.assigns.payload, identifier) do
+      nil -> {:noreply, socket}
+      _ -> {:noreply, patch_dashboard_selection(socket, %{"issue" => identifier, "run" => nil})}
+    end
   end
 
   @impl true
@@ -96,56 +92,50 @@ defmodule RondoWeb.DashboardLive do
     {:noreply,
      socket
      |> assign(:payload, load_payload())
-     |> assign(:now, DateTime.utc_now())}
+     |> assign(:now, DateTime.utc_now())
+     |> apply_dashboard_params(socket.assigns.dashboard_params)}
   end
 
+  @impl true
   def handle_event("select_archived", %{"identifier" => identifier}, socket) do
-    archived = Map.get(socket.assigns.payload, :archived, [])
-    group = Enum.find(archived, &(&1.issue_identifier == identifier))
+    case find_archived_group(socket.assigns.payload, identifier) do
+      nil ->
+        {:noreply, socket}
 
-    if group do
-      latest_index = length(group.runs) - 1
-      latest_run = List.last(group.runs)
-      run_with_log = load_run_event_log(latest_run)
-
-      {:noreply,
-       socket
-       |> assign(:selected_issue, identifier)
-       |> assign(:selected_issue_data, run_with_log)
-       |> assign(:selected_run_index, latest_index)
-       |> assign(:selected_runs, group.runs)
-       |> push_run_charts(group.runs)}
-    else
-      {:noreply, socket}
+      _ ->
+        latest_index = latest_archived_run_index(socket.assigns.payload, identifier)
+        {:noreply, patch_dashboard_selection(socket, %{"issue" => identifier, "run" => Integer.to_string(latest_index)})}
     end
   end
 
   @impl true
   def handle_event("select_run", %{"index" => index_str}, socket) do
-    index = String.to_integer(index_str)
-    runs = socket.assigns[:selected_runs] || []
-    run = Enum.at(runs, index)
+    {:noreply, patch_dashboard_selection(socket, %{"run" => index_str})}
+  end
 
-    if run do
-      run_with_log = load_run_event_log(run)
+  @impl true
+  def handle_event("event_stream_filters", params, socket) do
+    {:noreply, patch_dashboard_filters(socket, params)}
+  end
 
-      {:noreply,
-       socket
-       |> assign(:selected_issue_data, run_with_log)
-       |> assign(:selected_run_index, index)}
-    else
-      {:noreply, socket}
-    end
+  @impl true
+  def handle_event("event_stream_facet", %{"facet" => facet}, socket) do
+    {:noreply, patch_dashboard_filters(socket, %{"facet" => facet})}
+  end
+
+  @impl true
+  def handle_event("event_stream_sort", %{"sort" => sort}, socket) do
+    {:noreply, patch_dashboard_filters(socket, %{"sort" => sort})}
+  end
+
+  @impl true
+  def handle_event("reset_event_filters", _params, socket) do
+    {:noreply, patch_dashboard_filters(socket, %{}, reset: true)}
   end
 
   @impl true
   def handle_event("close_panel", _params, socket) do
-    {:noreply,
-     socket
-     |> assign(:selected_issue, nil)
-     |> assign(:selected_issue_data, nil)
-     |> assign(:selected_runs, nil)
-     |> assign(:selected_run_index, 0)}
+    {:noreply, patch_dashboard_selection(socket, %{"issue" => nil, "run" => nil})}
   end
 
   @impl true
@@ -665,21 +655,205 @@ defmodule RondoWeb.DashboardLive do
           <% end %>
 
           <div class="panel-stream-header">
-            <span class="panel-metric-label">Event stream</span>
-            <span class="muted" style="font-size: 11px;"><%= length(selected_event_log(@selected_issue_data)) %> events</span>
+            <div class="detail-stack">
+              <span class="panel-metric-label">Event stream</span>
+              <span class="muted" style="font-size: 11px;"><%= @event_stream_view.filtered_count %> / <%= @event_stream_view.total_count %> events</span>
+            </div>
+            <button type="button" class="subtle-button" phx-click="reset_event_filters">Reset</button>
           </div>
 
-          <%= if selected_event_log(@selected_issue_data) == [] do %>
+          <div class="event-toolbar">
+            <div class="event-facet-row">
+              <%= for {facet, label, count} <- event_facet_tabs(@event_stream_view.facets) do %>
+                <button
+                  type="button"
+                  class={"event-facet #{if @event_stream_view.filters.facet == facet, do: "event-facet-active", else: ""}"}
+                  phx-click="event_stream_facet"
+                  phx-value-facet={facet}
+                >
+                  <%= label %> <span><%= count %></span>
+                </button>
+              <% end %>
+            </div>
+
+            <form id="event-stream-filter-form" class="event-filter-popover" phx-change="event_stream_filters" phx-submit="event_stream_filters">
+              <input type="hidden" name="issue" value={@selected_issue || ""} />
+              <%= if is_list(@selected_runs) and @selected_runs != [] do %>
+                <input type="hidden" name="run" value={@selected_run_index} />
+              <% end %>
+
+              <div class="event-filter-grid">
+                <label class="event-search-field event-filter-span-2">
+                  <span>Search</span>
+                  <input
+                    type="search"
+                    name="query"
+                    value={@event_stream_view.filters.query}
+                    placeholder="Search event type, summary, issue, provider, model..."
+                    phx-debounce="300"
+                  />
+                </label>
+
+                <label>
+                  <span>Issue / project</span>
+                  <input type="search" name="scope" value={@event_stream_view.filters.scope} placeholder="Issue, project, or run text" />
+                </label>
+
+                <label>
+                  <span>Facet</span>
+                  <select name="facet">
+                    <option value="all" selected={@event_stream_view.filters.facet == "all"}>All</option>
+                    <%= for {facet, label, _count} <- event_facet_tabs(@event_stream_view.facets) do %>
+                      <%= if facet != "all" do %>
+                        <option value={facet} selected={@event_stream_view.filters.facet == facet}><%= label %></option>
+                      <% end %>
+                    <% end %>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Kind</span>
+                  <select name="kind">
+                    <option value="all" selected={@event_stream_view.filters.kind == "all"}>All</option>
+                    <%= for kind <- @event_stream_view.options.kinds do %>
+                      <option value={kind} selected={@event_stream_view.filters.kind == kind}><%= kind %></option>
+                    <% end %>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Status</span>
+                  <select name="status">
+                    <option value="all" selected={@event_stream_view.filters.status == "all"}>All</option>
+                    <%= for status <- @event_stream_view.options.statuses do %>
+                      <option value={status} selected={@event_stream_view.filters.status == status}><%= status %></option>
+                    <% end %>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Provider</span>
+                  <select name="provider">
+                    <option value="all" selected={@event_stream_view.filters.provider == "all"}>All</option>
+                    <%= for provider <- @event_stream_view.options.providers do %>
+                      <option value={provider} selected={@event_stream_view.filters.provider == provider}><%= provider %></option>
+                    <% end %>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Model</span>
+                  <select name="model">
+                    <option value="all" selected={@event_stream_view.filters.model == "all"}>All</option>
+                    <%= for model <- @event_stream_view.options.models do %>
+                      <option value={model} selected={@event_stream_view.filters.model == model}><%= model %></option>
+                    <% end %>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Run state</span>
+                  <select name="run_state">
+                    <option value="all" selected={@event_stream_view.filters.run_state == "all"}>All</option>
+                    <%= for run_state <- @event_stream_view.options.run_states do %>
+                      <option value={run_state} selected={@event_stream_view.filters.run_state == run_state}><%= run_state %></option>
+                    <% end %>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Result</span>
+                  <select name="result">
+                    <option value="all" selected={@event_stream_view.filters.result == "all"}>All</option>
+                    <%= for result <- @event_stream_view.options.results do %>
+                      <option value={result} selected={@event_stream_view.filters.result == result}><%= result %></option>
+                    <% end %>
+                  </select>
+                </label>
+
+                <label>
+                  <span>From (UTC)</span>
+                  <input type="datetime-local" name="from" value={datetime_local_value(@event_stream_view.filters.from)} />
+                </label>
+
+                <label>
+                  <span>To (UTC)</span>
+                  <input type="datetime-local" name="to" value={datetime_local_value(@event_stream_view.filters.to)} />
+                </label>
+
+                <label>
+                  <span>Sort</span>
+                  <select name="sort">
+                    <%= for {value, label} <- event_sort_options() do %>
+                      <option value={value} selected={@event_stream_view.filters.sort == value}><%= label %></option>
+                    <% end %>
+                  </select>
+                </label>
+              </div>
+            </form>
+
+            <div class="event-active-filters">
+              <%= for chip <- active_event_filter_chips(@event_stream_view.filters) do %>
+                <span class="event-filter-chip"><%= chip %></span>
+              <% end %>
+            </div>
+          </div>
+
+          <%= if @event_stream_view.total_count == 0 do %>
             <p class="empty-state">Waiting for agent activity...</p>
           <% else %>
-            <div class="event-stream" id="event-stream" phx-hook="ScrollBottom">
-              <div :for={entry <- selected_event_log(@selected_issue_data)} class="event-row">
-                <span class={event_type_class(entry.event)}>
-                  <%= if tool_event?(entry.event) do %><svg class="event-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg><% end %><%= entry.event %>
-                </span>
-                <span class="event-row-message"><%= render_event_message(entry.message) %></span>
+            <%= if @event_stream_view.filtered_count == 0 do %>
+              <p class="empty-state">No events match the current filters.</p>
+            <% else %>
+              <div class="event-stream" id="event-stream">
+                <div class="event-table-wrap" id="event-stream-scroll" phx-hook="ScrollBottom">
+                  <table class="event-table">
+                    <thead>
+                      <tr>
+                        <th>
+                          <button type="button" class="event-sort-button" phx-click="event_stream_sort" phx-value-sort={toggle_sort(@event_stream_view.filters.sort, "time")}>Time</button>
+                        </th>
+                        <th>
+                          <button type="button" class="event-sort-button" phx-click="event_stream_sort" phx-value-sort={toggle_sort(@event_stream_view.filters.sort, "kind")}>Kind</button>
+                        </th>
+                        <th>
+                          <button type="button" class="event-sort-button" phx-click="event_stream_sort" phx-value-sort={toggle_sort(@event_stream_view.filters.sort, "status")}>Status</button>
+                        </th>
+                        <th>
+                          <button type="button" class="event-sort-button" phx-click="event_stream_sort" phx-value-sort={toggle_sort(@event_stream_view.filters.sort, "summary")}>Summary</button>
+                        </th>
+                        <th>Context</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr :for={row <- @event_stream_view.rows}>
+                        <td class="mono muted event-time"><%= format_event_time(row.at) %></td>
+                        <td>
+                          <span class={row.kind_class}><%= row.kind %></span>
+                        </td>
+                        <td>
+                          <span class={row.status_class}><%= row.status %></span>
+                        </td>
+                        <td>
+                          <div class="event-summary">
+                            <%= render_event_message(row.summary) %>
+                          </div>
+                        </td>
+                        <td>
+                          <div class="event-context">
+                            <span><%= row.issue_identifier || "n/a" %></span>
+                            <span><%= event_context_label(row) %></span>
+                            <%= if row.artifacts != [] do %>
+                              <span class="event-artifacts"><%= Enum.join(row.artifacts, " · ") %></span>
+                            <% end %>
+                          </div>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            </div>
+            <% end %>
           <% end %>
         <% else %>
           <p class="empty-state">Issue not currently running.</p>
@@ -705,6 +879,277 @@ defmodule RondoWeb.DashboardLive do
     else
       Map.put(run, :event_log, [])
     end
+  end
+
+  defp apply_dashboard_params(socket, params) do
+    params = dashboard_query_params(params)
+
+    {selected_issue, selected_issue_data, selected_runs, selected_run_index} =
+      resolve_dashboard_selection(socket.assigns.payload, params)
+
+    event_stream_view =
+      DashboardEventStream.build(
+        socket.assigns.payload,
+        selected_issue_data,
+        selected_runs,
+        selected_run_index,
+        params
+      )
+
+    assign(socket,
+      dashboard_params: params,
+      selected_issue: selected_issue,
+      selected_issue_data: selected_issue_data,
+      selected_runs: selected_runs,
+      selected_run_index: selected_run_index,
+      event_stream_view: event_stream_view
+    )
+  end
+
+  defp patch_dashboard_selection(socket, overrides) do
+    socket.assigns.dashboard_params
+    |> Map.merge(overrides)
+    |> dashboard_path()
+    |> then(&push_patch(socket, to: &1))
+  end
+
+  defp patch_dashboard_filters(socket, overrides, opts \\ []) do
+    current = socket.assigns.dashboard_params
+
+    base =
+      if Keyword.get(opts, :reset, false) do
+        current
+        |> Map.take(["issue", "run"])
+      else
+        current
+      end
+
+    base
+    |> Map.merge(overrides)
+    |> dashboard_path()
+    |> then(&push_patch(socket, to: &1))
+  end
+
+  defp dashboard_path(params) do
+    params = dashboard_query_params(params)
+
+    case params do
+      %{} = params when map_size(params) == 0 -> "/"
+      %{} = params -> "/?#{URI.encode_query(params)}"
+    end
+  end
+
+  @dashboard_query_keys ~w(issue run query scope facet kind status provider model run_state result from to sort)
+
+  @spec dashboard_query_params(map()) :: map()
+  def dashboard_query_params(params) when is_map(params) do
+    params
+    |> Enum.reduce(%{}, fn {key, value}, acc ->
+      key = to_string(key)
+
+      cond do
+        key not in @dashboard_query_keys ->
+          acc
+
+        value in [nil, ""] ->
+          acc
+
+        true ->
+          Map.put(acc, key, to_string(value))
+      end
+    end)
+  end
+
+  def dashboard_query_params(_), do: %{}
+
+  defp resolve_dashboard_selection(payload, params) do
+    issue = Map.get(params, "issue")
+    run_index = parse_run_index(Map.get(params, "run"))
+
+    cond do
+      blank?(issue) ->
+        empty_dashboard_selection()
+
+      is_integer(run_index) ->
+        resolve_dashboard_selection_with_run(payload, issue, run_index)
+
+      entry = find_issue_entry(payload, issue) ->
+        dashboard_selection_from_entry(issue, entry)
+
+      archived_group = find_archived_group(payload, issue) ->
+        dashboard_selection_from_archived(issue, archived_group)
+
+      true ->
+        empty_dashboard_selection(issue)
+    end
+  end
+
+  defp resolve_dashboard_selection_with_run(payload, issue, run_index) do
+    case find_archived_group(payload, issue) do
+      nil ->
+        case find_issue_entry(payload, issue) do
+          nil -> empty_dashboard_selection(issue)
+          entry -> dashboard_selection_from_entry(issue, entry)
+        end
+
+      archived_group ->
+        dashboard_selection_from_archived_run(issue, archived_group, run_index)
+    end
+  end
+
+  defp empty_dashboard_selection, do: {nil, nil, nil, 0}
+  defp empty_dashboard_selection(issue), do: {issue, nil, nil, 0}
+
+  defp dashboard_selection_from_entry(issue, entry), do: {issue, entry, nil, 0}
+
+  defp dashboard_selection_from_archived(issue, archived_group) do
+    runs = Map.get(archived_group, :runs, [])
+    index = clamp_run_index(nil, runs)
+    run = Enum.at(runs, index)
+    {issue, load_run_event_log(run || %{}), runs, index}
+  end
+
+  defp dashboard_selection_from_archived_run(issue, archived_group, run_index) do
+    runs = Map.get(archived_group, :runs, [])
+    index = clamp_run_index(run_index, runs)
+    run = Enum.at(runs, index)
+    {issue, load_run_event_log(run || %{}), runs, index}
+  end
+
+  defp find_archived_group(payload, identifier) do
+    payload
+    |> Map.get(:archived, [])
+    |> Enum.find(&(&1.issue_identifier == identifier))
+  end
+
+  defp latest_archived_run_index(payload, identifier) do
+    payload
+    |> find_archived_group(identifier)
+    |> case do
+      %{runs: runs} when is_list(runs) and runs != [] -> length(runs) - 1
+      _ -> 0
+    end
+  end
+
+  defp clamp_run_index(nil, runs) when is_list(runs) and runs != [], do: length(runs) - 1
+
+  defp clamp_run_index(index, runs) when is_integer(index) and is_list(runs) and runs != [] do
+    max_index = length(runs) - 1
+    index |> max(0) |> min(max_index)
+  end
+
+  defp clamp_run_index(_, _), do: 0
+
+  defp parse_run_index(nil), do: nil
+  defp parse_run_index(""), do: nil
+  defp parse_run_index(value) when is_integer(value), do: value
+
+  defp parse_run_index(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {index, _rest} -> index
+      :error -> nil
+    end
+  end
+
+  defp parse_run_index(_), do: nil
+
+  defp blank?(value), do: value in [nil, ""]
+
+  defp event_facet_tabs(facets) do
+    [{"all", "All", total_facet_count(facets)} | DashboardEventStream.facet_choices(facets)]
+  end
+
+  defp total_facet_count(facets) do
+    Map.values(facets) |> Enum.sum()
+  end
+
+  defp active_event_filter_chips(filters) do
+    [
+      chip(filters.query, "Search: "),
+      chip(filters.scope, "Issue/project: "),
+      chip(filters.facet, "Facet: ", "all"),
+      chip(filters.kind, "Kind: ", "all"),
+      chip(filters.status, "Status: ", "all"),
+      chip(filters.provider, "Provider: ", "all"),
+      chip(filters.model, "Model: ", "all"),
+      chip(filters.run_state, "Run state: ", "all"),
+      chip(filters.result, "Result: ", "all"),
+      chip(filters.from, "From: "),
+      chip(filters.to, "To: ")
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp chip(value, prefix, skip_value \\ nil) do
+    cond do
+      blank?(value) -> nil
+      skip_value != nil and value == skip_value -> nil
+      true -> "#{prefix}#{value}"
+    end
+  end
+
+  defp event_sort_options do
+    [
+      {"time_asc", "Time ↑"},
+      {"time_desc", "Time ↓"},
+      {"kind_asc", "Kind ↑"},
+      {"kind_desc", "Kind ↓"},
+      {"status_asc", "Status ↑"},
+      {"status_desc", "Status ↓"},
+      {"summary_asc", "Summary ↑"},
+      {"summary_desc", "Summary ↓"}
+    ]
+  end
+
+  defp toggle_sort(current, field) do
+    field =
+      case field do
+        "time" -> "time"
+        "kind" -> "kind"
+        "status" -> "status"
+        "summary" -> "summary"
+        _ -> "time"
+      end
+
+    current = current || "time_asc"
+
+    direction =
+      if String.starts_with?(current, "#{field}_") and String.ends_with?(current, "_asc"), do: "desc", else: "asc"
+
+    "#{field}_#{direction}"
+  end
+
+  defp datetime_local_value(nil), do: ""
+  defp datetime_local_value(""), do: ""
+
+  defp datetime_local_value(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, dt, _offset} ->
+        Calendar.strftime(dt, "%Y-%m-%dT%H:%M")
+
+      _ ->
+        case NaiveDateTime.from_iso8601(value) do
+          {:ok, ndt} -> Calendar.strftime(ndt, "%Y-%m-%dT%H:%M")
+          _ -> value
+        end
+    end
+  end
+
+  defp datetime_local_value(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%dT%H:%M")
+  defp datetime_local_value(_), do: ""
+
+  defp event_context_label(row) do
+    provider_model =
+      case {Map.get(row, :provider), Map.get(row, :model)} do
+        {nil, nil} -> nil
+        {provider, nil} -> provider
+        {nil, model} -> model
+        {provider, model} -> "#{provider}/#{model}"
+      end
+
+    [provider_model, Map.get(row, :action), Map.get(row, :run_state)]
+    |> Enum.reject(&blank?/1)
+    |> Enum.join(" · ")
   end
 
   defp find_issue_entry(payload, identifier) do
@@ -756,10 +1201,6 @@ defmodule RondoWeb.DashboardLive do
 
   defp selected_total_tokens(selected_issue_data) do
     get_in(selected_issue_data, [:tokens, :total_tokens])
-  end
-
-  defp selected_event_log(selected_issue_data) do
-    Map.get(selected_issue_data, :event_log, []) || []
   end
 
   defp total_runtime_seconds(payload, now) do
@@ -976,25 +1417,6 @@ defmodule RondoWeb.DashboardLive do
     |> String.replace(~r/`([^`]+)`/, "<code>\\1</code>")
     |> String.replace(~r/\*\*([^*]+)\*\*/, "<strong>\\1</strong>")
     |> Phoenix.HTML.raw()
-  end
-
-  @tool_events ~w(linear github bash read write edit grep glob agent tool)a
-
-  defp tool_event?(event), do: event in @tool_events
-
-  defp event_type_class(event) do
-    base = "event-row-type mono"
-
-    case event do
-      :linear -> "#{base} event-type-linear"
-      :github -> "#{base} event-type-github"
-      e when e in [:bash, :read, :write, :edit, :grep, :glob, :agent, :tool] -> "#{base} event-type-tool"
-      e when e in [:error, :fail] -> "#{base} event-type-danger"
-      e when e in [:session_started, :claude_starting] -> "#{base} event-type-success"
-      e when e in [:result] -> "#{base} event-type-muted"
-      :rate_limit -> "#{base} event-type-danger"
-      _ -> base
-    end
   end
 
   defp schedule_runtime_tick do
