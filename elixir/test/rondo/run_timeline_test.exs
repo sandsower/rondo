@@ -75,6 +75,45 @@ defmodule Rondo.RunTimelineTest do
     assert tool.summary == "$ mix test"
   end
 
+  test "projects model routing decision checkpoints with phase and selected model" do
+    {ledger, issue} = create_ledger!("timeline-model-routing")
+
+    _ledger =
+      write_checkpoint!(
+        ledger,
+        :model_routing_decision,
+        %{
+          status: "honored",
+          requested_tier: "frontier",
+          resolved: %{adapter: "pi", model: "openai-codex/gpt-5.5"},
+          reason: "resolved planning tier frontier",
+          context: %{stage: "initial_spawn", phase: "planning"}
+        },
+        @turn1_started
+      )
+
+    run = %{
+      identifier: issue.identifier,
+      run_id: ledger.run_id,
+      run_dir: ledger.run_dir,
+      session_id: "session-routing",
+      started_at: @start,
+      finished_at: @finished,
+      exit_reason: "completed",
+      turn_count: 1,
+      event_log: []
+    }
+
+    projection = RunTimeline.project_run(run)
+    step = Enum.find(projection.timeline, &(&1.kind == "model_routing_decision"))
+
+    assert step.phase == "planning"
+    assert step.status == "honored"
+    assert step.outcome == "openai-codex/gpt-5.5"
+    assert step.summary =~ "frontier"
+    assert step.summary =~ "resolved planning tier frontier"
+  end
+
   test "projects multi-turn runs with turn and gate boundaries in order" do
     {ledger, issue} = create_ledger!("timeline-multi-turn")
 
