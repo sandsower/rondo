@@ -8,7 +8,7 @@ defmodule Rondo.ActionPolicy do
   Rondo workspace state into Beislið sandbox-status flags.
   """
 
-  alias Rondo.{Config, PathSafety}
+  alias Rondo.{Config, PathSafety, RemoteShell}
 
   @decisions ["allow", "ask", "deny"]
   @default_timeout_ms 5_000
@@ -26,7 +26,7 @@ defmodule Rondo.ActionPolicy do
     command = Keyword.get(opts, :command, Config.action_policy_command())
     mode = Keyword.get(opts, :mode, Config.action_policy_run_mode())
     timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
-    sandbox_status = Keyword.get_lazy(opts, :sandbox_status, fn -> sandbox_status(Keyword.get(opts, :workspace)) end)
+    sandbox_status = Keyword.get_lazy(opts, :sandbox_status, fn -> sandbox_status(Keyword.get(opts, :workspace), opts) end)
     policy_file = Keyword.get(opts, :policy_file, Config.action_policy_policy_file())
 
     with :ok <- validate_classes(classes),
@@ -49,17 +49,20 @@ defmodule Rondo.ActionPolicy do
   end
 
   @spec sandbox_status(Path.t() | nil) :: sandbox_status()
-  def sandbox_status(nil) do
+  def sandbox_status(workspace), do: sandbox_status(workspace, [])
+
+  @spec sandbox_status(Path.t() | nil, keyword()) :: sandbox_status()
+  def sandbox_status(nil, _opts) do
     %{baseline: "none", default_branch: false, uncommitted_changes: false}
   end
 
-  def sandbox_status(workspace) when is_binary(workspace) do
-    baseline = sandbox_baseline(workspace)
+  def sandbox_status(workspace, opts) when is_binary(workspace) do
+    baseline = sandbox_baseline(workspace, opts)
 
     %{
       baseline: baseline,
-      default_branch: git_default_branch?(workspace),
-      uncommitted_changes: git_uncommitted_changes?(workspace)
+      default_branch: git_default_branch?(workspace, opts),
+      uncommitted_changes: git_uncommitted_changes?(workspace, opts)
     }
   end
 
@@ -142,30 +145,46 @@ defmodule Rondo.ActionPolicy do
   defp validate_baseline(baseline) when baseline in @baselines, do: :ok
   defp validate_baseline(baseline), do: {:error, {:invalid_sandbox_baseline, baseline}}
 
-  defp sandbox_baseline(workspace) do
+  defp sandbox_baseline(workspace, opts) do
+    if RemoteShell.enabled?(opts) do
+      "host-sandbox"
+    else
+      local_sandbox_baseline(workspace)
+    end
+  end
+
+  defp local_sandbox_baseline(workspace) do
     with {:ok, root} <- PathSafety.canonicalize(Config.workspace_root()),
          {:ok, workspace} <- PathSafety.canonicalize(workspace) do
-      cond do
-        workspace == root -> "non-default-branch"
-        String.starts_with?(workspace <> "/", root <> "/") -> "separate-worktree"
-        true -> "none"
-      end
+      sandbox_baseline_for_paths(workspace, root)
     else
       _ -> "none"
     end
   end
 
-  defp git_default_branch?(workspace) do
-    with {branch, 0} <- System.cmd("git", ["rev-parse", "--abbrev-ref", "HEAD"], cd: workspace, stderr_to_stdout: true),
-         {default_branch, 0} <- System.cmd("git", ["symbolic-ref", "refs/remotes/origin/HEAD", "--short"], cd: workspace, stderr_to_stdout: true) do
+  defp sandbox_baseline_for_paths(workspace, root) do
+    cond do
+      workspace == root -> "non-default-branch"
+      String.starts_with?(workspace <> "/", root <> "/") -> "separate-worktree"
+      true -> "none"
+    end
+  end
+
+  defp git_default_branch?(workspace, opts) do
+    runner = RemoteShell.git_runner(opts)
+
+    with {branch, 0} <- runner.(["rev-parse", "--abbrev-ref", "HEAD"], workspace),
+         {default_branch, 0} <- runner.(["symbolic-ref", "refs/remotes/origin/HEAD", "--short"], workspace) do
       String.trim(branch) == String.trim(String.replace(default_branch, "origin/", ""))
     else
       _ -> false
     end
   end
 
-  defp git_uncommitted_changes?(workspace) do
-    case System.cmd("git", ["status", "--porcelain"], cd: workspace, stderr_to_stdout: true) do
+  defp git_uncommitted_changes?(workspace, opts) do
+    runner = RemoteShell.git_runner(opts)
+
+    case runner.(["status", "--porcelain"], workspace) do
       {output, 0} -> String.trim(output) != ""
       _other -> false
     end

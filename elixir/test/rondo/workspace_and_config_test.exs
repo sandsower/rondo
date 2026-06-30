@@ -1,6 +1,10 @@
 defmodule Rondo.WorkspaceAndConfigTest do
   use Rondo.TestSupport
+  alias Rondo.Gates
   alias Rondo.Linear.Client
+  alias Rondo.RemoteShell
+  alias Rondo.RunLedger
+  alias Rondo.WorkerPool
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -1347,6 +1351,279 @@ defmodule Rondo.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "worker pool selects ssh hosts by load and preserves the preferred host when it has capacity" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_max_concurrent_agents_per_host: 3,
+      worker_ssh_hosts: [
+        %{name: "east", host: "east.example", user: "claude", port: 2222, max_concurrent_agents: 2},
+        %{name: "west", host: "west.example", max_concurrent_agents: 1}
+      ]
+    )
+
+    [east, west] = WorkerPool.hosts()
+
+    assert east == %{
+             id: "east",
+             host: "east.example",
+             user: "claude",
+             port: 2222,
+             max_concurrent_agents: 2
+           }
+
+    assert west == %{
+             id: "west",
+             host: "west.example",
+             user: nil,
+             port: nil,
+             max_concurrent_agents: 1
+           }
+
+    assert WorkerPool.host_id(%{name: "named"}) == "named"
+    assert WorkerPool.host_id(%{host: "hosted"}) == "hosted"
+    assert WorkerPool.host_id("literal") == "literal"
+    assert is_nil(WorkerPool.host_id(nil))
+    assert WorkerPool.host_loads([%{}, %{worker_host: nil}]) == %{}
+
+    assert {:ok, selected} = WorkerPool.select_host([%{worker_host: east}])
+    assert selected == west
+
+    assert {:ok, preferred_from_map} = WorkerPool.select_host([%{worker_host: east}], preferred_host: %{host: "west.example"})
+    assert preferred_from_map == west
+
+    assert {:ok, preferred} = WorkerPool.select_host([%{worker_host: east}], preferred_host: "east")
+    assert preferred == east
+
+    saturated = [
+      %{worker_host: east},
+      %{worker_host: east},
+      %{worker_host: west},
+      %{worker_host: west}
+    ]
+
+    assert {:wait, :all_hosts_at_capacity} = WorkerPool.select_host(saturated)
+  end
+
+  test "worker pool waits when no ssh hosts are configured" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: [],
+      worker_max_concurrent_agents_per_host: 3
+    )
+
+    assert {:wait, :no_workers_configured} = WorkerPool.select_host([])
+  end
+
+  test "run ledger snapshots worker host details in the manifest" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-run-ledger-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      issue = %Issue{id: "issue-1", identifier: "LDG-1", title: "Ledger snapshot"}
+
+      assert {:ok, map_ledger} =
+               RunLedger.create_run(issue,
+                 workspace_root: workspace_root,
+                 worker_host: %{id: "alpha", host: "alpha.example", user: nil, port: nil}
+               )
+
+      assert get_in(map_ledger.manifest, ["repo", "worker_host"]) == %{
+               id: "alpha",
+               host: "alpha.example"
+             }
+
+      assert {:ok, string_ledger} =
+               RunLedger.create_run(issue,
+                 workspace_root: workspace_root,
+                 worker_host: "beta.example"
+               )
+
+      assert get_in(string_ledger.manifest, ["repo", "worker_host"]) == %{
+               id: "beta.example",
+               host: "beta.example"
+             }
+
+      assert {:ok, nil_ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      refute get_in(nil_ledger.manifest, ["repo", "worker_host"])
+
+      assert {:ok, fallback_ledger} =
+               RunLedger.create_run(issue,
+                 workspace_root: workspace_root,
+                 worker_host: 123,
+                 git_runner: fn _args, _workspace -> {"", 0} end
+               )
+
+      refute get_in(fallback_ledger.manifest, ["repo", "worker_host"])
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote workspace lifecycle routes create, hooks, and removal through ssh" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-remote-workspace-#{System.unique_integer([:positive])}"
+      )
+
+    old_home = System.get_env("HOME")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      ssh_trace = Path.join(test_root, "ssh.trace")
+      hook_trace = Path.join(test_root, "hooks.trace")
+      fake_ssh_dir = fake_ssh(ssh_trace)
+      home_dir = Path.join(test_root, "home")
+      remote_host = %{id: "remote-1", host: "remote.example", user: "claude", port: 2222}
+
+      File.mkdir_p!(test_root)
+      File.mkdir_p!(home_dir)
+      File.write!(Path.join(home_dir, ".profile"), "PATH=\"#{fake_ssh_dir}:$PATH\"\nexport PATH\n")
+      File.write!(ssh_trace, "")
+      File.write!(hook_trace, "")
+      System.put_env("HOME", home_dir)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow"),
+        hook_after_create: "printf 'after_create:%s\\n' \"$(pwd)\" >> #{hook_trace}",
+        hook_before_remove: "printf 'before_remove:%s\\n' \"$(pwd)\" >> #{hook_trace}"
+      )
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-REMOTE", worker_host: remote_host)
+      assert workspace == Path.join(expected_canonical_path(workspace_root), "MT-REMOTE")
+      assert File.dir?(workspace)
+      assert File.read!(hook_trace) =~ "after_create:#{workspace}"
+
+      assert {:ok, []} = Workspace.remove(workspace, worker_host: remote_host)
+      refute File.exists?(workspace)
+      assert File.read!(hook_trace) =~ "before_remove:#{workspace}"
+
+      ssh_trace_contents = File.read!(ssh_trace)
+      assert ssh_trace_contents =~ "mkdir -p"
+      assert ssh_trace_contents =~ "rm -rf"
+    after
+      restore_env("HOME", old_home)
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "remote shell helpers and remote gates exercise ssh fallbacks" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-remote-shell-#{System.unique_integer([:positive])}"
+      )
+
+    old_home = System.get_env("HOME")
+    old_path = System.get_env("PATH")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "repo")
+      run_dir = Path.join(test_root, "run")
+      ssh_trace = Path.join(test_root, "ssh.trace")
+      fake_ssh_dir = fake_ssh(ssh_trace)
+      home_dir = Path.join(test_root, "home")
+      remote_host = %{host: "remote.example"}
+      remote_user_host = %{user: "claude", host: "remote.example", port: 2222}
+      empty_path_dir = Path.join(test_root, "empty-path")
+
+      File.mkdir_p!(workspace)
+      File.mkdir_p!(home_dir)
+      File.mkdir_p!(empty_path_dir)
+      File.write!(Path.join(home_dir, ".profile"), "PATH=\"#{fake_ssh_dir}:$PATH\"\nexport PATH\n")
+      File.write!(ssh_trace, "")
+      System.put_env("HOME", home_dir)
+
+      {_output, 0} = System.cmd("git", ["init", "-q"], cd: workspace)
+
+      assert RemoteShell.worker_host(%{worker_host: remote_host}) == remote_host
+      assert RemoteShell.enabled?(%{worker_host: remote_host})
+      assert RemoteShell.command_line("echo hi", %{worker_host: remote_host}) =~ "ssh"
+      assert RemoteShell.command_line("echo hi", %{worker_host: remote_host}) =~ "remote.example"
+      refute RemoteShell.command_line("echo hi", %{worker_host: remote_host}) =~ "@"
+      assert RemoteShell.command_line("echo hi", worker_host: remote_user_host) =~ "claude@remote.example"
+      assert RemoteShell.command_line_in_workspace("pwd", workspace, []) =~ "cd '"
+      assert RemoteShell.command_line_in_workspace("pwd", workspace, %{worker_host: remote_host}) =~ "ssh"
+      assert RemoteShell.shell_command("git", ["status", "--porcelain"]) == "git 'status' '--porcelain'"
+      assert RemoteShell.shell_escape("it's ok") == "'it'\"'\"'s ok'"
+      assert {shell_path, shell_args} = RemoteShell.spawn_invocation("echo", ["hello"], workspace, [])
+      assert is_binary(shell_path)
+      assert shell_args |> Enum.join(" ") =~ "echo"
+
+      assert {remote_shell_path, _remote_shell_args} =
+               RemoteShell.spawn_invocation("echo", ["hello"], workspace, %{worker_host: remote_host})
+
+      assert is_binary(remote_shell_path)
+      assert {"", 0} = RemoteShell.run_in_workspace("git status --porcelain", workspace, [])
+      assert {"", 0} = RemoteShell.run_in_workspace("git status --porcelain", workspace, %{worker_host: remote_host})
+      assert {"ok", 0} = RemoteShell.run("printf ok", %{worker_host: remote_host})
+      assert {"", 0} = RemoteShell.git_runner(worker_host: remote_host).(["status", "--porcelain"], workspace)
+
+      System.put_env("PATH", empty_path_dir)
+      assert {fallback_shell, _fallback_args} = RemoteShell.spawn_invocation("echo", ["hello"], workspace, [])
+      assert fallback_shell == "/bin/sh"
+      restore_env("PATH", old_path)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow")
+      )
+
+      File.mkdir_p!(run_dir)
+
+      assert {:error, summary} =
+               Gates.run(
+                 [
+                   %{name: "remote-ok", command: "printf ok", timeout_ms: 1_000},
+                   %{name: "remote-timeout", command: "sleep 1", timeout_ms: 10}
+                 ],
+                 workspace,
+                 run_dir: run_dir,
+                 worker_host: remote_host,
+                 action_policy: true
+               )
+
+      assert summary.status in [:pass, :fail, :timeout]
+      assert [%{status: :pass} = _ok, %{status: :timeout} = timeout] = summary.results
+      assert timeout.exit_status in [124, nil]
+      assert File.read!(ssh_trace) =~ "printf ok"
+    after
+      restore_env("HOME", old_home)
+      restore_env("PATH", old_path)
+      File.rm_rf(test_root)
+    end
+  end
+
+  defp fake_ssh(trace_file) do
+    dir = Path.join(System.tmp_dir!(), "rondo-fake-ssh-dir-#{System.unique_integer([:positive, :monotonic])}")
+    path = Path.join(dir, "ssh")
+    File.mkdir_p!(dir)
+
+    File.write!(path, """
+    #!/bin/sh
+    printf '%s\n' "$*" >> "#{trace_file}"
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -o|-p) shift 2 ;;
+        --) shift; break ;;
+        -*) shift ;;
+        *) break ;;
+      esac
+    done
+    shift
+    exec "$@"
+    """)
+
+    File.chmod!(path, 0o755)
+    dir
   end
 
   defp fake_action_policy(decision) do

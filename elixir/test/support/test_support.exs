@@ -41,6 +41,7 @@ defmodule Rondo.TestSupport do
         System.put_env("OPENROUTER_API_KEY", "rondo-test-openrouter-key")
 
         on_exit(fn ->
+          stop_default_http_server()
           Workflow.clear_workflow_file_path()
           Application.delete_env(:rondo, :server_port_override)
           Application.delete_env(:rondo, :memory_tracker_issues)
@@ -56,7 +57,12 @@ defmodule Rondo.TestSupport do
 
   def write_workflow_file!(path, overrides \\ []) do
     workflow = workflow_content(overrides)
-    File.write!(path, workflow)
+    dir = Path.dirname(path)
+    tmp_path = Path.join(dir, ".#{Path.basename(path)}.#{System.unique_integer([:positive, :monotonic])}.tmp")
+
+    File.mkdir_p!(dir)
+    File.write!(tmp_path, workflow)
+    File.rename!(tmp_path, path)
 
     if Process.whereis(Rondo.WorkflowStore) do
       Rondo.WorkflowStore.force_reload()
@@ -69,14 +75,33 @@ defmodule Rondo.TestSupport do
   def restore_env(key, value), do: System.put_env(key, value)
 
   def stop_default_http_server do
-    try do
-      Supervisor.terminate_child(Rondo.Supervisor, Rondo.HttpServer)
-    catch
-      :exit, _ -> :ok
-    end
+    was_trapping = Process.flag(:trap_exit, true)
 
+    try do
+      stop_http_server_child()
+      stop_http_server_endpoint()
+      drain_exit_messages()
+    after
+      Process.flag(:trap_exit, was_trapping)
+    end
+  end
+
+  defp stop_http_server_child do
+    if supervisor = Process.whereis(Rondo.Supervisor) do
+      if Process.alive?(supervisor) do
+        try do
+          _ = Supervisor.terminate_child(supervisor, Rondo.HttpServer)
+        catch
+          :exit, _ -> :ok
+        end
+      end
+    end
+  end
+
+  defp stop_http_server_endpoint do
     case Process.whereis(RondoWeb.Endpoint) do
       pid when is_pid(pid) ->
+        ref = Process.monitor(pid)
         Process.unlink(pid)
 
         try do
@@ -85,10 +110,50 @@ defmodule Rondo.TestSupport do
           :exit, _ -> :ok
         end
 
-        :ok
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+        after
+          2_000 -> :ok
+        end
+
+        wait_for_http_server_shutdown()
 
       _ ->
-        :ok
+        wait_for_http_server_shutdown()
+    end
+  end
+
+  @spec wait_for_http_server_shutdown() :: :ok
+  def wait_for_http_server_shutdown do
+    wait_for_http_server_shutdown(fn -> is_nil(Rondo.HttpServer.bound_port()) end, 40, 25)
+  end
+
+  @spec wait_for_http_server_shutdown((-> boolean())) :: :ok
+  def wait_for_http_server_shutdown(check_fun) when is_function(check_fun, 0) do
+    wait_for_http_server_shutdown(check_fun, 40, 25)
+  end
+
+  @spec wait_for_http_server_shutdown((-> boolean()), non_neg_integer(), non_neg_integer()) :: :ok
+  def wait_for_http_server_shutdown(check_fun, attempts, sleep_ms) when is_function(check_fun, 0) do
+    wait_until(check_fun, attempts, sleep_ms)
+  end
+
+  defp wait_until(_fun, 0, _sleep_ms), do: raise("HTTP server did not shut down in time")
+
+  defp wait_until(fun, attempts, sleep_ms) when attempts > 0 do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(sleep_ms)
+      wait_until(fun, attempts - 1, sleep_ms)
+    end
+  end
+
+  defp drain_exit_messages do
+    receive do
+      {:EXIT, _pid, _reason} -> drain_exit_messages()
+    after
+      50 -> :ok
     end
   end
 
@@ -108,6 +173,8 @@ defmodule Rondo.TestSupport do
           tracker_label_filter: nil,
           poll_interval_ms: 30_000,
           workspace_root: Path.join(System.tmp_dir!(), "rondo_workspaces"),
+          worker_max_concurrent_agents_per_host: 10,
+          worker_ssh_hosts: [],
           max_concurrent_agents: 10,
           agent_adapter: "claude_code",
           max_turns: 20,
@@ -185,6 +252,8 @@ defmodule Rondo.TestSupport do
     tracker_label_filter = Keyword.get(config, :tracker_label_filter)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
+    worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
+    worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     agent_adapter = Keyword.get(config, :agent_adapter)
     max_turns = Keyword.get(config, :max_turns)
@@ -282,6 +351,7 @@ defmodule Rondo.TestSupport do
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
+        worker_yaml(worker_max_concurrent_agents_per_host, worker_ssh_hosts),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  adapter: #{yaml_value(agent_adapter)}",
@@ -505,6 +575,18 @@ defmodule Rondo.TestSupport do
 
   defp release_loop_closeout_line(_key, nil), do: nil
   defp release_loop_closeout_line(key, value), do: "      #{key}: #{yaml_value(value)}"
+
+  defp worker_yaml(nil, []), do: nil
+  defp worker_yaml(nil, nil), do: nil
+
+  defp worker_yaml(max_concurrent_agents_per_host, ssh_hosts) do
+    [
+      "worker:",
+      "  max_concurrent_agents_per_host: #{yaml_value(max_concurrent_agents_per_host)}",
+      "  ssh_hosts: #{yaml_value(ssh_hosts || [])}"
+    ]
+    |> Enum.join("\n")
+  end
 
   defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
 

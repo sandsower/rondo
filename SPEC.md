@@ -711,6 +711,9 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.terminal_states`: list/string, default `Closed, Cancelled, Canceled, Duplicate, Done`
 - `polling.interval_ms`: positive integer, default `30000`
 - `workspace.root`: path, default `<system-temp>/rondo_workspaces`
+- `worker.max_concurrent_agents_per_host`: positive integer, default `10`
+- `worker.ssh_hosts`: list of host maps or `[]`
+  - host maps support `host` (required), optional `name`, optional `user`, optional `port`, and optional `max_concurrent_agents`
 - `hooks.after_create`: shell script or null
 - `hooks.before_run`: shell script or null
 - `hooks.after_run`: shell script or null
@@ -1837,6 +1840,18 @@ Implications:
 - Hooks run inside the workspace directory.
 - Hook output should be truncated in logs.
 - Hook timeouts are required to avoid hanging the orchestrator.
+
+### 15.4.1 SSH Worker Pool Safety
+
+When `worker.ssh_hosts` is configured, Rondo can run workspace creation/removal, workspace hooks,
+and Claude subprocesses on remote hosts over SSH.
+
+Implications:
+
+- SSH worker hosts are trusted infrastructure; key-based auth or another non-interactive SSH setup must already exist.
+- The orchestrator uses batch-mode SSH and does not prompt for passwords.
+- Remote workspace cleanup is best-effort; if a host is retired, reimaged, or unreachable, stale workspaces may remain until manually cleaned.
+- Host drift matters: `worker_host` and the resolved remote `workspace_path` are recorded with the run so logs, manifests, and dashboard rows can be correlated after a host rename, move, or replacement.
 
 ### 15.5 Harness Hardening Guidance
 

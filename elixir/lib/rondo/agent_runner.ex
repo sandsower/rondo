@@ -815,12 +815,25 @@ defmodule Rondo.AgentRunner do
 
   defp resolve_model_routing(provider, opts) do
     ModelRouting.resolve(
-      routing_context: Keyword.get(opts, :model_routing_context, %{stage: :initial_spawn}),
+      routing_context: Keyword.get(opts, :model_routing_context, %{stage: :initial_spawn, phase: :planning}),
       source_contract: Keyword.get(opts, :source_contract, %{}),
-      model_routing_hints: provider.model_routing_hints(opts),
+      model_routing_hints: runtime_model_routing_hints(provider, opts),
       repo_model_routing: Config.model_routing()
     )
   end
+
+  defp runtime_model_routing_hints(provider, opts) do
+    provider.model_routing_hints(opts)
+    |> merge_runtime_model_routing_hints(Keyword.get(opts, :runtime_model_routing_hints, %{}))
+  end
+
+  defp merge_runtime_model_routing_hints(provider_hints, runtime_hints) when is_map(provider_hints) and is_map(runtime_hints) do
+    Map.merge(provider_hints, runtime_hints)
+  end
+
+  defp merge_runtime_model_routing_hints(provider_hints, _runtime_hints) when is_map(provider_hints), do: provider_hints
+  defp merge_runtime_model_routing_hints(_provider_hints, runtime_hints) when is_map(runtime_hints), do: runtime_hints
+  defp merge_runtime_model_routing_hints(_provider_hints, _runtime_hints), do: %{}
 
   defp model_routing_context_for_turn(opts, turn_number) do
     context =
@@ -835,13 +848,46 @@ defmodule Rondo.AgentRunner do
         is_nil(Keyword.get(opts, :operator_guidance))
 
     if initial_spawn? do
-      Map.put_new(context, :stage, :initial_spawn)
+      context
+      |> Map.put_new(:stage, :initial_spawn)
+      |> maybe_put_default_planning_phase()
     else
       context
       |> Map.put(:stage, :turn)
       |> Map.put_new(:phase, "implementation")
     end
   end
+
+  defp maybe_put_default_planning_phase(context) do
+    if phase_separation_enabled?() do
+      Map.put_new(context, :phase, "planning")
+    else
+      context
+    end
+  end
+
+  defp phase_separation_enabled? do
+    tiers = Config.model_routing() |> Map.get(:tiers, %{})
+    (configured_tier?(tiers, :frontier) or configured_tier?(tiers, :heavy)) and configured_tier?(tiers, :standard)
+  end
+
+  defp configured_tier?(tiers, tier) when is_map(tiers) do
+    case Map.get(tiers, tier) || Map.get(tiers, Atom.to_string(tier)) do
+      values when is_list(values) -> values != []
+      _other -> false
+    end
+  end
+
+  defp configured_tier?(_tiers, _tier), do: false
+
+  defp planning_phase?(%{opts: opts}) when is_list(opts), do: planning_phase?(Keyword.get(opts, :model_routing_context, %{}))
+  defp planning_phase?(%{phase: phase}), do: normalize_phase(phase) in ["planning", "context_discovery"]
+  defp planning_phase?(%{"phase" => phase}), do: normalize_phase(phase) in ["planning", "context_discovery"]
+  defp planning_phase?(_context), do: false
+
+  defp normalize_phase(phase) when is_atom(phase), do: phase |> Atom.to_string() |> normalize_phase()
+  defp normalize_phase(phase) when is_binary(phase), do: phase |> String.trim() |> String.downcase() |> String.replace(~r/[-\s]+/, "_")
+  defp normalize_phase(_phase), do: nil
 
   defp model_routing_source(source, routing_context, turn_number) do
     [
@@ -965,7 +1011,7 @@ defmodule Rondo.AgentRunner do
       completion_observed?
     )
 
-    with :ok <- run_gates(turn_context, issue, turn_number) do
+    with :ok <- run_gates_for_phase(turn_context, issue, turn_number) do
       continue_agent_turns(
         clear_live_update_prompt(turn_context),
         issue,
@@ -974,6 +1020,14 @@ defmodule Rondo.AgentRunner do
         Map.get(invocation_result, :final_report),
         previous_final_report_fingerprint
       )
+    end
+  end
+
+  defp run_gates_for_phase(turn_context, issue, turn_number) do
+    if planning_phase?(turn_context) do
+      :ok
+    else
+      run_gates(turn_context, issue, turn_number)
     end
   end
 
@@ -1215,15 +1269,24 @@ defmodule Rondo.AgentRunner do
   defp continue_agent_turns(context, issue, turn_number, effective_run_ref, final_report, previous_final_report_fingerprint) do
     analysis = FinalReport.analyze(final_report)
 
-    case continuation_decision(
-           context,
-           issue,
-           analysis,
-           turn_number,
-           previous_final_report_fingerprint,
-           final_report,
-           effective_run_ref
-         ) do
+    decision =
+      case maybe_complete_planning_phase(context, issue, analysis, turn_number, final_report, effective_run_ref) do
+        :not_planning ->
+          continuation_decision(
+            context,
+            issue,
+            analysis,
+            turn_number,
+            previous_final_report_fingerprint,
+            final_report,
+            effective_run_ref
+          )
+
+        planning_decision ->
+          planning_decision
+      end
+
+    case decision do
       {:continue, refreshed_issue, current_final_report_fingerprint, next_context}
       when turn_number < context.max_turns ->
         Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} turn=#{turn_number}/#{context.max_turns}")
@@ -1260,6 +1323,154 @@ defmodule Rondo.AgentRunner do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp maybe_complete_planning_phase(context, issue, analysis, turn_number, final_report, effective_run_ref) do
+    cond do
+      not planning_phase?(context) ->
+        :not_planning
+
+      planning_phase_ready?(analysis) ->
+        next_context = context |> clear_live_update_prompt() |> put_planning_handoff(analysis, final_report)
+
+        _ledger =
+          record_planning_completed_checkpoint(context, issue, turn_number, analysis, final_report, effective_run_ref)
+
+        dispatch_run_decision(
+          turn_context_recipient(context),
+          issue,
+          :continue,
+          "planning_phase_completed",
+          "continue from planning phase to implementation phase",
+          run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report, %{
+            "completed_phase" => "planning",
+            "next_phase" => "implementation",
+            "recommended_implementation_tier" => implementation_tier_from_report(analysis.report)
+          })
+        )
+
+        {:continue, issue, analysis.fingerprint, next_context}
+
+      true ->
+        reason = planning_phase_block_reason(analysis)
+
+        dispatch_run_decision(
+          turn_context_recipient(context),
+          issue,
+          :stop,
+          reason,
+          "stop because planning phase did not produce a safe implementation handoff",
+          run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report, %{
+            "completed_phase" => "planning",
+            "next_phase" => nil,
+            "planning_block_reason" => reason
+          })
+        )
+
+        {:done, issue, clear_live_update_prompt(context)}
+    end
+  end
+
+  defp planning_phase_ready?(%{status: :valid, report: report}) when is_map(report) do
+    active_issue_state?(Map.get(report, "next_state")) and implementation_plan_present?(report) and planning_changed_files(report) == []
+  end
+
+  defp planning_phase_ready?(_analysis), do: false
+
+  defp implementation_plan_present?(%{"implementation_plan" => plan}) when is_binary(plan), do: String.trim(plan) != ""
+  defp implementation_plan_present?(_report), do: false
+
+  defp planning_changed_files(%{"changed_files" => files}) when is_list(files), do: Enum.filter(files, &is_binary/1)
+  defp planning_changed_files(_report), do: []
+
+  defp planning_phase_block_reason(%{status: status}) when status != :valid, do: "planning_final_report_invalid"
+
+  defp planning_phase_block_reason(%{report: report}) when is_map(report) do
+    cond do
+      not active_issue_state?(Map.get(report, "next_state")) -> "planning_final_report_terminal"
+      not implementation_plan_present?(report) -> "planning_handoff_missing"
+      planning_changed_files(report) != [] -> "planning_report_declared_changes"
+      true -> "planning_handoff_unsafe"
+    end
+  end
+
+  defp planning_phase_block_reason(_analysis), do: "planning_handoff_unsafe"
+
+  defp record_planning_completed_checkpoint(context, issue, turn_number, analysis, final_report, effective_run_ref) do
+    case Keyword.get(Map.get(context, :opts, []), :run_ledger) do
+      %RunLedger{} = ledger ->
+        payload = %{
+          "phase" => "planning",
+          "next_phase" => "implementation",
+          "turn_number" => turn_number,
+          "issue" => %{
+            "id" => Map.get(issue, :id),
+            "identifier" => Map.get(issue, :identifier),
+            "title" => Map.get(issue, :title),
+            "state" => Map.get(issue, :state)
+          },
+          "final_report_status" => Atom.to_string(analysis.status),
+          "implementation_plan" => implementation_plan_from_report(analysis.report, final_report),
+          "recommended_implementation_tier" => implementation_tier_from_report(analysis.report),
+          "run_ref" => effective_run_ref
+        }
+
+        case RunLedger.write_checkpoint(ledger, :planning_completed, payload, source: %{phase: "planning"}) do
+          {:ok, ledger} ->
+            ledger
+
+          {:error, reason} ->
+            Logger.warning("Failed to record planning checkpoint for #{issue_context(issue)} reason=#{inspect(reason)}")
+            ledger
+        end
+
+      _other ->
+        nil
+    end
+  end
+
+  defp put_planning_handoff(context, analysis, final_report) do
+    plan = implementation_plan_from_report(analysis.report, final_report)
+    tier = implementation_tier_from_report(analysis.report)
+
+    update_in(context.opts, fn opts ->
+      opts
+      |> Keyword.delete(:model_routing_context)
+      |> Keyword.delete(:model_routing)
+      |> Keyword.delete(:model)
+      |> Keyword.put(:planning_handoff, plan)
+      |> maybe_put_runtime_implementation_tier(tier)
+    end)
+  end
+
+  defp maybe_put_runtime_implementation_tier(opts, "heavy") do
+    Keyword.put(opts, :runtime_model_routing_hints, implementation_tier_hints("heavy"))
+  end
+
+  defp maybe_put_runtime_implementation_tier(opts, _tier), do: Keyword.delete(opts, :runtime_model_routing_hints)
+
+  defp implementation_tier_hints(tier) do
+    %{"steps" => [%{"stage" => "turn", "phase" => "implementation", "tier" => tier, "mode" => "prefer"}]}
+  end
+
+  defp implementation_tier_from_report(%{"recommended_implementation_tier" => tier}) when is_binary(tier) do
+    case tier |> String.trim() |> String.downcase() do
+      "heavy" -> "heavy"
+      _other -> "standard"
+    end
+  end
+
+  defp implementation_tier_from_report(_report), do: "standard"
+
+  defp implementation_plan_from_report(%{"implementation_plan" => plan}, _final_report) when is_binary(plan) do
+    case String.trim(plan) do
+      "" -> "Planning phase completed without a detailed implementation_plan. Continue from the ticket and run ledger context."
+      trimmed -> trimmed
+    end
+  end
+
+  defp implementation_plan_from_report(_report, final_report) do
+    "Planning phase completed. Final report excerpt:\n" <> final_report_excerpt(final_report)
   end
 
   # Continuation is delivery-driven. A valid `rondo.final_report/v0` decides
@@ -1936,7 +2147,9 @@ defmodule Rondo.AgentRunner do
           end
       end
 
-    prepend_live_update_prompt(prompt, opts)
+    prompt
+    |> maybe_append_planning_phase_prompt(opts)
+    |> prepend_live_update_prompt(opts)
   end
 
   defp build_turn_prompt(_provider, _issue, opts, turn_number, max_turns) do
@@ -1951,7 +2164,42 @@ defmodule Rondo.AgentRunner do
       - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
       """
 
-    prepend_live_update_prompt(prompt, opts)
+    prompt
+    |> maybe_prepend_planning_handoff(opts)
+    |> prepend_live_update_prompt(opts)
+  end
+
+  defp maybe_append_planning_phase_prompt(prompt, opts) when is_binary(prompt) do
+    if planning_phase?(%{opts: opts}) do
+      prompt <> planning_phase_prompt()
+    else
+      prompt
+    end
+  end
+
+  defp maybe_prepend_planning_handoff(prompt, opts) when is_binary(prompt) do
+    case Keyword.get(opts, :planning_handoff) do
+      handoff when is_binary(handoff) and handoff != "" ->
+        "Planning checkpoint to implement from:\n\n" <> handoff <> "\n\n" <> prompt
+
+      _other ->
+        prompt
+    end
+  end
+
+  defp planning_phase_prompt do
+    """
+
+    ## Rondo planning phase
+
+    This is a planning-only phase. Do not edit files, run autofix commands, commit, push, or perform implementation work.
+    Produce an implementation handoff for the next phase. The next implementation phase will run separately with its own model routing.
+
+    Your final response must include a valid `rondo.final_report/v0` JSON object. Include these additional optional fields:
+    - `implementation_plan`: concise handoff for the implementation phase.
+    - `recommended_implementation_tier`: `standard` by default, or `heavy` only when implementation complexity requires stronger execution.
+    Set `next_state` to an active state such as `In Progress` unless truly blocked.
+    """
   end
 
   defp prepend_live_update_prompt(prompt, opts) when is_binary(prompt) do
