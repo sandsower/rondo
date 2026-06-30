@@ -603,6 +603,59 @@ defmodule Rondo.ModelRoutingTest do
              )
   end
 
+  test "generic planning and implementation phases have safe default tiers" do
+    routing = %{
+      defaults: %{tier: "standard", mode: "prefer"},
+      tiers: %{
+        standard: [%{adapter: "pi", model: "standard-model"}],
+        frontier: [%{adapter: "pi", model: "frontier-model"}]
+      }
+    }
+
+    assert %{
+             status: :honored,
+             requested_tier: "frontier",
+             resolved: %{adapter: "pi", model: "frontier-model"},
+             context: %{phase: "planning"}
+           } =
+             ModelRouting.resolve(
+               routing_context: %{stage: :initial_spawn, phase: :planning},
+               repo_model_routing: routing
+             )
+
+    assert %{
+             status: :honored,
+             requested_tier: "standard",
+             resolved: %{adapter: "pi", model: "standard-model"},
+             context: %{phase: "implementation"}
+           } =
+             ModelRouting.resolve(
+               routing_context: %{stage: :turn, phase: :implementation},
+               repo_model_routing: routing
+             )
+  end
+
+  test "generic planning phase falls back to heavy when frontier is not configured" do
+    routing = %{
+      defaults: %{tier: "standard", mode: "prefer"},
+      tiers: %{
+        standard: [%{adapter: "pi", model: "standard-model"}],
+        heavy: [%{adapter: "pi", model: "heavy-model"}]
+      }
+    }
+
+    assert %{
+             status: :honored,
+             requested_tier: "heavy",
+             resolved: %{adapter: "pi", model: "heavy-model"},
+             context: %{phase: "planning"}
+           } =
+             ModelRouting.resolve(
+               routing_context: %{stage: :initial_spawn, phase: :planning},
+               repo_model_routing: routing
+             )
+  end
+
   test "repo require floor upgrades lower tier with fallback status" do
     assert %{
              status: :fallback,
