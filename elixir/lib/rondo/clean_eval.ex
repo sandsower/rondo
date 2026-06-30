@@ -24,11 +24,16 @@ defmodule Rondo.CleanEval do
 
   The gate runner is an injectable seam (`:gate_runner`, defaulting to
   `Rondo.Gates.run/3` — `(gates, workspace, opts) -> {:ok, summary} | {:error,
-  summary | term}`). Beislið staged pre-PR gates can later replace local gates by
-  injecting a runner with the same contract without changing these mechanics.
+  summary | term}`). By default clean evaluation asks the configured
+  `Rondo.ProcessProvider` for the pre-PR gate selection and runs those gates in
+  the clean worktree. An explicit `:gates` option remains available for tests and
+  low-level callers that need to exercise only the clean worktree mechanics.
   """
 
-  alias Rondo.{Config, Gates, RunLedger}
+  require Logger
+
+  alias Rondo.{Config, Gates, ProcessProvider, RunLedger}
+  alias Rondo.ProcessProvider.{Beislid, Native}
 
   @schema "rondo.clean_eval/v0"
   @patch_relative_path "artifacts/changes.patch"
@@ -86,7 +91,9 @@ defmodule Rondo.CleanEval do
       workspace: Keyword.get(opts, :workspace, get_in(ledger.manifest, ["repo", "workspace"])),
       eval_workspace: eval_workspace_path(workspace_root, ledger.run_id),
       base_ref_override: Keyword.get(opts, :base_ref, Config.clean_eval_base_ref()),
-      gates: Keyword.get_lazy(opts, :gates, &Config.clean_eval_gates/0),
+      gates_override: gates_override(opts),
+      process_provider: process_provider(ledger, opts),
+      source_contract: Keyword.get(opts, :source_contract, Map.get(ledger.manifest, "source_contract")),
       gate_runner: Keyword.get(opts, :gate_runner, &Gates.run/3),
       runner: Keyword.get(opts, :runner, &run_git/2)
     }
@@ -200,12 +207,46 @@ defmodule Rondo.CleanEval do
     end
   end
 
-  defp run_gates(%{gates: []}), do: %{status: :pass, gates: nil}
-
   defp run_gates(context) do
-    context.gates
-    |> context.gate_runner.(context.eval_workspace, run_dir: context.run_dir, gates_dir: @gates_relative_dir)
-    |> gates_outcome()
+    case select_gate_selection(context) do
+      {:ok, %{gates: []} = gate_selection} ->
+        empty_gate_selection_outcome(gate_selection)
+
+      {:ok, gate_selection} ->
+        {action_policy_provider, gate_selection} = action_policy_provider_for_gates(gate_selection, context)
+
+        gate_selection.gates
+        |> context.gate_runner.(context.eval_workspace,
+          run_dir: context.run_dir,
+          gates_dir: @gates_relative_dir,
+          gate_selection: Map.drop(gate_selection, [:gates, :action_policy_provider]),
+          action_policy: true,
+          action_policy_evaluator: action_policy_evaluator(action_policy_provider, context)
+        )
+        |> gates_outcome()
+
+      {:error, reason} ->
+        %{status: :error, reason: "gate_selection_failed #{cap(inspect(reason))}"}
+    end
+  end
+
+  defp empty_gate_selection_outcome(gate_selection) do
+    metadata = Map.get(gate_selection, :metadata, %{})
+    changed_files = Map.get(gate_selection, :changed_files, [])
+
+    if Map.get(metadata, :selector_mode) == "changed_files" and changed_files != [] do
+      %{status: :error, reason: "gate_selection_empty #{cap(inspect(empty_gate_selection_reason(gate_selection)))}"}
+    else
+      %{status: :pass, gates: nil}
+    end
+  end
+
+  defp empty_gate_selection_reason(gate_selection) do
+    %{
+      changed_files: Map.get(gate_selection, :changed_files, []),
+      skipped: Map.get(gate_selection, :skipped, []),
+      warnings: Map.get(gate_selection, :warnings, [])
+    }
   end
 
   defp gates_outcome({:ok, summary}), do: %{status: :pass, gates: Gates.summary_to_json(summary)}
@@ -218,6 +259,105 @@ defmodule Rondo.CleanEval do
 
   defp gates_status(:fail), do: :fail
   defp gates_status(_environment_failure), do: :error
+
+  defp select_gate_selection(%{gates_override: gates}) when is_list(gates) do
+    {:ok,
+     ProcessProvider.gate_selection_result(gates, metadata: %{provider: "explicit", stage: :pre_pr})
+     |> Map.put(:action_policy_provider, Native)}
+  end
+
+  defp select_gate_selection(context) do
+    opts = gate_selection_opts(context)
+
+    case ProcessProvider.select_gate_selection(context.process_provider, opts) do
+      {:ok, selection} ->
+        {:ok, Map.put(selection, :action_policy_provider, context.process_provider)}
+
+      {:error, reason} ->
+        handle_gate_selection_failure(context.process_provider, reason, opts)
+    end
+  end
+
+  defp gate_selection_opts(context) do
+    [
+      workspace: context.eval_workspace,
+      source_workspace: context.workspace,
+      run_dir: context.run_dir,
+      stage: :pre_pr
+    ]
+    |> maybe_put_source_contract(context.source_contract)
+  end
+
+  defp maybe_put_source_contract(opts, source_contract) when is_map(source_contract), do: Keyword.put(opts, :source_contract, source_contract)
+  defp maybe_put_source_contract(opts, _source_contract), do: opts
+
+  defp handle_gate_selection_failure(provider, reason, opts) do
+    if provider == Native or invalid_artifact_reason?(reason) or Config.process_provider_required?() do
+      {:error, reason}
+    else
+      provider_id = provider_id(provider)
+      Logger.warning("Process provider clean-eval gate selection failed provider=#{provider_id} reason=#{inspect(reason)}; falling back to native gates")
+
+      case ProcessProvider.select_gate_selection(Native, opts) do
+        {:ok, selection} ->
+          {:ok, annotate_native_fallback(selection, provider_id, reason) |> Map.put(:action_policy_provider, Native)}
+
+        {:error, native_reason} ->
+          {:error, {:native_fallback_gate_selection_failed, native_reason}}
+      end
+    end
+  end
+
+  defp invalid_artifact_reason?({:invalid_artifact_field, _field}), do: true
+  defp invalid_artifact_reason?(:invalid_artifact), do: true
+  defp invalid_artifact_reason?(:invalid_artifact_id), do: true
+  defp invalid_artifact_reason?({:unsupported_artifact_schema, _schema}), do: true
+  defp invalid_artifact_reason?({:artifact_not_approved, _status}), do: true
+  defp invalid_artifact_reason?({:invalid_json, _path, _message}), do: true
+  defp invalid_artifact_reason?(_reason), do: false
+
+  defp action_policy_provider_for_gates(%{action_policy_provider: Beislid} = gate_selection, context) do
+    provider = if Beislid.action_policy_available?(provider_opts(context)), do: Beislid, else: Native
+    {provider, annotate_action_policy_provider(gate_selection, provider)}
+  end
+
+  defp action_policy_provider_for_gates(gate_selection, _context) do
+    provider = Map.get(gate_selection, :action_policy_provider, Native)
+    {provider, annotate_action_policy_provider(gate_selection, provider)}
+  end
+
+  defp action_policy_evaluator(Beislid, context) do
+    if Beislid.action_policy_available?(provider_opts(context)) do
+      fn action, classes, opts -> Beislid.evaluate_action_policy(action, classes, Keyword.merge(provider_opts(context), opts)) end
+    else
+      ProcessProvider.action_policy_evaluator(Native)
+    end
+  end
+
+  defp action_policy_evaluator(provider, _context), do: ProcessProvider.action_policy_evaluator(provider)
+
+  defp provider_opts(context) do
+    case context.source_contract do
+      source_contract when is_map(source_contract) -> [source_contract: source_contract]
+      _other -> []
+    end
+  end
+
+  defp annotate_native_fallback(selection, provider_id, reason) do
+    warning = %{message: "provider #{provider_id} gate selection failed: #{inspect(reason)}; fell back to native gates"}
+
+    selection
+    |> Map.update!(:warnings, &[warning | &1])
+    |> Map.update!(:metadata, &Map.merge(&1, %{fallback_from: provider_id, fallback_reason: inspect(reason)}))
+  end
+
+  defp annotate_action_policy_provider(gate_selection, provider) do
+    Map.update!(gate_selection, :metadata, &Map.put(&1, :action_policy_provider, provider_id(provider)))
+  end
+
+  defp provider_id(provider) do
+    if function_exported?(provider, :id, 0), do: provider.id(), else: inspect(provider)
+  end
 
   defp cleanup_eval_workspace(context) do
     case git(context, context.workspace, ["worktree", "remove", "--force", context.eval_workspace]) do
@@ -298,6 +438,17 @@ defmodule Rondo.CleanEval do
     case File.mkdir_p(Path.dirname(path)) do
       :ok -> :ok
       {:error, reason} -> {:error, {:clean_eval_result_dir_failed, reason}}
+    end
+  end
+
+  defp gates_override(opts) do
+    if Keyword.has_key?(opts, :gates), do: Keyword.fetch!(opts, :gates), else: nil
+  end
+
+  defp process_provider(_ledger, opts) do
+    case Keyword.get(opts, :process_provider) do
+      nil -> ProcessProvider.provider_module()
+      provider -> ProcessProvider.provider_module(provider)
     end
   end
 
