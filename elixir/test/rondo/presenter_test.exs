@@ -67,6 +67,146 @@ defmodule Rondo.PresenterTest do
     assert issue_payload.running.latest_gate.status == :fail
   end
 
+  test "state payload exposes tracker, PR, branch, and final report links" do
+    workflow_path = Workflow.workflow_file_path()
+    original_workflow = File.read!(workflow_path)
+    write_workflow_file!(workflow_path, tracker_repo: "sandsower/rondo")
+    workspace_root = tmp_dir("presenter-links")
+
+    on_exit(fn ->
+      File.write!(workflow_path, original_workflow)
+      WorkflowStore.force_reload()
+      File.rm_rf(workspace_root)
+    end)
+
+    linear_issue = %Issue{
+      id: "issue-links-linear",
+      identifier: "MT-LINKS-LINEAR",
+      title: "Links on live runs",
+      description: "Links on live runs",
+      state: "In Progress",
+      branch_name: "feature/live-links",
+      url: "https://linear.app/teotl/issue/RON-93/links-on-live-runs"
+    }
+
+    assert {:ok, linear_ledger} =
+             RunLedger.create_run(linear_issue,
+               workspace_root: workspace_root,
+               now: ~U[2026-05-10 15:30:00Z],
+               random_suffix: "feedface"
+             )
+
+    manifest = Jason.decode!(File.read!(linear_ledger.manifest_path))
+
+    manifest =
+      put_in(
+        manifest,
+        ["agent"],
+        Map.merge(manifest["agent"] || %{}, %{
+          "pr" => %{
+            "number" => 42,
+            "url" => "https://github.com/sandsower/rondo/pull/42",
+            "title" => "Add dashboard links",
+            "head_ref_name" => "feature/live-links",
+            "base_ref_name" => "main"
+          }
+        })
+      )
+      |> put_in(["final_report"], %{"path" => "artifacts/final-report.json"})
+
+    File.write!(linear_ledger.manifest_path, Jason.encode!(manifest))
+    File.write!(Path.join([linear_ledger.run_dir, "artifacts", "final-report.json"]), "{}")
+
+    linear_ledger = %{linear_ledger | manifest: manifest}
+
+    github_issue = %Issue{
+      id: "issue-links-github",
+      identifier: "GH-321",
+      title: "GitHub source link",
+      description: "GitHub source link",
+      state: "Closed",
+      url: "https://github.com/sandsower/rondo/issues/321"
+    }
+
+    assert {:ok, github_ledger} =
+             RunLedger.create_run(github_issue,
+               workspace_root: workspace_root,
+               now: ~U[2026-05-10 15:35:00Z],
+               random_suffix: "cafebabe"
+             )
+
+    snapshot = %{
+      running: [
+        %{
+          issue_id: linear_issue.id,
+          identifier: linear_issue.identifier,
+          issue: linear_issue,
+          state: linear_issue.state,
+          session_id: "session-links-linear",
+          run_id: linear_ledger.run_id,
+          run_dir: linear_ledger.run_dir,
+          started_at: ~U[2026-05-10 15:30:00Z],
+          last_claude_event: :turn_started,
+          last_claude_message: %{event: :turn_started},
+          last_claude_timestamp: ~U[2026-05-10 15:30:02Z],
+          latest_gate: nil,
+          model_routing: nil,
+          model_fallback: nil,
+          claude_input_tokens: 0,
+          claude_output_tokens: 0,
+          claude_total_tokens: 0,
+          turn_count: 1,
+          ledger: linear_ledger,
+          event_log: []
+        }
+      ],
+      retrying: [],
+      paused: [],
+      archived: [
+        %{
+          issue_id: github_issue.id,
+          identifier: github_issue.identifier,
+          session_id: "session-links-github",
+          state: github_issue.state,
+          run_id: github_ledger.run_id,
+          run_dir: github_ledger.run_dir,
+          started_at: ~U[2026-05-10 15:35:00Z],
+          finished_at: ~U[2026-05-10 15:45:00Z],
+          exit_reason: "completed",
+          turn_count: 2,
+          latest_gate: nil,
+          tokens: %{input_tokens: 1, output_tokens: 2, total_tokens: 3},
+          model_routing: nil,
+          adapter: "claude_code"
+        }
+      ],
+      claude_totals: %{input_tokens: 1, output_tokens: 2, total_tokens: 3, seconds_running: 60}
+    }
+
+    server_name = Module.concat(__MODULE__, :LinkSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+
+    [running] = payload.running
+    assert Enum.any?(running.links.tracker.available, &(&1.kind == :linear_issue))
+    assert Enum.any?(running.links.review.available, &(&1.kind == :pull_request))
+    assert Enum.any?(running.links.review.available, &(&1.kind == :branch))
+    assert Enum.any?(running.links.review.available, &(&1.kind == :final_report))
+
+    assert {:ok, issue_payload} = RondoWeb.Presenter.issue_payload("MT-LINKS-LINEAR", server_name, 1_000)
+    assert Enum.any?(issue_payload.running.links.review.available, &(&1.kind == :pull_request))
+
+    [archived_group] = payload.archived
+    assert Enum.any?(archived_group.links.tracker.available, &(&1.kind == :github_issue))
+    assert Enum.any?(archived_group.links.review.unavailable, &String.contains?(Map.get(&1, :reason, ""), "no branch"))
+
+    [archived_run] = archived_group.runs
+    assert Enum.any?(archived_run.links.tracker.available, &(&1.kind == :github_issue))
+    assert Enum.any?(archived_run.links.review.unavailable, &String.contains?(Map.get(&1, :reason, ""), "no branch"))
+  end
+
   test "state payload includes projected run timelines" do
     workspace_root = tmp_dir("presenter-run-timelines")
     on_exit(fn -> File.rm_rf(workspace_root) end)
