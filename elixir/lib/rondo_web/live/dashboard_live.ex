@@ -152,6 +152,10 @@ defmodule RondoWeb.DashboardLive do
          |> assign(:selected_issue_data, run_with_log)
          |> assign(:selected_run_index, selected_index)
          |> assign(:selected_runs, runs)
+         |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, selected_run))
+         |> assign(:selected_event_index, 0)
+         |> assign(:selected_event_mode, :pretty)
+         |> assign(:event_filters, default_event_filters())
          |> push_run_charts(runs)}
 
       _ ->
@@ -1178,10 +1182,15 @@ defmodule RondoWeb.DashboardLive do
 
   defp archive_activity_style(run) do
     total_tokens = get_in(run, [:tokens, :total_tokens]) || 0
-    width = total_tokens |> :math.log10() |> Kernel.*(20) |> round() |> min(100) |> max(8)
+
+    width =
+      if total_tokens > 0 do
+        total_tokens |> :math.log10() |> Kernel.*(20) |> round() |> min(100) |> max(8)
+      else
+        8
+      end
+
     "width: #{width}%"
-  rescue
-    _ -> "width: 8%"
   end
 
   defp archive_activity_title(run) do
