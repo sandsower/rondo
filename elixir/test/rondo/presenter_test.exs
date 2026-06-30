@@ -133,6 +133,90 @@ defmodule Rondo.PresenterTest do
     assert "turn_started" in kinds
   end
 
+  test "state payload exposes provider, model, cost, and token metadata for logs" do
+    snapshot = %{
+      running: [
+        %{
+          issue_id: "issue-log",
+          identifier: "MT-LOG",
+          state: "In Progress",
+          session_id: "session-log",
+          started_at: ~U[2026-05-27 11:59:00Z],
+          last_claude_timestamp: ~U[2026-05-27 12:00:00Z],
+          last_claude_event: :assistant,
+          last_claude_message: %{message: "Turn 1 complete"},
+          model_routing: %{resolved: %{adapter: "pi", model: "openrouter/deepseek/deepseek-chat"}},
+          adapter: "pi",
+          claude_input_tokens: 10,
+          claude_output_tokens: 5,
+          claude_total_tokens: 15,
+          event_log: [
+            %{
+              at: ~U[2026-05-27 11:59:30Z],
+              event: :assistant,
+              message: "Hello",
+              tokens: %{input_tokens: 1, output_tokens: 2, total_tokens: 3, cost: 1.25}
+            },
+            %{
+              at: ~U[2026-05-27 11:59:45Z],
+              event: :tool,
+              message: "Read file",
+              tokens: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, cost: 0.25}
+            }
+          ]
+        }
+      ],
+      retrying: [],
+      paused: [],
+      archived: [
+        %{
+          issue_id: "issue-archived-log",
+          identifier: "MT-ARCHIVED-LOG",
+          session_id: "session-archived-log",
+          state: "Done",
+          started_at: ~U[2026-05-27 10:00:00Z],
+          finished_at: ~U[2026-05-27 10:04:00Z],
+          exit_reason: "completed",
+          turn_count: 2,
+          latest_gate: nil,
+          tokens: %{input_tokens: 2, output_tokens: 4, total_tokens: 6},
+          model_routing: %{
+            resolved: %{adapter: "claude_code", model: "openrouter/anthropic/claude-3.7-sonnet"}
+          },
+          adapter: "claude_code",
+          event_log: [
+            %{
+              at: ~U[2026-05-27 10:01:00Z],
+              event: :assistant,
+              message: "Archived turn",
+              tokens: %{input_tokens: 1, output_tokens: 1, total_tokens: 2, cost: 0.5}
+            }
+          ]
+        }
+      ],
+      claude_totals: %{input_tokens: 10, output_tokens: 5, total_tokens: 15, seconds_running: 60}
+    }
+
+    server_name = Module.concat(__MODULE__, :LogSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+    [running] = payload.running
+    [archived_group] = payload.archived
+
+    assert running.provider == "openrouter"
+    assert running.model == "openrouter/deepseek/deepseek-chat"
+    assert running.cost == 1.5
+    assert Enum.any?(running.event_log, &match?(%{tokens: %{total_tokens: 3, cost: 1.25}}, &1))
+
+    assert archived_group.latest_result == "completed"
+    assert [archived_run] = archived_group.runs
+    assert archived_run.provider == "openrouter"
+    assert archived_run.model == "openrouter/anthropic/claude-3.7-sonnet"
+    assert archived_run.cost == 0.5
+  end
+
   test "state and issue API payloads expose paused interrupts" do
     snapshot = %{
       running: [],
@@ -405,6 +489,8 @@ defmodule Rondo.PresenterTest do
   end
 
   defp tmp_dir(name) do
-    Path.join(System.tmp_dir!(), "rondo-#{name}-#{System.unique_integer([:positive])}")
+    path = Path.join(System.tmp_dir!(), "rondo-#{name}-#{System.unique_integer([:positive, :monotonic])}")
+    File.rm_rf!(path)
+    path
   end
 end

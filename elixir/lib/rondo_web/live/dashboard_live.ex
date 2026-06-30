@@ -14,9 +14,12 @@ defmodule RondoWeb.DashboardLive do
       socket
       |> assign(:payload, load_payload())
       |> assign(:now, DateTime.utc_now())
+      |> assign(:log_filters, default_log_filters())
+      |> assign(:event_filters, default_event_filters())
+      |> assign(:selected_event_index, 0)
+      |> assign(:selected_event_mode, :pretty)
       |> assign(:selected_issue, nil)
       |> assign(:selected_run_index, 0)
-      |> assign(:selected_run_projection, nil)
 
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
@@ -62,14 +65,7 @@ defmodule RondoWeb.DashboardLive do
         {identifier, _} ->
           # Viewing a live running issue — keep it updated
           entry = find_issue_entry(socket.assigns.payload, identifier)
-
-          if entry do
-            socket
-            |> assign(:selected_issue_data, entry)
-            |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, entry))
-          else
-            socket
-          end
+          if entry, do: assign(socket, :selected_issue_data, entry), else: socket
       end
 
     {:noreply, socket}
@@ -89,6 +85,9 @@ defmodule RondoWeb.DashboardLive do
       |> assign(:selected_runs, nil)
       |> assign(:selected_run_index, 0)
       |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, entry))
+      |> assign(:selected_event_index, 0)
+      |> assign(:selected_event_mode, :pretty)
+      |> assign(:event_filters, default_event_filters())
 
     {:noreply, socket}
   end
@@ -124,6 +123,9 @@ defmodule RondoWeb.DashboardLive do
        |> assign(:selected_run_index, latest_index)
        |> assign(:selected_runs, group.runs)
        |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, latest_run))
+       |> assign(:selected_event_index, 0)
+       |> assign(:selected_event_mode, :pretty)
+       |> assign(:event_filters, default_event_filters())
        |> push_run_charts(group.runs)}
     else
       {:noreply, socket}
@@ -143,10 +145,45 @@ defmodule RondoWeb.DashboardLive do
        socket
        |> assign(:selected_issue_data, run_with_log)
        |> assign(:selected_run_index, index)
-       |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, run))}
+       |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, run))
+       |> assign(:selected_event_index, 0)
+       |> assign(:selected_event_mode, :pretty)
+       |> assign(:event_filters, default_event_filters())}
     else
       {:noreply, socket}
     end
+  end
+
+  @impl true
+  def handle_event("filter_logs", params, socket) do
+    {:noreply, assign(socket, :log_filters, merge_log_filters(socket.assigns.log_filters, params))}
+  end
+
+  @impl true
+  def handle_event("sort_logs", %{"field" => field}, socket) do
+    filters = socket.assigns.log_filters
+    direction = if filters.sort_by == field, do: toggle_sort_direction(filters.sort_dir), else: "desc"
+
+    {:noreply, assign(socket, :log_filters, Map.merge(filters, %{sort_by: field, sort_dir: direction}))}
+  end
+
+  @impl true
+  def handle_event("filter_events", params, socket) do
+    {:noreply,
+     socket
+     |> assign(:event_filters, merge_event_filters(socket.assigns.event_filters, params))
+     |> assign(:selected_event_index, 0)}
+  end
+
+  @impl true
+  def handle_event("select_event", %{"index" => index_str}, socket) do
+    {:noreply, assign(socket, :selected_event_index, String.to_integer(index_str))}
+  end
+
+  @impl true
+  def handle_event("toggle_event_mode", _params, socket) do
+    mode = if socket.assigns.selected_event_mode == :raw, do: :pretty, else: :raw
+    {:noreply, assign(socket, :selected_event_mode, mode)}
   end
 
   @impl true
@@ -157,7 +194,10 @@ defmodule RondoWeb.DashboardLive do
      |> assign(:selected_issue_data, nil)
      |> assign(:selected_runs, nil)
      |> assign(:selected_run_index, 0)
-     |> assign(:selected_run_projection, nil)}
+     |> assign(:selected_run_projection, nil)
+     |> assign(:selected_event_index, 0)
+     |> assign(:selected_event_mode, :pretty)
+     |> assign(:event_filters, default_event_filters())}
   end
 
   @impl true
@@ -228,33 +268,30 @@ defmodule RondoWeb.DashboardLive do
           <article class="metric-card">
             <p class="metric-label">Runtime</p>
             <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
-            <p class="metric-detail">Total Claude runtime across completed and active sessions.</p>
+            <p class="metric-detail">Total runtime across completed and active sessions.</p>
           </article>
         </section>
 
         <div class="chart-grid">
           <div class="chart-card">
-            <p class="chart-card-title">Model usage</p>
+            <p class="chart-card-title">Provider mix</p>
             <div class="model-usage-grid">
-              <div class="model-usage-item">
-                <span class="model-usage-provider">Codex</span>
-                <span class="model-usage-pct"><%= format_model_pct(@payload.model_usage.codex_pct) %></span>
-                <span class="model-usage-detail"><%= model_usage_run_count(@payload.model_usage, "codex") %> runs</span>
-              </div>
-              <div class="model-usage-item">
-                <span class="model-usage-provider">OpenRouter</span>
-                <span class="model-usage-pct"><%= format_model_pct(@payload.model_usage.openrouter_pct) %></span>
-                <span class="model-usage-detail"><%= model_usage_run_count(@payload.model_usage, "openrouter") %> runs</span>
-              </div>
+              <%= if Map.get(@payload.model_usage, :by_provider) |> map_size() == 0 do %>
+                <div class="model-usage-item">
+                  <span class="model-usage-provider">No provider data</span>
+                  <span class="model-usage-detail">Waiting for runs to resolve model routing.</span>
+                </div>
+              <% else %>
+                <%= for {provider, info} <- @payload.model_usage.by_provider |> Enum.sort_by(fn {_provider, info} -> info.run_count end, :desc) do %>
+                  <div class="model-usage-item">
+                    <span class="model-usage-provider"><%= provider_label(provider) %></span>
+                    <span class="model-usage-pct"><%= format_model_pct(info.run_pct) %></span>
+                    <span class="model-usage-detail"><%= info.run_count %> run<%= if info.run_count != 1, do: "s" %> · <%= format_int(info.token_count) %> tokens</span>
+                  </div>
+                <% end %>
+              <% end %>
             </div>
-            <%= if Map.get(@payload.model_usage, :by_provider) |> Map.keys() |> Enum.reject(&(&1 in ["codex", "openrouter"])) != [] do %>
-              <div class="model-usage-others" style="margin-top: 8px;">
-                <span class="muted" style="font-size: 11px;">
-                  Other: <%= @payload.model_usage.by_provider |> Map.keys() |> Enum.reject(&(&1 in ["codex", "openrouter"])) |> Enum.map_join(", ", &("#{&1} #{format_model_pct(Map.get(@payload.model_usage.by_provider, &1).run_pct)}")) %>
-                </span>
-              </div>
-            <% end %>
-            <%= if Map.get(@payload.model_usage, :by_model) |> map_size() > 0 do %>
+            <%= if map_size(@payload.model_usage.by_model) > 0 do %>
               <details style="margin-top: 8px; font-size: 11px;">
                 <summary style="cursor: pointer; color: var(--text-muted);">By model (<%= map_size(@payload.model_usage.by_model) %> models)</summary>
                 <div style="margin-top: 6px; display: flex; flex-direction: column; gap: 2px;">
@@ -284,6 +321,120 @@ defmodule RondoWeb.DashboardLive do
             </div>
           </div>
         </div>
+
+        <% log_rows = dashboard_log_rows(@payload, @log_filters) %>
+        <section class="section-card logs-section">
+          <div class="section-header logs-section-header">
+            <div>
+              <h2 class="section-title">Logs</h2>
+              <p class="section-copy">Dense run history with live, paused, retrying, and archived visibility.</p>
+            </div>
+            <div class="logs-summary">
+              <span class="state-badge state-badge-active"><%= length(log_rows) %> rows</span>
+              <span class="muted">Sort: <%= @log_filters.sort_by %> · <%= @log_filters.sort_dir %></span>
+            </div>
+          </div>
+
+          <form class="logs-toolbar" phx-change="filter_logs">
+            <label class="logs-control">
+              <span class="logs-control-label">Search</span>
+              <input
+                type="search"
+                name="query"
+                value={@log_filters.query}
+                placeholder="Search issues, models, providers, messages"
+                class="logs-search-input"
+                phx-debounce="250"
+              />
+            </label>
+
+            <label class="logs-control">
+              <span class="logs-control-label">Status</span>
+              <select name="status" class="logs-select">
+                <option value="all" selected={@log_filters.status == "all"}>All</option>
+                <option value="active" selected={@log_filters.status == "active"}>Active</option>
+                <option value="running" selected={@log_filters.status == "running"}>Running</option>
+                <option value="paused" selected={@log_filters.status == "paused"}>Paused</option>
+                <option value="retrying" selected={@log_filters.status == "retrying"}>Retrying</option>
+                <option value="archived" selected={@log_filters.status == "archived"}>Archived</option>
+              </select>
+            </label>
+
+            <label class="logs-control">
+              <span class="logs-control-label">Date</span>
+              <select name="window" class="logs-select">
+                <option value="all" selected={@log_filters.window == "all"}>All time</option>
+                <option value="24h" selected={@log_filters.window == "24h"}>Last 24h</option>
+                <option value="7d" selected={@log_filters.window == "7d"}>Last 7d</option>
+                <option value="30d" selected={@log_filters.window == "30d"}>Last 30d</option>
+              </select>
+            </label>
+          </form>
+
+          <div class="table-wrap">
+            <table class="data-table logs-table">
+              <colgroup>
+                <col style="width: 9rem;" />
+                <col style="width: 13rem;" />
+                <col style="width: 10rem;" />
+                <col style="width: 7rem;" />
+                <col style="width: 6.5rem;" />
+                <col style="width: 6.5rem;" />
+                <col style="width: 6.5rem;" />
+                <col style="width: 7rem;" />
+                <col style="width: 8rem;" />
+                <col style="width: 10rem;" />
+                <col style="width: 5rem;" />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th><button type="button" class="table-sort-button" phx-click="sort_logs" phx-value-field="date">Date <%= sort_indicator(@log_filters, "date") %></button></th>
+                  <th><button type="button" class="table-sort-button" phx-click="sort_logs" phx-value-field="model">Model <%= sort_indicator(@log_filters, "model") %></button></th>
+                  <th><button type="button" class="table-sort-button" phx-click="sort_logs" phx-value-field="provider">Provider <%= sort_indicator(@log_filters, "provider") %></button></th>
+                  <th><button type="button" class="table-sort-button" phx-click="sort_logs" phx-value-field="app">App <%= sort_indicator(@log_filters, "app") %></button></th>
+                  <th><button type="button" class="table-sort-button" phx-click="sort_logs" phx-value-field="input_tokens">Input <%= sort_indicator(@log_filters, "input_tokens") %></button></th>
+                  <th><button type="button" class="table-sort-button" phx-click="sort_logs" phx-value-field="output_tokens">Output <%= sort_indicator(@log_filters, "output_tokens") %></button></th>
+                  <th><button type="button" class="table-sort-button" phx-click="sort_logs" phx-value-field="cost">Cost <%= sort_indicator(@log_filters, "cost") %></button></th>
+                  <th><button type="button" class="table-sort-button" phx-click="sort_logs" phx-value-field="speed">Speed <%= sort_indicator(@log_filters, "speed") %></button></th>
+                  <th><button type="button" class="table-sort-button" phx-click="sort_logs" phx-value-field="finish">Finish <%= sort_indicator(@log_filters, "finish") %></button></th>
+                  <th>Source</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  :for={row <- log_rows}
+                  class={"data-table-row #{if log_row_selected?(@selected_issue, row), do: "data-table-row-selected", else: ""}"}
+                  phx-click={if row.kind == :archived, do: "select_archived", else: "select_issue"}
+                  phx-value-identifier={row.identifier}
+                  style="cursor: pointer;"
+                >
+                  <td>
+                    <div class="detail-stack">
+                      <span class="mono"><%= log_row_date(row) %></span>
+                      <span class={log_row_status_class(row)}><%= log_row_kind_label(row) %></span>
+                    </div>
+                  </td>
+                  <td>
+                    <div class="detail-stack">
+                      <span class="mono"><%= log_row_model(row) %></span>
+                      <span class="muted event-meta"><%= log_row_message(row) %></span>
+                    </div>
+                  </td>
+                  <td><span class={provider_badge_class(log_row_provider(row))}><%= log_row_provider(row) || "n/a" %></span></td>
+                  <td class="mono"><%= log_row_app(row) || "n/a" %></td>
+                  <td class="numeric"><%= format_int(log_row_input_tokens(row)) %></td>
+                  <td class="numeric"><%= format_int(log_row_output_tokens(row)) %></td>
+                  <td class="numeric"><%= format_cost(log_row_cost(row)) %></td>
+                  <td class="numeric"><%= format_speed(log_row_speed(row)) %></td>
+                  <td><span class={log_row_finish_class(row)}><%= log_row_finish(row) || "n/a" %></span></td>
+                  <td>
+                    <a class="issue-link" href={log_row_source_link(row)} onclick="event.stopPropagation()">JSON</a>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
 
         <section class="section-card">
           <div class="section-header">
@@ -316,6 +467,7 @@ defmodule RondoWeb.DashboardLive do
                     phx-value-identifier={entry.issue_identifier}
                     style="cursor: pointer;"
                   >
+                    <% quick_response = quick_guidance_response(entry) %>
                     <td>
                       <div class="issue-stack">
                         <span class="issue-id"><%= entry.issue_identifier %></span>
@@ -323,8 +475,8 @@ defmodule RondoWeb.DashboardLive do
                       </div>
                     </td>
                     <td>
-                      <span class={guidance_severity_class(entry.guidance_severity)}>
-                        <%= entry.guidance_severity || "warning" %>
+                      <span class={guidance_severity_class(Map.get(entry, :guidance_severity))}>
+                        <%= Map.get(entry, :guidance_severity) || "warning" %>
                       </span>
                     </td>
                     <td>
@@ -336,19 +488,19 @@ defmodule RondoWeb.DashboardLive do
                         <% end %>
                       </div>
                     </td>
-                    <td class="mono"><%= entry.paused_at || "n/a" %></td>
-                    <td class="numeric"><%= length(entry.event_log || []) %> events</td>
+                    <td class="mono"><%= Map.get(entry, :paused_at) || "n/a" %></td>
+                    <td class="numeric"><%= length(Map.get(entry, :event_log, []) || []) %> events</td>
                     <td>
-                      <%= if quick_guidance_response(entry) do %>
+                      <%= if quick_response do %>
                         <button
                           type="button"
                           class="subtle-button"
                           phx-click="submit_guidance"
                           phx-value-issue-id={entry.issue_id}
-                          phx-value-guidance={quick_guidance_response(entry).guidance || quick_guidance_response(entry).id}
+                          phx-value-guidance={Map.get(quick_response, :guidance) || Map.get(quick_response, :id)}
                           onclick="event.stopPropagation()"
                         >
-                          <%= quick_guidance_response(entry).label || quick_guidance_response(entry).id %>
+                          <%= Map.get(quick_response, :label) || Map.get(quick_response, :id) %>
                         </button>
                       <% end %>
                     </td>
@@ -386,7 +538,7 @@ defmodule RondoWeb.DashboardLive do
                     <th>State</th>
                     <th>Session</th>
                     <th>Runtime / turns</th>
-                    <th>Claude update</th>
+                    <th>Latest update</th>
                     <th>Tokens</th>
                   </tr>
                 </thead>
@@ -718,20 +870,112 @@ defmodule RondoWeb.DashboardLive do
             </div>
           <% end %>
 
+          <% filtered_events = filtered_selected_event_log(@selected_issue_data, @event_filters) %>
+          <% selected_event = selected_event_entry(filtered_events, @selected_event_index) %>
+          <% max_hist_tokens = Enum.reduce(filtered_events, 0, fn entry, acc -> max(acc, selected_event_total_tokens(entry)) end) %>
+
           <div class="panel-stream-header">
             <span class="panel-metric-label">Event stream</span>
-            <span class="muted" style="font-size: 11px;"><%= length(selected_event_log(@selected_issue_data)) %> events</span>
+            <span class="muted" style="font-size: 11px;"><%= length(filtered_events) %> events</span>
           </div>
 
-          <%= if selected_event_log(@selected_issue_data) == [] do %>
+          <form class="event-toolbar" phx-change="filter_events">
+            <label class="logs-control">
+              <span class="logs-control-label">Search</span>
+              <input
+                type="search"
+                name="query"
+                value={@event_filters.query}
+                placeholder="Search event text"
+                class="logs-search-input"
+                phx-debounce="250"
+              />
+            </label>
+
+            <label class="logs-control">
+              <span class="logs-control-label">Role</span>
+              <select name="role" class="logs-select">
+                <option value="all" selected={@event_filters.role == "all"}>All roles</option>
+                <option value="assistant" selected={@event_filters.role == "assistant"}>Assistant</option>
+                <option value="user" selected={@event_filters.role == "user"}>User</option>
+                <option value="system" selected={@event_filters.role == "system"}>System</option>
+                <option value="tool" selected={@event_filters.role == "tool"}>Tool</option>
+                <option value="read" selected={@event_filters.role == "read"}>Read</option>
+                <option value="write" selected={@event_filters.role == "write"}>Write</option>
+                <option value="edit" selected={@event_filters.role == "edit"}>Edit</option>
+                <option value="grep" selected={@event_filters.role == "grep"}>Grep</option>
+                <option value="bash" selected={@event_filters.role == "bash"}>Bash</option>
+                <option value="linear" selected={@event_filters.role == "linear"}>Linear</option>
+                <option value="github" selected={@event_filters.role == "github"}>GitHub</option>
+              </select>
+            </label>
+
+            <div class="event-view-toggle">
+              <span class="logs-control-label">View</span>
+              <button type="button" class="subtle-button" phx-click="toggle_event_mode"><%= if @selected_event_mode == :raw, do: "Pretty", else: "Raw" %></button>
+            </div>
+          </form>
+
+          <%= if filtered_events == [] do %>
             <p class="empty-state">Waiting for agent activity...</p>
           <% else %>
+            <div class="event-token-histogram" aria-hidden="true">
+              <%= for {entry, idx} <- Enum.with_index(filtered_events) do %>
+                <button
+                  type="button"
+                  class={"event-token-bar #{if idx == @selected_event_index, do: "event-token-bar-selected", else: ""}"}
+                  phx-click="select_event"
+                  phx-value-index={idx}
+                  title={"#{to_string(entry.event)} · #{selected_event_total_tokens(entry)} tokens"}
+                  style={"height: #{event_histogram_height(entry, max_hist_tokens)}px"}
+                ></button>
+              <% end %>
+            </div>
+
+            <%= if selected_event do %>
+              <div class="event-detail-card">
+                <div class="event-detail-header">
+                  <div>
+                    <p class="panel-metric-label"><%= selected_event.event %></p>
+                    <p class="muted" style="font-size: 12px;"><%= selected_event.at %></p>
+                  </div>
+                  <div class="event-detail-actions">
+                    <button type="button" class="subtle-button" phx-click="toggle_event_mode"><%= if @selected_event_mode == :raw, do: "Pretty", else: "Raw" %></button>
+                    <button
+                      type="button"
+                      class="subtle-button"
+                      data-label="Copy"
+                      data-copy={selected_event_raw_text(selected_event)}
+                      onclick="event.stopPropagation(); navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);"
+                    >
+                      Copy
+                    </button>
+                  </div>
+                </div>
+                <div class="event-detail-body">
+                  <div class="event-detail-metadata">
+                    <span class={event_type_class(selected_event.event)}><%= selected_event.event %></span>
+                    <span class="muted">Tokens <%= selected_event_total_tokens(selected_event) %></span>
+                    <%= if selected_event_token_cost(selected_event) do %>
+                      <span class="muted">Cost <%= format_cost(selected_event_token_cost(selected_event)) %></span>
+                    <% end %>
+                  </div>
+                  <%= if @selected_event_mode == :raw do %>
+                    <pre class="code-panel"><%= selected_event_raw_text(selected_event) %></pre>
+                  <% else %>
+                    <div class="event-detail-message"><%= render_event_message(selected_event.message) %></div>
+                  <% end %>
+                </div>
+              </div>
+            <% end %>
+
             <div class="event-stream" id="event-stream" phx-hook="ScrollBottom">
-              <div :for={entry <- selected_event_log(@selected_issue_data)} class="event-row">
+              <div :for={{entry, idx} <- Enum.with_index(filtered_events)} class={"event-row #{if idx == @selected_event_index, do: "event-row-selected", else: ""}"} phx-click="select_event" phx-value-index={idx}>
                 <span class={event_type_class(entry.event)}>
                   <%= if tool_event?(entry.event) do %><svg class="event-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg><% end %><%= entry.event %>
                 </span>
                 <span class="event-row-message"><%= render_event_message(entry.message) %></span>
+                <span class="event-row-tokens numeric"><%= selected_event_total_tokens(entry) %></span>
               </div>
             </div>
           <% end %>
@@ -898,6 +1142,473 @@ defmodule RondoWeb.DashboardLive do
     |> Enum.find(&(&1.issue_identifier == identifier))
   end
 
+  defp default_log_filters do
+    %{query: "", status: "all", window: "all", sort_by: "date", sort_dir: "desc"}
+  end
+
+  defp default_event_filters do
+    %{query: "", role: "all"}
+  end
+
+  defp merge_log_filters(filters, params) do
+    %{
+      query: normalize_filter_text(Map.get(params, "query", Map.get(filters, :query, ""))),
+      status: normalize_filter_choice(Map.get(params, "status", Map.get(filters, :status, "all")), "all"),
+      window: normalize_filter_choice(Map.get(params, "window", Map.get(filters, :window, "all")), "all"),
+      sort_by: Map.get(filters, :sort_by, "date"),
+      sort_dir: Map.get(filters, :sort_dir, "desc")
+    }
+  end
+
+  defp merge_event_filters(filters, params) do
+    %{
+      query: normalize_filter_text(Map.get(params, "query", Map.get(filters, :query, ""))),
+      role: normalize_filter_choice(Map.get(params, "role", Map.get(filters, :role, "all")), "all")
+    }
+  end
+
+  defp normalize_filter_text(nil), do: ""
+  defp normalize_filter_text(value) when is_binary(value), do: String.trim(value)
+  defp normalize_filter_text(value), do: to_string(value)
+
+  defp normalize_filter_choice(nil, default), do: default
+  defp normalize_filter_choice("", default), do: default
+  defp normalize_filter_choice(value, _default) when is_binary(value), do: String.trim(value)
+  defp normalize_filter_choice(value, _default), do: to_string(value)
+
+  defp toggle_sort_direction("asc"), do: "desc"
+  defp toggle_sort_direction(_), do: "asc"
+
+  defp dashboard_log_rows(payload, filters, now \\ DateTime.utc_now()) do
+    payload
+    |> build_dashboard_log_rows(now)
+    |> filter_dashboard_log_rows(filters, now)
+    |> sort_dashboard_log_rows(filters)
+  end
+
+  defp build_dashboard_log_rows(payload, now) do
+    []
+    |> Kernel.++(Enum.map(Map.get(payload, :running, []), &running_dashboard_log_row(&1, now)))
+    |> Kernel.++(Enum.map(Map.get(payload, :paused, []), &paused_dashboard_log_row(&1, now)))
+    |> Kernel.++(Enum.map(Map.get(payload, :retrying, []), &retrying_dashboard_log_row(&1, now)))
+    |> Kernel.++(Enum.map(Map.get(payload, :archived, []), &archived_dashboard_log_row(&1, now)))
+  end
+
+  defp filter_dashboard_log_rows(rows, filters, now) do
+    query = filters[:query] || ""
+    status = filters[:status] || "all"
+    window = filters[:window] || "all"
+
+    Enum.filter(rows, fn row ->
+      dashboard_log_status_matches?(row, status) and
+        dashboard_log_window_matches?(row, window, now) and
+        dashboard_log_query_matches?(row, query)
+    end)
+  end
+
+  defp sort_dashboard_log_rows(rows, filters) do
+    sort_by = filters[:sort_by] || "date"
+    direction = if (filters[:sort_dir] || "desc") == "asc", do: :asc, else: :desc
+
+    Enum.sort_by(rows, &dashboard_log_sort_value(&1, sort_by), direction)
+  end
+
+  defp dashboard_log_sort_value(row, "date"), do: dashboard_timestamp_to_unix(Map.get(row, :sort_at))
+  defp dashboard_log_sort_value(row, "model"), do: sort_string(Map.get(row, :model))
+  defp dashboard_log_sort_value(row, "provider"), do: sort_string(Map.get(row, :provider))
+  defp dashboard_log_sort_value(row, "app"), do: sort_string(Map.get(row, :app))
+  defp dashboard_log_sort_value(row, "input_tokens"), do: Map.get(row, :input_tokens, 0)
+  defp dashboard_log_sort_value(row, "output_tokens"), do: Map.get(row, :output_tokens, 0)
+  defp dashboard_log_sort_value(row, "cost"), do: Map.get(row, :cost) || 0.0
+  defp dashboard_log_sort_value(row, "speed"), do: Map.get(row, :speed) || 0.0
+  defp dashboard_log_sort_value(row, "finish"), do: sort_string(Map.get(row, :finish_reason))
+  defp dashboard_log_sort_value(row, _), do: dashboard_timestamp_to_unix(Map.get(row, :sort_at))
+
+  defp sort_string(nil), do: ""
+  defp sort_string(value) when is_binary(value), do: String.downcase(value)
+  defp sort_string(value), do: String.downcase(to_string(value))
+
+  defp dashboard_timestamp_to_unix(%DateTime{} = dt), do: DateTime.to_unix(dt)
+
+  defp dashboard_timestamp_to_unix(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, dt, _offset} -> DateTime.to_unix(dt)
+      _ -> 0
+    end
+  end
+
+  defp dashboard_timestamp_to_unix(_), do: 0
+
+  defp dashboard_log_status_matches?(_row, "all"), do: true
+  defp dashboard_log_status_matches?(row, "active"), do: row.kind in [:running, :paused, :retrying]
+  defp dashboard_log_status_matches?(row, status), do: Atom.to_string(row.kind) == status
+
+  defp dashboard_log_window_matches?(_row, "all", _now), do: true
+
+  defp dashboard_log_window_matches?(row, window, now) do
+    case {dashboard_timestamp_to_unix(Map.get(row, :sort_at)), dashboard_window_seconds(window)} do
+      {0, _} ->
+        true
+
+      {_row_unix, :infinity} ->
+        true
+
+      {row_unix, window_seconds} ->
+        age_seconds = DateTime.to_unix(now) - row_unix
+        age_seconds <= window_seconds
+    end
+  end
+
+  defp dashboard_window_seconds("24h"), do: 24 * 60 * 60
+  defp dashboard_window_seconds("7d"), do: 7 * 24 * 60 * 60
+  defp dashboard_window_seconds("30d"), do: 30 * 24 * 60 * 60
+  defp dashboard_window_seconds(_), do: :infinity
+
+  defp dashboard_log_query_matches?(_row, ""), do: true
+
+  defp dashboard_log_query_matches?(row, query) when is_binary(query) do
+    haystack =
+      [
+        row.identifier,
+        row.model,
+        row.provider,
+        row.app,
+        row.finish_reason,
+        row.message,
+        row.status_label,
+        row.session_id
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map_join(" ", &String.downcase(to_string(&1)))
+
+    String.contains?(haystack, String.downcase(String.trim(query)))
+  end
+
+  defp dashboard_log_query_matches?(_row, _query), do: true
+
+  defp running_dashboard_log_row(entry, now) do
+    runtime_seconds = runtime_seconds_from_started_at(entry.started_at, now)
+    total_tokens = get_in(entry, [:tokens, :total_tokens]) || 0
+
+    %{
+      kind: :running,
+      status_label: "Running",
+      identifier: entry.issue_identifier,
+      issue_id: entry.issue_id,
+      sort_at: dashboard_timestamp(entry.started_at),
+      model: Map.get(entry, :model) || Map.get(entry, :adapter) || "n/a",
+      provider: Map.get(entry, :provider),
+      app: Map.get(entry, :adapter),
+      input_tokens: get_in(entry, [:tokens, :input_tokens]) || 0,
+      output_tokens: get_in(entry, [:tokens, :output_tokens]) || 0,
+      total_tokens: total_tokens,
+      cost: Map.get(entry, :cost),
+      runtime_seconds: runtime_seconds,
+      speed: dashboard_speed(total_tokens, runtime_seconds),
+      finish_reason: Map.get(entry, :last_event) || Map.get(entry, :state),
+      message: Map.get(entry, :last_message),
+      session_id: Map.get(entry, :session_id),
+      source_link: "/api/v1/#{entry.issue_identifier}"
+    }
+  end
+
+  defp paused_dashboard_log_row(entry, now) do
+    runtime_seconds = runtime_seconds_from_started_at(dashboard_row_timestamp(entry, :paused_at), now)
+    total_tokens = dashboard_row_total_tokens(entry)
+
+    %{
+      kind: :paused,
+      status_label: "Paused",
+      identifier: entry.issue_identifier,
+      issue_id: entry.issue_id,
+      sort_at: dashboard_timestamp(dashboard_row_timestamp(entry, :paused_at)),
+      model: dashboard_row_model(entry),
+      provider: Map.get(entry, :provider),
+      app: dashboard_row_app(entry),
+      input_tokens: dashboard_row_input_tokens(entry),
+      output_tokens: dashboard_row_output_tokens(entry),
+      total_tokens: total_tokens,
+      cost: Map.get(entry, :cost),
+      runtime_seconds: runtime_seconds,
+      speed: dashboard_speed(total_tokens, runtime_seconds),
+      finish_reason: dashboard_paused_finish_reason(entry),
+      message: guidance_waiting_label(entry),
+      session_id: Map.get(entry, :session_id),
+      source_link: dashboard_row_source_link(entry.issue_identifier)
+    }
+  end
+
+  defp retrying_dashboard_log_row(entry, _now) do
+    %{
+      kind: :retrying,
+      status_label: "Retrying",
+      identifier: entry.issue_identifier,
+      issue_id: entry.issue_id,
+      sort_at: dashboard_timestamp(entry.due_at),
+      model: "n/a",
+      provider: nil,
+      app: nil,
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      cost: nil,
+      runtime_seconds: nil,
+      speed: nil,
+      finish_reason: entry.error || "retrying",
+      message: entry.error,
+      session_id: nil,
+      source_link: "/api/v1/#{entry.issue_identifier}"
+    }
+  end
+
+  defp archived_dashboard_log_row(group, _now) do
+    latest_run = dashboard_latest_run(group.runs)
+    runtime_seconds = dashboard_duration_seconds(latest_run.started_at, latest_run.finished_at)
+    total_tokens = dashboard_group_total_tokens(group)
+
+    %{
+      kind: :archived,
+      status_label: "Archived",
+      identifier: group.issue_identifier,
+      issue_id: Map.get(latest_run, :issue_id) || group.issue_identifier,
+      sort_at: dashboard_timestamp(dashboard_row_timestamp(group, latest_run, :latest_finished_at, :finished_at)),
+      model: dashboard_row_model(latest_run),
+      provider: latest_run.provider,
+      app: dashboard_row_app(latest_run),
+      input_tokens: dashboard_row_input_tokens(latest_run),
+      output_tokens: dashboard_row_output_tokens(latest_run),
+      total_tokens: total_tokens,
+      cost: latest_run.cost,
+      runtime_seconds: runtime_seconds,
+      speed: dashboard_speed(total_tokens, runtime_seconds),
+      finish_reason: group.latest_result,
+      message: dashboard_archived_message(group),
+      session_id: latest_run.session_id,
+      source_link: dashboard_row_source_link(group.issue_identifier)
+    }
+  end
+
+  defp dashboard_row_timestamp(entry, key) do
+    Map.get(entry, key) || Map.get(entry, Atom.to_string(key))
+  end
+
+  defp dashboard_row_timestamp(group, latest_run, primary_key, fallback_key) do
+    Map.get(group, primary_key) ||
+      Map.get(group, Atom.to_string(primary_key)) ||
+      Map.get(latest_run, fallback_key) ||
+      Map.get(latest_run, Atom.to_string(fallback_key))
+  end
+
+  defp dashboard_row_total_tokens(entry) do
+    get_in(entry, [:tokens, :total_tokens]) || 0
+  end
+
+  defp dashboard_paused_finish_reason(entry) do
+    Map.get(entry, :blocked_dispatch_reason) ||
+      get_in(entry, [:interrupt, :reason]) ||
+      Map.get(entry, :state) ||
+      "paused"
+  end
+
+  defp dashboard_latest_run(runs) when is_list(runs), do: List.last(runs) || %{}
+  defp dashboard_latest_run(_runs), do: %{}
+
+  defp dashboard_group_total_tokens(group) do
+    Map.get(group, :total_tokens) || Map.get(group, "total_tokens") || 0
+  end
+
+  defp dashboard_row_model(entry), do: dashboard_log_model(entry)
+  defp dashboard_row_app(entry), do: dashboard_log_app(entry)
+  defp dashboard_row_input_tokens(entry), do: dashboard_log_input_tokens(entry)
+  defp dashboard_row_output_tokens(entry), do: dashboard_log_output_tokens(entry)
+
+  defp dashboard_archived_message(group) do
+    "#{Map.get(group, :run_count, 0)} run#{if Map.get(group, :run_count, 0) == 1, do: "", else: "s"}"
+  end
+
+  defp dashboard_row_source_link(identifier) when is_binary(identifier), do: "/api/v1/#{identifier}"
+  defp dashboard_row_source_link(_identifier), do: "/api/v1/n-a"
+
+  defp dashboard_log_selected?(selected_issue, row), do: selected_issue == row.identifier
+
+  defp dashboard_log_message(%{message: message}) when is_binary(message), do: message
+  defp dashboard_log_message(_), do: "n/a"
+
+  defp dashboard_log_kind_label(%{kind: :running}), do: "Running"
+  defp dashboard_log_kind_label(%{kind: :paused}), do: "Paused"
+  defp dashboard_log_kind_label(%{kind: :retrying}), do: "Retrying"
+  defp dashboard_log_kind_label(%{kind: :archived}), do: "Archived"
+  defp dashboard_log_kind_label(_), do: "Unknown"
+
+  defp dashboard_log_status_class(%{kind: :running}), do: "state-badge state-badge-active"
+  defp dashboard_log_status_class(%{kind: :paused}), do: "state-badge state-badge-warning"
+  defp dashboard_log_status_class(%{kind: :retrying}), do: "state-badge state-badge-warning"
+  defp dashboard_log_status_class(%{kind: :archived}), do: "state-badge"
+  defp dashboard_log_status_class(_), do: "state-badge"
+
+  defp dashboard_log_finish_class(%{kind: :running}), do: "state-badge state-badge-active"
+  defp dashboard_log_finish_class(%{kind: :paused}), do: "state-badge state-badge-warning"
+  defp dashboard_log_finish_class(%{kind: :retrying}), do: "state-badge state-badge-warning"
+  defp dashboard_log_finish_class(%{kind: :archived, finish_reason: "completed"}), do: "state-badge state-badge-active"
+  defp dashboard_log_finish_class(%{kind: :archived, finish_reason: "handed_off"}), do: "state-badge state-badge-handoff"
+  defp dashboard_log_finish_class(%{kind: :archived}), do: "state-badge state-badge-danger"
+  defp dashboard_log_finish_class(_), do: "state-badge"
+
+  defp dashboard_log_date(%{sort_at: %DateTime{} = dt}) do
+    Calendar.strftime(dt, "%b %-d, %I:%M %p")
+  end
+
+  defp dashboard_log_date(%{sort_at: value}) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, dt, _offset} -> Calendar.strftime(dt, "%b %-d, %I:%M %p")
+      _ -> value
+    end
+  end
+
+  defp dashboard_log_date(_), do: "n/a"
+
+  defp dashboard_log_model(row), do: Map.get(row, :model) || Map.get(row, :app) || "n/a"
+  defp dashboard_log_provider(row), do: Map.get(row, :provider)
+  defp dashboard_log_app(row), do: Map.get(row, :app)
+  defp dashboard_log_input_tokens(row), do: Map.get(row, :input_tokens) || 0
+  defp dashboard_log_output_tokens(row), do: Map.get(row, :output_tokens) || 0
+  defp dashboard_log_cost(row), do: Map.get(row, :cost)
+  defp dashboard_log_speed(row), do: Map.get(row, :speed)
+  defp dashboard_log_finish(row), do: Map.get(row, :finish_reason)
+  defp dashboard_log_source_link(row), do: Map.get(row, :source_link) || "/api/v1/#{row.identifier}"
+
+  defp dashboard_speed(_tokens, nil), do: nil
+  defp dashboard_speed(_tokens, 0), do: nil
+
+  defp dashboard_speed(tokens, runtime_seconds) when is_number(tokens) and is_number(runtime_seconds) do
+    Float.round(tokens / runtime_seconds, 1)
+  end
+
+  defp dashboard_speed(_tokens, _runtime_seconds), do: nil
+
+  defp dashboard_duration_seconds(nil, nil), do: nil
+
+  defp dashboard_duration_seconds(started_at, finished_at) do
+    with %DateTime{} = s <- dashboard_timestamp(started_at),
+         %DateTime{} = f <- dashboard_timestamp(finished_at) do
+      DateTime.diff(f, s, :second)
+    else
+      _ -> nil
+    end
+  end
+
+  defp dashboard_timestamp(%DateTime{} = dt), do: dt
+
+  defp dashboard_timestamp(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, dt, _offset} -> dt
+      _ -> nil
+    end
+  end
+
+  defp dashboard_timestamp(_), do: nil
+
+  defp filtered_selected_event_log(selected_issue_data, filters) do
+    selected_event_log(selected_issue_data)
+    |> Enum.filter(&dashboard_event_matches?(&1, filters))
+  end
+
+  defp dashboard_event_matches?(entry, filters) do
+    query = filters[:query] || ""
+    role = filters[:role] || "all"
+
+    role_match? = role == "all" or to_string(entry.event) == role
+
+    query_match? =
+      if query == "" do
+        true
+      else
+        haystack =
+          [entry.event, entry.message]
+          |> Enum.reject(&is_nil/1)
+          |> Enum.map_join(" ", &String.downcase(to_string(&1)))
+
+        String.contains?(haystack, String.downcase(query))
+      end
+
+    role_match? and query_match?
+  end
+
+  defp selected_event_entry(events, index) when is_list(events) do
+    Enum.at(events, index) || List.first(events)
+  end
+
+  defp selected_event_tokens(%{tokens: tokens}) when is_map(tokens), do: tokens
+  defp selected_event_tokens(_), do: %{}
+
+  defp selected_event_total_tokens(entry) do
+    tokens = selected_event_tokens(entry)
+    Map.get(tokens, :total_tokens) || Map.get(tokens, "total_tokens") || 0
+  end
+
+  defp selected_event_token_cost(entry) do
+    tokens = selected_event_tokens(entry)
+    Map.get(tokens, :cost) || Map.get(tokens, "cost")
+  end
+
+  defp selected_event_raw_text(%{message: message}) when is_binary(message), do: message
+  defp selected_event_raw_text(_), do: ""
+
+  defp event_histogram_height(_entry, 0), do: 8
+
+  defp event_histogram_height(entry, max_tokens) do
+    tokens = selected_event_total_tokens(entry)
+    ratio = if max_tokens > 0, do: tokens / max_tokens, else: 0
+    max(trunc(ratio * 100), if(tokens > 0, do: 8, else: 2))
+  end
+
+  defp format_cost(nil), do: "n/a"
+  defp format_cost(cost) when is_float(cost), do: "$#{Float.round(cost, 3)}"
+  defp format_cost(cost) when is_integer(cost), do: "$#{cost}"
+  defp format_cost(_), do: "n/a"
+
+  defp format_speed(nil), do: "n/a"
+  defp format_speed(speed) when is_number(speed), do: "#{Float.round(speed, 1)} tok/s"
+  defp format_speed(_), do: "n/a"
+
+  defp provider_label(nil), do: "n/a"
+  defp provider_label("openrouter"), do: "OpenRouter"
+  defp provider_label("codex"), do: "Codex"
+  defp provider_label("pi"), do: "Pi"
+  defp provider_label("claude_code"), do: "Claude Code"
+  defp provider_label("openai"), do: "OpenAI"
+
+  defp provider_label(provider) when is_binary(provider) do
+    provider
+    |> String.replace("_", " ")
+    |> String.split()
+    |> Enum.map_join(" ", &String.capitalize/1)
+  end
+
+  defp log_row_selected?(selected_issue, row), do: dashboard_log_selected?(selected_issue, row)
+  defp log_row_kind_label(row), do: dashboard_log_kind_label(row)
+  defp log_row_status_class(row), do: dashboard_log_status_class(row)
+  defp log_row_date(row), do: dashboard_log_date(row)
+  defp log_row_model(row), do: dashboard_log_model(row)
+  defp log_row_provider(row), do: dashboard_log_provider(row)
+  defp log_row_app(row), do: dashboard_log_app(row)
+  defp log_row_input_tokens(row), do: dashboard_log_input_tokens(row)
+  defp log_row_output_tokens(row), do: dashboard_log_output_tokens(row)
+  defp log_row_cost(row), do: dashboard_log_cost(row)
+  defp log_row_speed(row), do: dashboard_log_speed(row)
+  defp log_row_finish(row), do: dashboard_log_finish(row)
+  defp log_row_message(row), do: dashboard_log_message(row)
+  defp log_row_source_link(row), do: dashboard_log_source_link(row)
+  defp log_row_finish_class(row), do: dashboard_log_finish_class(row)
+
+  defp sort_indicator(filters, field) do
+    if filters[:sort_by] == field do
+      if filters[:sort_dir] == "asc", do: "▲", else: "▼"
+    else
+      ""
+    end
+  end
+
   defp load_payload do
     Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
   end
@@ -1011,14 +1722,18 @@ defmodule RondoWeb.DashboardLive do
   defp guidance_responses(_entry), do: []
 
   defp guidance_waiting_label(entry) do
-    Map.get(entry.blocked_side_effect || %{}, :label) ||
+    blocked_side_effect = Map.get(entry, :blocked_side_effect) || get_in(entry, [:interrupt, :blocked_side_effect]) || %{}
+
+    Map.get(blocked_side_effect, :label) ||
       entry
       |> get_in([:interrupt, :reason])
       |> humanize_interrupt_reason()
   end
 
   defp guidance_waiting_meta(entry) do
-    Map.get(entry.blocked_side_effect || %{}, :action) ||
+    blocked_side_effect = Map.get(entry, :blocked_side_effect) || get_in(entry, [:interrupt, :blocked_side_effect]) || %{}
+
+    Map.get(blocked_side_effect, :action) ||
       get_in(entry, [:interrupt, :question]) ||
       get_in(entry, [:interrupt, :recommendation]) ||
       "operator guidance"
@@ -1212,13 +1927,6 @@ defmodule RondoWeb.DashboardLive do
   defp format_model_pct(pct) when is_number(pct), do: "#{pct}%"
   defp format_model_pct(_), do: "n/a"
 
-  defp model_usage_run_count(usage, provider) do
-    case Map.get(usage.by_provider, provider) do
-      %{run_count: count} -> count
-      _ -> 0
-    end
-  end
-
   defp pct_of(part, total) when total > 0, do: Float.round(part / total * 100.0, 1)
   defp pct_of(_part, 0), do: 0.0
 
@@ -1319,5 +2027,9 @@ defmodule RondoWeb.DashboardLive do
 
   defp provider_badge_class("codex"), do: "state-badge state-badge-active"
   defp provider_badge_class("openrouter"), do: "state-badge state-badge-warning"
+  defp provider_badge_class("pi"), do: "state-badge state-badge-handoff"
+  defp provider_badge_class("claude_code"), do: "state-badge state-badge-active"
+  defp provider_badge_class("openai"), do: "state-badge state-badge-warning"
+  defp provider_badge_class(provider) when is_binary(provider), do: "state-badge"
   defp provider_badge_class(_), do: "state-badge"
 end

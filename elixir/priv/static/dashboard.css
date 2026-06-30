@@ -107,6 +107,35 @@ body {
 .section-title { font-size: 16px; font-weight: 700; }
 .section-copy { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
 
+.logs-section-header { align-items: flex-start; }
+.logs-summary { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.logs-toolbar { display: grid; grid-template-columns: minmax(240px, 1fr) repeat(2, minmax(140px, 180px)); gap: 12px; margin-bottom: 16px; }
+.logs-control { display: flex; flex-direction: column; gap: 4px; }
+.logs-control-label { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); }
+.logs-search-input,
+.logs-select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-primary);
+  padding: 8px 10px;
+  font-size: 12px;
+}
+.logs-search-input:focus,
+.logs-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-light);
+}
+.table-sort-button { background: none; border: none; color: inherit; font: inherit; text-transform: inherit; letter-spacing: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; padding: 0; }
+.table-sort-button:hover { color: var(--accent); }
+.logs-table { min-width: 1320px; }
+.model-usage-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.model-usage-item { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); background: var(--surface-1); }
+.model-usage-provider, .model-usage-pct { font-size: 14px; font-weight: 700; }
+.model-usage-detail { font-size: 11px; color: var(--text-secondary); }
+
 .error-card {
   background: var(--danger-light);
   border: 1px solid var(--danger);
@@ -176,7 +205,7 @@ body {
   top: 0;
   right: 0;
   bottom: 0;
-  width: min(560px, 90vw);
+  width: min(720px, 92vw);
   background: var(--surface-0);
   border-left: 1px solid var(--border);
   box-shadow: var(--shadow-lg);
@@ -237,7 +266,7 @@ body {
 }
 .event-row {
   display: grid;
-  grid-template-columns: 130px 1fr;
+  grid-template-columns: 130px 1fr 70px;
   gap: 10px;
   padding: 4px 16px;
   border-bottom: 1px solid var(--border-subtle);
@@ -287,6 +316,20 @@ body {
 }
 .event-row-message code { font-family: var(--font-mono); font-size: 11px; background: var(--surface-2); padding: 1px 4px; border-radius: 3px; }
 .event-row-message strong { font-weight: 600; color: var(--text-primary); }
+.event-row-tokens { justify-self: end; color: var(--text-muted); font-size: 11px; }
+.event-row-selected { background: var(--surface-0); }
+.event-toolbar { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(140px, 180px) auto; gap: 12px; align-items: end; margin-bottom: 12px; }
+.event-view-toggle { display: flex; flex-direction: column; gap: 4px; }
+.event-token-histogram { display: flex; align-items: flex-end; gap: 4px; min-height: 68px; margin: 8px 0 12px; overflow-x: auto; padding-bottom: 6px; }
+.event-token-bar { width: 10px; min-width: 10px; border: none; border-radius: 4px 4px 0 0; background: var(--accent); opacity: .45; cursor: pointer; padding: 0; }
+.event-token-bar:hover { opacity: 1; }
+.event-token-bar-selected { opacity: 1; background: var(--success); }
+.event-detail-card { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-1); padding: 12px 14px; margin-bottom: 12px; }
+.event-detail-header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 10px; }
+.event-detail-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.event-detail-body { display: flex; flex-direction: column; gap: 8px; }
+.event-detail-metadata { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 11px; }
+.event-detail-message { font-size: 12px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; }
 
 /* Theme transition */
 .theme-transitioning,

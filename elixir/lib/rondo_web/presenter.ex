@@ -98,17 +98,11 @@ defmodule RondoWeb.Presenter do
     do: (running && running.issue_id) || (retry && retry.issue_id) || (paused && paused.issue_id)
 
   defp workspace_payload(issue_identifier, paused) do
-    %{
-      path: paused_workspace(paused) || Path.join(Config.workspace_root(), issue_identifier),
-      worker_host: paused_worker_host(paused)
-    }
+    %{path: paused_workspace(paused) || Path.join(Config.workspace_root(), issue_identifier)}
   end
 
   defp paused_workspace(nil), do: nil
   defp paused_workspace(paused), do: Map.get(paused, :workspace)
-
-  defp paused_worker_host(nil), do: nil
-  defp paused_worker_host(paused), do: Map.get(paused, :worker_host)
 
   defp attempts_payload(retry) do
     %{
@@ -160,6 +154,9 @@ defmodule RondoWeb.Presenter do
       model_fallback: Map.get(entry, :model_fallback),
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path) || Map.get(entry, :workspace),
+      model: display_model(entry),
+      provider: provider_from_entry(entry),
+      cost: log_cost(entry),
       tokens: %{
         input_tokens: entry.claude_input_tokens,
         output_tokens: entry.claude_output_tokens,
@@ -196,8 +193,6 @@ defmodule RondoWeb.Presenter do
       run_id: Map.get(entry, :run_id),
       run_dir: Map.get(entry, :run_dir),
       workspace: Map.get(entry, :workspace),
-      workspace_path: Map.get(entry, :workspace_path) || Map.get(entry, :workspace),
-      worker_host: Map.get(entry, :worker_host),
       paused_at: timestamp_payload(Map.get(entry, :paused_at)),
       retry_attempt: Map.get(entry, :retry_attempt),
       tracker_visibility: Map.get(entry, :tracker_visibility),
@@ -267,7 +262,6 @@ defmodule RondoWeb.Presenter do
       latest_gate: gate_payload(Map.get(running, :latest_gate)),
       model_routing: Map.get(running, :model_routing),
       model_fallback: Map.get(running, :model_fallback),
-      worker_host: Map.get(running, :worker_host),
       tokens: %{
         input_tokens: running.claude_input_tokens,
         output_tokens: running.claude_output_tokens,
@@ -438,6 +432,9 @@ defmodule RondoWeb.Presenter do
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       tokens: entry.tokens,
       model_routing: Map.get(entry, :model_routing),
+      model: display_model(entry),
+      provider: provider_from_entry(entry),
+      cost: log_cost(entry),
       adapter: Map.get(entry, :adapter),
       filename: run_filename(entry.started_at)
     }
@@ -476,7 +473,7 @@ defmodule RondoWeb.Presenter do
       message = summarize_message(entry[:message])
       event = refine_event_from_message(entry[:event], message)
 
-      %{at: iso8601(entry[:at]), event: event, message: message}
+      %{at: iso8601(entry[:at]), event: event, message: message, tokens: normalized_log_tokens(entry[:tokens])}
     end)
   end
 
@@ -493,6 +490,17 @@ defmodule RondoWeb.Presenter do
   end
 
   defp refine_event_from_message(event, _message), do: event
+
+  defp normalized_log_tokens(tokens) when is_map(tokens) do
+    %{
+      input_tokens: Map.get(tokens, :input_tokens) || Map.get(tokens, "input_tokens") || 0,
+      output_tokens: Map.get(tokens, :output_tokens) || Map.get(tokens, "output_tokens") || 0,
+      total_tokens: Map.get(tokens, :total_tokens) || Map.get(tokens, "total_tokens") || 0,
+      cost: Map.get(tokens, :cost) || Map.get(tokens, "cost")
+    }
+  end
+
+  defp normalized_log_tokens(_tokens), do: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, cost: nil}
 
   defp linear_message?(message), do: String.contains?(message, "linear") or String.contains?(message, "Linear")
 
@@ -520,6 +528,48 @@ defmodule RondoWeb.Presenter do
   defp summarize_message(%{message: message}) when is_binary(message), do: message
   defp summarize_message(message) when is_binary(message), do: message
   defp summarize_message(_message), do: nil
+
+  defp display_model(entry) when is_map(entry) do
+    case Map.get(entry, :model_routing) do
+      %{} = model_routing ->
+        resolved = Map.get(model_routing, :resolved) || Map.get(model_routing, "resolved") || %{}
+        Map.get(resolved, :model) || Map.get(resolved, "model") || Map.get(entry, :adapter)
+
+      _ ->
+        Map.get(entry, :adapter)
+    end
+  end
+
+  defp provider_from_entry(entry) when is_map(entry) do
+    display_model(entry)
+    |> ModelUsage.provider_from_model()
+  end
+
+  defp log_cost(entry) when is_map(entry) do
+    entry
+    |> Map.get(:event_log, [])
+    |> Enum.reduce(0.0, fn log_entry, total -> total + token_cost(log_entry) end)
+    |> normalize_cost()
+  end
+
+  defp token_cost(%{tokens: tokens}) when is_map(tokens), do: token_cost(tokens)
+  defp token_cost(%{"tokens" => tokens}) when is_map(tokens), do: token_cost(tokens)
+
+  defp token_cost(tokens) when is_map(tokens) do
+    case Map.get(tokens, :cost) || Map.get(tokens, "cost") do
+      value when is_number(value) -> value
+      _ -> 0
+    end
+  end
+
+  defp token_cost(_tokens), do: 0
+
+  defp normalize_cost(cost) when is_number(cost) do
+    rounded = Float.round(cost, 6)
+    if rounded == 0.0, do: nil, else: rounded
+  end
+
+  defp normalize_cost(_cost), do: nil
 
   defp due_at_iso8601(due_in_ms) when is_integer(due_in_ms) do
     DateTime.utc_now()
