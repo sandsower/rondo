@@ -12,7 +12,7 @@ defmodule Rondo.RunLedger do
   the orchestrator and a worker task both hold ledger copies.
   """
 
-  alias Rondo.{Config, DeliveryArtifact, FinalReport, Linear.Issue, ProcessProvider, Redaction}
+  alias Rondo.{Config, DeliveryArtifact, FinalReport, Linear.Issue, ProcessProvider, Redaction, RemoteShell}
 
   @schema_version 1
   @events_schema "rondo.events/v0"
@@ -38,7 +38,9 @@ defmodule Rondo.RunLedger do
         }
 
   @spec create_run(Issue.t() | map(), keyword()) :: {:ok, t()} | {:error, term()}
-  def create_run(issue, opts \\ []) when is_map(issue) do
+  def create_run(issue, opts \\ []), do: build_run(issue, opts)
+
+  defp build_run(issue, opts) when is_map(issue) do
     now = Keyword.get(opts, :now, DateTime.utc_now())
     workspace_root = opts |> Keyword.get(:workspace_root, Config.workspace_root()) |> Path.expand()
     safe_identifier = safe_identifier(issue_identifier(issue))
@@ -675,24 +677,41 @@ defmodule Rondo.RunLedger do
   end
 
   defp repo_snapshot(workspace_root, workspace, opts) do
-    runner = Keyword.get(opts, :git_runner, &run_git/2)
+    runner = Keyword.get(opts, :git_runner, RemoteShell.git_runner(opts))
+    worker_host = worker_host_snapshot(Keyword.get(opts, :worker_host))
 
     %{
       "workspace_root" => Path.expand(workspace_root),
       "workspace" => Path.expand(workspace),
+      "workspace_path" => Path.expand(workspace),
+      "worker_host" => worker_host,
       "base_commit" => workspace_git_value(runner, workspace, ["rev-parse", "HEAD"]),
       "base_branch" => workspace_git_value(runner, workspace, ["rev-parse", "--abbrev-ref", "HEAD"])
     }
   end
 
   defp workspace_git_value(runner, workspace, args) do
-    with true <- File.dir?(workspace),
+    with true <- is_binary(workspace),
          {output, 0} <- runner.(args, workspace) do
       String.trim(output)
     else
       _other -> nil
     end
   end
+
+  defp worker_host_snapshot(nil), do: nil
+
+  defp worker_host_snapshot(%{} = host) do
+    host
+    |> Map.take([:id, :host, :user, :port, :max_concurrent_agents])
+    |> drop_nil_values()
+  end
+
+  defp worker_host_snapshot(host) when is_binary(host) do
+    %{id: host, host: host}
+  end
+
+  defp worker_host_snapshot(_host), do: nil
 
   defp run_git(args, workspace) do
     System.cmd("git", args, cd: workspace, stderr_to_stdout: true)

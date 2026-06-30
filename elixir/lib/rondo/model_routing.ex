@@ -69,7 +69,16 @@ defmodule Rondo.ModelRouting do
     provider_context_hints = context_specific_hints(provider_hint_map, routing_context)
     repo_step_context_hints = context_specific_hints(repo_step_hint_map, routing_context)
     source_context_hints = context_specific_hints(source_hint_map, routing_context)
-    context_hints = source_context_hints || provider_context_hints || repo_step_context_hints
+    default_phase_hints = default_phase_hints(repo_routing, routing_context)
+
+    context_hints =
+      first_context_hints([
+        source_context_hints,
+        provider_context_hints,
+        repo_step_context_hints,
+        default_phase_hints
+      ])
+
     context_hint_map = normalize_hint_map(context_hints || %{})
 
     hints =
@@ -78,6 +87,7 @@ defmodule Rondo.ModelRouting do
       |> apply_hint_map(profile_defaults)
       |> apply_hint_map(provider_hint_map)
       |> maybe_clear_broad_model_for_context(context_hint_map)
+      |> apply_hint_map(default_phase_hints || %{})
       |> apply_hint_map(repo_step_context_hints || %{})
       |> apply_hint_map(provider_context_hints || %{})
       |> apply_hint_map(source_hint_map)
@@ -86,6 +96,8 @@ defmodule Rondo.ModelRouting do
     {hints, normalize_context_metadata(context_hints, routing_context)}
   end
 
+  defp first_context_hints(hints), do: Enum.find(hints, & &1)
+
   defp repo_default_hints(repo_routing) when is_map(repo_routing) do
     repo_routing
     |> map_value(:defaults)
@@ -93,6 +105,27 @@ defmodule Rondo.ModelRouting do
   end
 
   defp repo_default_hints(_repo_routing), do: %{}
+
+  defp default_phase_hints(repo_routing, %{phase: phase}) when phase in ["planning", "context_discovery"] do
+    case default_planning_tier(repo_routing) do
+      nil -> nil
+      tier -> %{phase: phase, tier: tier, mode: "prefer"}
+    end
+  end
+
+  defp default_phase_hints(repo_routing, %{phase: "implementation"}) do
+    if repo_candidates(repo_routing, "standard"), do: %{phase: "implementation", tier: "standard", mode: "prefer"}
+  end
+
+  defp default_phase_hints(_repo_routing, _routing_context), do: nil
+
+  defp default_planning_tier(repo_routing) do
+    cond do
+      repo_candidates(repo_routing, "frontier") -> "frontier"
+      repo_candidates(repo_routing, "heavy") -> "heavy"
+      true -> nil
+    end
+  end
 
   defp repo_step_hints(repo_routing) when is_map(repo_routing) do
     repo_routing

@@ -420,7 +420,9 @@ Each entry contains:
 
 Gate stdout/stderr and a structured `results.json` are persisted under the run ledger. `results.json`
 also includes the ProcessProvider gate-selection envelope for the turn when available, including
-selected/skipped explanations, warnings, and provider metadata. When `gate_reuse.enabled` is on,
+changed files, selected/skipped explanations, warnings, and provider metadata. For post-turn gate
+selection, Rondo collects changed paths from the git workspace against the run-start base commit when
+available, plus committed, staged, unstaged, and untracked paths. When `gate_reuse.enabled` is on,
 Rondo also records a workspace identity plus gate signature in `state.json` and may reuse a prior
 passing result on an unchanged continuation turn, emitting a distinct reused gate status instead of
 rerunning the same command set. Any gate failure, error, or timeout makes the current run attempt
@@ -449,13 +451,16 @@ Fields:
 The process provider is the boundary for process/work-contract inputs: gate selection, guide
 selection, action-policy evaluation, model-routing hints, proof requirement resolution, and
 capability/probe metadata. Gate selection returns an envelope containing the runnable gates plus
-selected/skipped explanations, warnings, and provider metadata; Rondo persists that envelope with gate
+selected/skipped explanations, warnings, changed files, and provider metadata; Rondo persists that envelope with gate
 artifacts. The native provider preserves Rondo's existing standalone `WORKFLOW.md` behavior: flat gates
 come from top-level `gates`, prompts come from the Markdown body, action-policy evaluation delegates
 to the configured Beislið evaluator, model hints come from adapter config, and richer provider
 features degrade to unsupported/empty results unless a future provider marks them required. The
 fixture-backed Beislið provider consumes explicit approved JSON artifacts with schema
-`beislid-process-artifact-v1`; it can augment the native prompt, select gates, expose guide/proof
+`beislid-process-artifact-v1`; in addition to flat `gates`, artifacts may declare `gate_sets` with
+changed-file path selectors. Rondo asks the provider with the current changed paths, and the provider
+returns a deterministic union of matching gates, de-duplicated by gate name, with unmatched changed
+paths surfaced as warnings. It can augment the native prompt, select gates, expose guide/proof
 metadata through probe/gate-selection metadata, and return fixture action-policy decisions, but it
 does not implement or require the real Beislið exporter/runtime. Rondo owns execution, proof
 artifacts, and run state; external systems such as Beislið own richer work-contract semantics.
@@ -711,6 +716,9 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.terminal_states`: list/string, default `Closed, Cancelled, Canceled, Duplicate, Done`
 - `polling.interval_ms`: positive integer, default `30000`
 - `workspace.root`: path, default `<system-temp>/rondo_workspaces`
+- `worker.max_concurrent_agents_per_host`: positive integer, default `10`
+- `worker.ssh_hosts`: list of host maps or `[]`
+  - host maps support `host` (required), optional `name`, optional `user`, optional `port`, and optional `max_concurrent_agents`
 - `hooks.after_create`: shell script or null
 - `hooks.before_run`: shell script or null
 - `hooks.after_run`: shell script or null
@@ -1394,6 +1402,9 @@ Rondo does not require first-class tracker write APIs in the orchestrator.
 
 - Ticket mutations (state transitions, comments, PR metadata) are typically handled by the coding
   agent using tools defined by the workflow prompt.
+- When a workflow explicitly configures PR review/babysit states, the orchestrator may own the
+  review/merge/Done handoff and should keep those tickets on the PR lifecycle path until the merge
+  succeeds.
 - The service remains a scheduler/runner and tracker reader.
 - Workflow-specific success often means "reached the next handoff state" (for example
   `Human Review`) rather than tracker terminal state `Done`.
@@ -1837,6 +1848,18 @@ Implications:
 - Hooks run inside the workspace directory.
 - Hook output should be truncated in logs.
 - Hook timeouts are required to avoid hanging the orchestrator.
+
+### 15.4.1 SSH Worker Pool Safety
+
+When `worker.ssh_hosts` is configured, Rondo can run workspace creation/removal, workspace hooks,
+and Claude subprocesses on remote hosts over SSH.
+
+Implications:
+
+- SSH worker hosts are trusted infrastructure; key-based auth or another non-interactive SSH setup must already exist.
+- The orchestrator uses batch-mode SSH and does not prompt for passwords.
+- Remote workspace cleanup is best-effort; if a host is retired, reimaged, or unreachable, stale workspaces may remain until manually cleaned.
+- Host drift matters: `worker_host` and the resolved remote `workspace_path` are recorded with the run so logs, manifests, and dashboard rows can be correlated after a host rename, move, or replacement.
 
 ### 15.5 Harness Hardening Guidance
 

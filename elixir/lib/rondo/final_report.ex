@@ -20,6 +20,11 @@ defmodule Rondo.FinalReport do
   `extract/1` distinguishes a missing report (`{:error, :missing}`) from a
   malformed one (`{:error, {:invalid, errors}}`) so ledger consumers can tell
   bad reports apart from code failures.
+
+  Planning-phase reports may include optional extra fields such as
+  `implementation_plan` and `recommended_implementation_tier`; validation keeps
+  the schema open so runner-specific handoff metadata can flow through without
+  invalidating the core report.
   """
 
   @schema "rondo.final_report/v0"

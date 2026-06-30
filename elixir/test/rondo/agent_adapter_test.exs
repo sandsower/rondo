@@ -58,11 +58,19 @@ defmodule Rondo.AgentAdapterTest do
       {:ok,
        Adapter.result(
          run_ref: run_ref,
-         final_report: "fake final #{invocation}",
+         final_report: fake_final_report(invocation, opts),
          usage: %{input_tokens: invocation, output_tokens: 2, total_tokens: invocation + 2},
          capabilities: capabilities(),
          raw: %{invocation: invocation}
        )}
+    end
+
+    defp fake_final_report(invocation, opts) do
+      case Keyword.get(opts, :fake_final_reports) do
+        reports when is_map(reports) -> Map.get(reports, invocation, "fake final #{invocation}")
+        reports when is_list(reports) -> Enum.at(reports, invocation - 1, "fake final #{invocation}")
+        _other -> "fake final #{invocation}"
+      end
     end
 
     defp maybe_touch_workspace(workspace, invocation, opts) do
@@ -198,6 +206,57 @@ defmodule Rondo.AgentAdapterTest do
       message ->
         send(test_pid, message)
         update_recorder_loop(test_pid, ledger)
+    end
+  end
+
+  defmodule ChangedFileProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "changed_file_process"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test, prompt: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :ok, checks: %{available: :ok}}
+
+    @impl true
+    def select_gates(opts \\ []) do
+      changed_files = Keyword.get(opts, :changed_files, [])
+      selector_metadata = Keyword.get(opts, :changed_files_metadata, %{})
+
+      gates =
+        if "src/change.txt" in changed_files do
+          [%{name: "changed-proof", command: "echo changed > changed-gate.txt", timeout_ms: 1_000, action_id: nil, action_classes: ["read"]}]
+        else
+          []
+        end
+
+      {:ok,
+       Rondo.ProcessProvider.gate_selection_result(gates,
+         selected: Enum.map(gates, &%{name: &1.name, reason: "matched src/change.txt"}),
+         skipped: if(gates == [], do: [%{name: "changed-proof", reason: "no changed files matched src/change.txt"}], else: []),
+         changed_files: changed_files,
+         metadata: %{provider: id(), selector_mode: "changed_files", changed_files_source: Map.get(selector_metadata, :source)}
+       )}
+    end
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Changed-file prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []), do: %{}
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(action, classes, opts \\ []) do
+      {:ok, %{"decision" => "allow", "action" => action, "classes" => classes, "mode" => Keyword.fetch!(opts, :mode), "provider" => id()}}
     end
   end
 
@@ -1355,12 +1414,24 @@ defmodule Rondo.AgentAdapterTest do
         {:ok, [%{issue | state: state}]}
       end
 
+      planning_report = %{
+        "schema" => "rondo.final_report/v0",
+        "summary" => "planned continuation routing",
+        "changed_files" => [],
+        "gates_run" => [],
+        "failures" => [],
+        "risks" => [],
+        "next_state" => "In Progress",
+        "implementation_plan" => "Continue to implementation turn."
+      }
+
       assert :ok =
                AgentRunner.run(issue, parent,
                  agent_adapter: FakeAdapter,
                  process_provider: TurnAwareModelHintProcessProvider,
                  run_ledger: ledger,
                  test_pid: parent,
+                 fake_final_reports: [Jason.encode!(planning_report), "fake final 2"],
                  issue_state_fetcher: state_fetcher
                )
 
@@ -1379,6 +1450,192 @@ defmodule Rondo.AgentAdapterTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "agent runner separates default planning and implementation phases with planning tier handoff" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-phase-routing-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 2,
+        gates: [],
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{
+            standard: [%{model: "standard-model"}],
+            heavy: [%{model: "heavy-model"}],
+            frontier: [%{model: "frontier-model"}]
+          }
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-phase-routing",
+        identifier: "MT-PHASE-ROUTING",
+        title: "Phase routing",
+        description: "Plan with frontier, implement with recommended tier",
+        state: "In Progress",
+        labels: []
+      }
+
+      planning_report = %{
+        "schema" => "rondo.final_report/v0",
+        "summary" => "planned implementation",
+        "changed_files" => [],
+        "gates_run" => [],
+        "failures" => [],
+        "risks" => [],
+        "next_state" => "In Progress",
+        "implementation_plan" => "Implement the tested phase-aware routing slice.",
+        "recommended_implementation_tier" => "heavy"
+      }
+
+      implementation_report = %{
+        "schema" => "rondo.final_report/v0",
+        "summary" => "implemented phase routing",
+        "changed_files" => ["lib/rondo/agent_runner.ex"],
+        "gates_run" => [],
+        "failures" => [],
+        "risks" => [],
+        "next_state" => "Done"
+      }
+
+      parent = start_update_recorder(self())
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: Rondo.ProcessProvider.Native,
+                 run_ledger: ledger,
+                 test_pid: parent,
+                 fake_final_reports: [Jason.encode!(planning_report), Jason.encode!(implementation_report)],
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
+               )
+
+      assert_receive {:fake_adapter_invoked, 1, planning_prompt, _workspace, nil}, 500
+      assert planning_prompt =~ "Rondo planning phase"
+      assert planning_prompt =~ "Do not edit files"
+
+      assert_receive {:fake_adapter_opts, first_opts}, 500
+      assert Keyword.get(first_opts, :model) == "frontier-model"
+      assert %{requested_tier: "frontier", context: %{stage: "initial_spawn", phase: "planning"}} = Keyword.fetch!(first_opts, :model_routing)
+
+      assert_receive {:fake_adapter_invoked, 2, implementation_prompt, _workspace, previous_run_ref}, 500
+      assert previous_run_ref.provider_ref == "fake-run-1"
+      assert implementation_prompt =~ "Planning checkpoint to implement from"
+      assert implementation_prompt =~ "Implement the tested phase-aware routing slice."
+
+      assert_receive {:fake_adapter_opts, second_opts}, 500
+      assert Keyword.get(second_opts, :model) == "heavy-model"
+      assert %{requested_tier: "heavy", context: %{stage: "turn", phase: "implementation"}} = Keyword.fetch!(second_opts, :model_routing)
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "planning_completed"))
+      assert Enum.count(manifest["checkpoints"], &(&1["kind"] == "model_routing_decision")) >= 2
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner does not implement from unsafe planning reports" do
+    scenarios = [
+      {:missing_plan,
+       %{
+         "schema" => "rondo.final_report/v0",
+         "summary" => "planned without handoff",
+         "changed_files" => [],
+         "gates_run" => [],
+         "failures" => [],
+         "risks" => [],
+         "next_state" => "In Progress"
+       }, "planning_handoff_missing"},
+      {:terminal,
+       %{
+         "schema" => "rondo.final_report/v0",
+         "summary" => "incorrectly terminal",
+         "changed_files" => [],
+         "gates_run" => [],
+         "failures" => [],
+         "risks" => [],
+         "next_state" => "Done",
+         "implementation_plan" => "Implement later."
+       }, "planning_final_report_terminal"},
+      {:declared_changes,
+       %{
+         "schema" => "rondo.final_report/v0",
+         "summary" => "planned with changes",
+         "changed_files" => ["lib/rondo/agent_runner.ex"],
+         "gates_run" => [],
+         "failures" => [],
+         "risks" => [],
+         "next_state" => "In Progress",
+         "implementation_plan" => "Implement later."
+       }, "planning_report_declared_changes"},
+      {:invalid, "not json", "planning_final_report_invalid"}
+    ]
+
+    Enum.each(scenarios, fn {name, planning_report, reason_code} ->
+      Process.delete(:fake_adapter_invocation)
+      test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-unsafe-planning-#{name}-#{System.unique_integer([:positive])}")
+
+      try do
+        workspace_root = Path.join(test_root, "workspaces")
+        File.mkdir_p!(workspace_root)
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          max_turns: 2,
+          gates: [],
+          model_routing: %{
+            defaults: %{tier: "standard", mode: "prefer"},
+            tiers: %{
+              standard: [%{model: "standard-model"}],
+              frontier: [%{model: "frontier-model"}]
+            }
+          }
+        )
+
+        issue = %Issue{
+          id: "issue-unsafe-planning-#{name}",
+          identifier: "MT-UNSAFE-PLANNING-#{name}",
+          title: "Unsafe planning #{name}",
+          description: "Unsafe planning should not implement",
+          state: "In Progress",
+          labels: []
+        }
+
+        parent = start_update_recorder(self())
+        assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+        send(parent, {:set_ledger, ledger})
+
+        report = if is_map(planning_report), do: Jason.encode!(planning_report), else: planning_report
+
+        assert :ok =
+                 AgentRunner.run(issue, parent,
+                   agent_adapter: FakeAdapter,
+                   process_provider: Rondo.ProcessProvider.Native,
+                   run_ledger: ledger,
+                   test_pid: parent,
+                   fake_final_reports: [report],
+                   issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
+                 )
+
+        assert_receive {:fake_adapter_invoked, 1, _planning_prompt, _workspace, nil}, 500
+        assert_receive {:claude_worker_update, _, %{event: :run_decision, reason_code: ^reason_code}}, 500
+        refute_receive {:fake_adapter_invoked, 2, _implementation_prompt, _workspace, _previous_run_ref}, 100
+
+        manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+        refute Enum.any?(manifest["checkpoints"], &(&1["kind"] == "planning_completed"))
+      after
+        File.rm_rf(test_root)
+      end
+    end)
   end
 
   test "agent runner records unresolved required initial routing before blocking" do
@@ -1879,6 +2136,64 @@ defmodule Rondo.AgentAdapterTest do
       assert gate_selection.selected == [%{name: "provider-proof", reason: "fake provider selected turn 1"}]
       assert gate_selection.skipped == [%{name: "slow-proof", reason: "not needed for fake provider test"}]
       assert gate_selection.metadata == %{provider: "fake_process", stage: :post_turn}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner passes collected changed files into provider gate selection and ledger results" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-changed-files-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-CHANGED/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        hook_before_run:
+          "git init && git config user.email rondo@example.test && git config user.name 'Rondo Test' && mkdir -p src && printf base > README.md && git add README.md && git commit -m base"
+      )
+
+      parent = start_update_recorder(self())
+
+      issue = %Issue{
+        id: "issue-changed-files",
+        identifier: "MT-CHANGED",
+        title: "Changed-file provider proof",
+        description: "Provider should receive changed paths",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: ChangedFileProcessProvider,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 run_dir: run_dir,
+                 test_pid: parent,
+                 touch_workspace_on_invocation: 1,
+                 touch_workspace_path: "src/change.txt"
+               )
+
+      {:ok, workspace} = Rondo.PathSafety.canonicalize(Path.join(workspace_root, "MT-CHANGED"))
+      assert File.read!(Path.join(workspace, "changed-gate.txt")) == "changed\n"
+
+      assert_receive {
+                       :claude_worker_update,
+                       "issue-changed-files",
+                       %{event: :gates_completed, raw: %{status: :pass, gate_selection: gate_selection}}
+                     },
+                     500
+
+      assert gate_selection.changed_files == ["src/change.txt"]
+      assert gate_selection.metadata.selector_mode == "changed_files"
+
+      results_json = run_dir |> Path.join("artifacts/gates/turn-0001/results.json") |> File.read!() |> Jason.decode!()
+      assert results_json["gate_selection"]["changed_files"] == ["src/change.txt"]
+      assert results_json["gate_selection"]["metadata"]["selector_mode"] == "changed_files"
     after
       File.rm_rf(test_root)
     end

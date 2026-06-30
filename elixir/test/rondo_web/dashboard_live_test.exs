@@ -1,7 +1,7 @@
 defmodule RondoWeb.DashboardLiveTest do
   use Rondo.TestSupport
 
-  alias RondoWeb.DashboardLive
+  alias RondoWeb.{ArchivedRuns, DashboardLive}
 
   test "renders readable last result summaries for active and archived runs" do
     report = %{
@@ -136,7 +136,19 @@ defmodule RondoWeb.DashboardLiveTest do
   end
 
   defp render_dashboard(assigns) do
-    DashboardLive.render(assigns)
+    defaults = %{
+      log_filters: %{query: "", status: "all", window: "all", sort_by: "date", sort_dir: "desc"},
+      archived_filters: ArchivedRuns.default_filters(),
+      selected_outcome: nil,
+      selected_run_projection: nil,
+      event_query: "",
+      event_category: :all,
+      selected_event_index: nil,
+      selected_event_view: :summary,
+      selected_event_detail: nil
+    }
+
+    DashboardLive.render(Map.merge(defaults, assigns))
     |> Phoenix.LiveViewTest.rendered_to_string()
   end
 
@@ -153,5 +165,48 @@ defmodule RondoWeb.DashboardLiveTest do
       claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       rate_limits: nil
     }
+  end
+
+  test "selecting an archived row opens the run inspector" do
+    socket = %Phoenix.LiveView.Socket{
+      assigns: %{
+        __changed__: %{},
+        payload: %{
+          archived: [
+            %{
+              issue_identifier: "MT-ARCH-1",
+              issue_title: "Archived visibility",
+              runs: [
+                %{
+                  filename: "2026-06-29T10-00-00Z.json",
+                  issue_identifier: "MT-ARCH-1",
+                  started_at: "2026-06-29T10:00:00Z",
+                  finished_at: "2026-06-29T10:10:00Z",
+                  exit_reason: "completed"
+                }
+              ]
+            }
+          ]
+        },
+        archived_filters: ArchivedRuns.default_filters(),
+        selected_issue: nil,
+        selected_issue_data: nil,
+        selected_runs: nil,
+        selected_run_index: 0
+      }
+    }
+
+    {:noreply, updated_socket} =
+      RondoWeb.DashboardLive.handle_event(
+        "select_archived_run",
+        %{"identifier" => "MT-ARCH-1", "filename" => "2026-06-29T10-00-00Z.json"},
+        socket
+      )
+
+    assert updated_socket.assigns.selected_issue == "MT-ARCH-1"
+    assert updated_socket.assigns.selected_run_index == 0
+    assert [%{filename: "2026-06-29T10-00-00Z.json"}] = updated_socket.assigns.selected_runs
+    assert updated_socket.assigns.selected_issue_data.finished_at == "2026-06-29T10:10:00Z"
+    assert updated_socket.assigns.selected_issue_data.event_log == []
   end
 end

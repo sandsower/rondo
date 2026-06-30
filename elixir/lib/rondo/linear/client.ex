@@ -253,6 +253,12 @@ defmodule Rondo.Linear.Client do
             updatedAt
           }
         }
+        customFields {
+          nodes {
+            name
+            value
+          }
+        }
         createdAt
         updatedAt
       }
@@ -332,6 +338,12 @@ defmodule Rondo.Linear.Client do
             updatedAt
           }
         }
+        customFields {
+          nodes {
+            name
+            value
+          }
+        }
         createdAt
         updatedAt
       }
@@ -361,7 +373,13 @@ defmodule Rondo.Linear.Client do
       true ->
         with {:ok, assignee_filter} <- routing_assignee_filter() do
           label_filter = Config.tracker_label_filter()
-          do_fetch_by_states(project_slug, Config.linear_active_states(), assignee_filter, label_filter, opts)
+
+          candidate_states =
+            (Config.linear_active_states() ++
+               if(Config.release_loop_enabled?(), do: Config.linear_review_states(), else: []))
+            |> Enum.uniq()
+
+          do_fetch_by_states(project_slug, candidate_states, assignee_filter, label_filter, opts)
         end
     end
   end
