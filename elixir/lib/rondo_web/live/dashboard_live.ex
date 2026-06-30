@@ -5,7 +5,7 @@ defmodule RondoWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {RondoWeb.Layouts, :app}
 
-  alias RondoWeb.{Endpoint, ObservabilityPubSub, Presenter}
+  alias RondoWeb.{ArchivedRuns, Endpoint, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
   @impl true
@@ -19,7 +19,10 @@ defmodule RondoWeb.DashboardLive do
       |> assign(:selected_event_index, 0)
       |> assign(:selected_event_mode, :pretty)
       |> assign(:selected_issue, nil)
+      |> assign(:selected_issue_data, nil)
+      |> assign(:selected_runs, nil)
       |> assign(:selected_run_index, 0)
+      |> assign(:archived_filters, ArchivedRuns.default_filters())
 
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
@@ -130,6 +133,58 @@ defmodule RondoWeb.DashboardLive do
     else
       {:noreply, socket}
     end
+  end
+
+  @impl true
+  def handle_event("select_archived_run", %{"identifier" => identifier, "filename" => filename}, socket) do
+    archived = Map.get(socket.assigns.payload, :archived, [])
+    group = Enum.find(archived, &(&1.issue_identifier == identifier))
+
+    case group do
+      %{runs: runs} when is_list(runs) ->
+        selected_index = Enum.find_index(runs, &(&1.filename == filename)) || max(length(runs) - 1, 0)
+        selected_run = Enum.at(runs, selected_index)
+        run_with_log = load_run_event_log(selected_run)
+
+        {:noreply,
+         socket
+         |> assign(:selected_issue, identifier)
+         |> assign(:selected_issue_data, run_with_log)
+         |> assign(:selected_run_index, selected_index)
+         |> assign(:selected_runs, runs)
+         |> push_run_charts(runs)}
+
+      _ ->
+        {:noreply, socket}
+    end
+  end
+
+  @impl true
+  def handle_event("filter_archived", params, socket) do
+    filters = socket.assigns.archived_filters |> ArchivedRuns.merge_filters(params) |> Map.put(:page, 1)
+    {:noreply, assign(socket, :archived_filters, filters)}
+  end
+
+  @impl true
+  def handle_event("sort_archived", %{"field" => field}, socket) do
+    {:noreply, assign(socket, :archived_filters, ArchivedRuns.next_sort(socket.assigns.archived_filters, field))}
+  end
+
+  @impl true
+  def handle_event("page_archived", %{"page" => page}, socket) do
+    filters = ArchivedRuns.merge_filters(socket.assigns.archived_filters, %{"page" => page})
+    {:noreply, assign(socket, :archived_filters, filters)}
+  end
+
+  @impl true
+  def handle_event("reset_archived_filters", _params, socket) do
+    {:noreply, assign(socket, :archived_filters, ArchivedRuns.default_filters())}
+  end
+
+  @impl true
+  def handle_event("show_archived_failures", _params, socket) do
+    filters = %{socket.assigns.archived_filters | status: "failed", page: 1, sort_by: "ended", sort_dir: "desc"}
+    {:noreply, assign(socket, :archived_filters, filters)}
   end
 
   @impl true
@@ -645,51 +700,143 @@ defmodule RondoWeb.DashboardLive do
           <% end %>
         </section>
 
-        <section class="section-card">
-          <div class="section-header">
+        <% archived_view = archived_table_view(@payload, @archived_filters) %>
+        <section class="section-card archived-runs-card">
+          <div class="section-header archived-section-header">
             <div>
               <h2 class="section-title">Archived runs</h2>
-              <p class="section-copy">Completed agent sessions. Click to view transcripts.</p>
+              <p class="section-copy">Searchable run history. Select any row to open the same detail inspector used for active runs.</p>
+            </div>
+            <div class="archive-summary-strip">
+              <span class="state-badge"><%= archived_view.total %> matching</span>
+              <button
+                :if={archived_view.recent_failures != []}
+                type="button"
+                class="subtle-button"
+                phx-click="show_archived_failures"
+              >
+                <%= length(archived_view.recent_failures) %> recent failures
+              </button>
             </div>
           </div>
 
-          <%= if (@payload[:archived] || []) == [] do %>
+          <%= if (@payload[:archived_table] || []) == [] do %>
             <p class="empty-state">No archived runs yet.</p>
           <% else %>
-            <div class="table-wrap">
-              <table class="data-table" style="min-width: 580px;">
-                <thead>
-                  <tr>
-                    <th>Issue</th>
-                    <th>Runs</th>
-                    <th>Last result</th>
-                    <th>Total tokens</th>
-                    <th>Last run</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    :for={group <- @payload.archived}
-                    class={"data-table-row #{if @selected_issue == group.issue_identifier, do: "data-table-row-selected", else: ""}"}
-                    phx-click="select_archived"
-                    phx-value-identifier={group.issue_identifier}
-                    style="cursor: pointer;"
-                  >
-                    <td>
-                      <span class="issue-id"><%= group.issue_identifier %></span>
-                    </td>
-                    <td class="numeric"><%= group.run_count %></td>
-                    <td>
-                      <span class={exit_reason_class(group.latest_result)}>
-                        <%= group.latest_result %>
-                      </span>
-                    </td>
-                    <td class="numeric"><%= format_int(group.total_tokens) %></td>
-                    <td class="mono muted" style="font-size: 12px;"><%= format_finished_at(group.latest_finished_at) %></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
+            <form class="archive-filter-bar" phx-change="filter_archived">
+              <input type="hidden" name="page_size" value={archived_view.page_size} />
+              <input class="archive-filter-input" type="search" name="search" value={archived_view.filters.search} placeholder="Search issue, title, repo, model, result" />
+              <select name="status" class="archive-filter-select">
+                <option value="all" selected={archived_view.filters.status == "all"}>All statuses</option>
+                <option :for={status <- archived_view.options.statuses} value={status} selected={archived_view.filters.status == status}><%= status %></option>
+              </select>
+              <select name="model" class="archive-filter-select">
+                <option value="all" selected={archived_view.filters.model == "all"}>All models</option>
+                <option :for={model <- archived_view.options.models} value={model} selected={archived_view.filters.model == model}><%= model %></option>
+              </select>
+              <select name="project" class="archive-filter-select">
+                <option value="all" selected={archived_view.filters.project == "all"}>All projects/repos</option>
+                <option :for={project <- archived_view.options.projects} value={project} selected={archived_view.filters.project == project}><%= project %></option>
+              </select>
+              <label class="archive-date-filter">
+                From
+                <input type="date" name="date_from" value={archived_view.filters.date_from} />
+              </label>
+              <label class="archive-date-filter">
+                To
+                <input type="date" name="date_to" value={archived_view.filters.date_to} />
+              </label>
+              <button type="button" class="subtle-button" phx-click="reset_archived_filters">Reset</button>
+            </form>
+
+            <%= if archived_view.rows == [] do %>
+              <p class="empty-state">No archived runs match the current filters.</p>
+            <% else %>
+              <div class="table-wrap archive-table-wrap">
+                <table class="data-table archive-table">
+                  <thead>
+                    <tr>
+                      <th><button type="button" class="sort-button" phx-click="sort_archived" phx-value-field="issue">Issue <%= sort_indicator(archived_view.filters, "issue") %></button></th>
+                      <th><button type="button" class="sort-button" phx-click="sort_archived" phx-value-field="project">Project / repo <%= sort_indicator(archived_view.filters, "project") %></button></th>
+                      <th><button type="button" class="sort-button" phx-click="sort_archived" phx-value-field="status">State / outcome <%= sort_indicator(archived_view.filters, "status") %></button></th>
+                      <th><button type="button" class="sort-button" phx-click="sort_archived" phx-value-field="started">Started <%= sort_indicator(archived_view.filters, "started") %></button></th>
+                      <th><button type="button" class="sort-button" phx-click="sort_archived" phx-value-field="ended">Ended <%= sort_indicator(archived_view.filters, "ended") %></button></th>
+                      <th><button type="button" class="sort-button" phx-click="sort_archived" phx-value-field="duration">Duration <%= sort_indicator(archived_view.filters, "duration") %></button></th>
+                      <th><button type="button" class="sort-button" phx-click="sort_archived" phx-value-field="model">Model / provider <%= sort_indicator(archived_view.filters, "model") %></button></th>
+                      <th><button type="button" class="sort-button" phx-click="sort_archived" phx-value-field="tokens">Tokens / cost <%= sort_indicator(archived_view.filters, "tokens") %></button></th>
+                      <th>Links</th>
+                      <th><button type="button" class="sort-button" phx-click="sort_archived" phx-value-field="result">Last result <%= sort_indicator(archived_view.filters, "result") %></button></th>
+                      <th>Activity</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      :for={run <- archived_view.rows}
+                      class={archived_row_class(run, @selected_issue, @selected_issue_data)}
+                      phx-click="select_archived_run"
+                      phx-value-identifier={run.issue_identifier}
+                      phx-value-filename={run.filename}
+                      style="cursor: pointer;"
+                    >
+                      <td>
+                        <div class="issue-stack">
+                          <span class="issue-id"><%= run.issue_identifier %></span>
+                          <span :if={run.issue_title} class="muted archive-title" title={run.issue_title}><%= run.issue_title %></span>
+                        </div>
+                      </td>
+                      <td>
+                        <div class="detail-stack">
+                          <span><%= run.project || "n/a" %></span>
+                          <span class="muted event-meta"><%= run.repo || "n/a" %></span>
+                        </div>
+                      </td>
+                      <td>
+                        <div class="detail-stack">
+                          <span class={exit_reason_class(run.exit_reason)}><%= run.status %></span>
+                          <span class="muted event-meta"><%= run.outcome || "n/a" %></span>
+                        </div>
+                      </td>
+                      <td class="mono muted"><%= format_archive_datetime(run.started_at) %></td>
+                      <td class="mono muted"><%= format_archive_datetime(run.finished_at) %></td>
+                      <td class="numeric"><%= format_duration_ms(run.duration_ms) %></td>
+                      <td>
+                        <div class="detail-stack">
+                          <span class="mono archive-model"><%= run.model || "unknown" %></span>
+                          <span class={provider_badge_class(run.provider)}><%= run.provider || "unknown" %></span>
+                        </div>
+                      </td>
+                      <td>
+                        <div class="token-stack numeric">
+                          <span><%= format_int(get_in(run, [:tokens, :total_tokens])) %></span>
+                          <span class="muted"><%= format_cost(run.cost) %></span>
+                        </div>
+                      </td>
+                      <td>
+                        <div class="archive-links">
+                          <a :if={run.linear_url} class="issue-link" href={run.linear_url} onclick="event.stopPropagation()">Linear</a>
+                          <a :if={run.pr_url} class="issue-link" href={run.pr_url} onclick="event.stopPropagation()">PR</a>
+                          <a class="issue-link" href={"/api/v1/#{run.issue_identifier}"} onclick="event.stopPropagation()">JSON</a>
+                        </div>
+                      </td>
+                      <td>
+                        <span class="event-text" title={run.last_meaningful_result || "n/a"}><%= run.last_meaningful_result || "n/a" %></span>
+                      </td>
+                      <td>
+                        <span class="archive-activity" title={archive_activity_title(run)}>
+                          <span class="archive-activity-fill" style={archive_activity_style(run)}></span>
+                        </span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div class="archive-pagination">
+                <button type="button" class="subtle-button" phx-click="page_archived" phx-value-page={archived_view.page - 1} disabled={archived_view.page <= 1}>Previous</button>
+                <span class="muted event-meta">Page <%= archived_view.page %> of <%= archived_view.page_count %> · <%= archived_view.total %> runs</span>
+                <button type="button" class="subtle-button" phx-click="page_archived" phx-value-page={archived_view.page + 1} disabled={archived_view.page >= archived_view.page_count}>Next</button>
+              </div>
+            <% end %>
           <% end %>
         </section>
       <% end %>
@@ -985,6 +1132,68 @@ defmodule RondoWeb.DashboardLive do
       </aside>
     <% end %>
     """
+  end
+
+  defp archived_table_view(payload, filters) do
+    payload
+    |> Map.get(:archived_table, [])
+    |> ArchivedRuns.view(filters)
+  end
+
+  defp sort_indicator(%{sort_by: field, sort_dir: "asc"}, field), do: "↑"
+  defp sort_indicator(%{sort_by: field, sort_dir: "desc"}, field), do: "↓"
+  defp sort_indicator(_filters, _field), do: ""
+
+  defp archived_row_class(run, selected_issue, selected_issue_data) do
+    selected? =
+      (selected_issue == run.issue_identifier and selected_issue_data) &&
+        selected_issue_data[:filename] == run.filename
+
+    status_class = if run.status in ["failed", "exited", "error"], do: " archive-row-attention", else: ""
+    selected_class = if selected?, do: " data-table-row-selected", else: ""
+    "data-table-row#{selected_class}#{status_class}"
+  end
+
+  defp format_archive_datetime(nil), do: "n/a"
+
+  defp format_archive_datetime(iso_string) when is_binary(iso_string) do
+    case DateTime.from_iso8601(iso_string) do
+      {:ok, dt, _} -> Calendar.strftime(dt, "%Y-%m-%d %H:%M")
+      _ -> iso_string
+    end
+  end
+
+  defp format_archive_datetime(_value), do: "n/a"
+
+  defp format_duration_ms(ms) when is_integer(ms) and ms >= 0 do
+    seconds = div(ms, 1_000)
+    hours = div(seconds, 3_600)
+    minutes = seconds |> rem(3_600) |> div(60)
+    remaining_seconds = rem(seconds, 60)
+
+    cond do
+      hours > 0 -> "#{hours}h #{minutes}m"
+      minutes > 0 -> "#{minutes}m #{remaining_seconds}s"
+      true -> "#{remaining_seconds}s"
+    end
+  end
+
+  defp format_duration_ms(_ms), do: "n/a"
+
+  defp format_cost(cost) when is_number(cost) and cost > 0, do: "$#{:erlang.float_to_binary(cost / 1.0, decimals: 4)}"
+  defp format_cost(_cost), do: "cost n/a"
+
+  defp archive_activity_style(run) do
+    total_tokens = get_in(run, [:tokens, :total_tokens]) || 0
+    width = total_tokens |> :math.log10() |> Kernel.*(20) |> round() |> min(100) |> max(8)
+    "width: #{width}%"
+  rescue
+    _ -> "width: 8%"
+  end
+
+  defp archive_activity_title(run) do
+    ["tokens=#{format_int(get_in(run, [:tokens, :total_tokens]))}", "duration=#{format_duration_ms(run.duration_ms)}", "status=#{run.status}"]
+    |> Enum.join(" · ")
   end
 
   defp load_run_event_log(run) do
@@ -1852,15 +2061,6 @@ defmodule RondoWeb.DashboardLive do
   end
 
   defp format_duration(_, _), do: "n/a"
-
-  defp format_finished_at(nil), do: ""
-
-  defp format_finished_at(iso_string) when is_binary(iso_string) do
-    case DateTime.from_iso8601(iso_string) do
-      {:ok, dt, _} -> Calendar.strftime(dt, "%H:%M:%S")
-      _ -> iso_string
-    end
-  end
 
   defp exit_reason_class("completed"), do: "state-badge state-badge-active"
   defp exit_reason_class("handed_off"), do: "state-badge state-badge-handoff"

@@ -16,6 +16,7 @@ defmodule RondoWeb.Presenter do
         archived = Map.get(snapshot, :archived, [])
         paused = Map.get(snapshot, :paused, [])
         needs_guidance = Enum.filter(paused, &guidance_entry?/1)
+        archived_table = archived_runs_table(archived)
 
         %{
           generated_at: generated_at,
@@ -29,8 +30,14 @@ defmodule RondoWeb.Presenter do
           retrying: Enum.map(retrying, &retry_entry_payload/1),
           needs_guidance: Enum.map(needs_guidance, &needs_guidance_entry_payload/1),
           paused: Enum.map(paused, &paused_entry_payload/1),
-          archived: group_archived_by_ticket(archived),
-          run_timelines: RunTimeline.project(running, archived, archived_loader: &Orchestrator.load_archived_run/2),
+          archived: group_archived_by_ticket(archived_table),
+          archived_table: archived_table,
+          run_timelines:
+            RunTimeline.project(
+              running,
+              timeline_archived_runs(archived),
+              archived_loader: &Orchestrator.load_archived_run/2
+            ),
           model_usage: ModelUsage.aggregate(running, archived),
           claude_totals: Map.get(snapshot, :claude_totals, %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}),
           rate_limits: Map.get(snapshot, :rate_limits)
@@ -396,9 +403,47 @@ defmodule RondoWeb.Presenter do
     |> Enum.reject(&is_nil(&1.at))
   end
 
-  defp group_archived_by_ticket(archived) do
+  @timeline_recent_limit 10
+  @timeline_failure_limit 10
+  @archived_table_recent_limit 500
+  @archived_table_failure_limit 100
+
+  defp timeline_archived_runs(archived) do
+    recent = Enum.take(archived, @timeline_recent_limit)
+
+    failures =
+      archived
+      |> Enum.filter(&(archived_status(Map.get(&1, :exit_reason)) == "failed"))
+      |> Enum.take(@timeline_failure_limit)
+
+    (recent ++ failures)
+    |> Enum.uniq_by(&{Map.get(&1, :identifier), Map.get(&1, :started_at)})
+  end
+
+  @spec archived_runs_table([map()]) :: [map()]
+  def archived_runs_table(archived) when is_list(archived) do
+    defaults = %{project: Config.linear_project_slug(), repo: Config.tracker_repo()}
+
     archived
-    |> Enum.map(&archived_entry_payload/1)
+    |> archived_table_window()
+    |> Enum.map(&archived_entry_payload(&1, defaults))
+    |> Enum.sort_by(&(&1.finished_at || &1.started_at || ""), :desc)
+  end
+
+  defp archived_table_window(archived) do
+    recent = Enum.take(archived, @archived_table_recent_limit)
+
+    failures =
+      archived
+      |> Enum.filter(&(archived_status(Map.get(&1, :exit_reason)) == "failed"))
+      |> Enum.take(@archived_table_failure_limit)
+
+    (recent ++ failures)
+    |> Enum.uniq_by(&{Map.get(&1, :identifier), Map.get(&1, :started_at)})
+  end
+
+  defp group_archived_by_ticket(archived_rows) do
+    archived_rows
     |> Enum.group_by(& &1.issue_identifier)
     |> Enum.map(fn {identifier, runs} ->
       sorted_runs = Enum.sort_by(runs, & &1.started_at, :asc)
@@ -406,9 +451,10 @@ defmodule RondoWeb.Presenter do
 
       %{
         issue_identifier: identifier,
+        issue_title: latest.issue_title,
         latest_result: latest.exit_reason,
         latest_finished_at: latest.finished_at,
-        total_tokens: Enum.reduce(runs, 0, fn r, acc -> acc + r.tokens.total_tokens end),
+        total_tokens: Enum.reduce(runs, 0, fn r, acc -> acc + total_tokens(r) end),
         run_count: length(runs),
         runs: sorted_runs
       }
@@ -416,29 +462,115 @@ defmodule RondoWeb.Presenter do
     |> Enum.sort_by(& &1.latest_finished_at, :desc)
   end
 
-  defp archived_entry_payload(entry) do
-    started_at = iso8601(entry.started_at) || to_string(entry.started_at)
+  defp archived_entry_payload(entry, defaults) do
+    started_value = Map.get(entry, :started_at)
+    finished_value = Map.get(entry, :finished_at)
+    started_at = timestamp_payload(started_value)
+    finished_at = timestamp_payload(finished_value)
+    model_info = archived_model_info(entry)
+    tokens = normalize_tokens(Map.get(entry, :tokens, %{}))
+    outcome = Map.get(entry, :exit_reason)
 
     %{
-      issue_id: entry.issue_id,
-      issue_identifier: entry.identifier,
-      session_id: entry.session_id,
-      state: entry.state,
+      issue_id: Map.get(entry, :issue_id),
+      issue_identifier: Map.get(entry, :identifier),
+      issue_title: Map.get(entry, :issue_title),
+      issue_url: Map.get(entry, :issue_url),
+      linear_url: Map.get(entry, :issue_url),
+      pr_url: Map.get(entry, :pr_url),
+      project: Map.get(entry, :project) || defaults.project,
+      repo: Map.get(entry, :repo) || defaults.repo,
+      workspace: Map.get(entry, :workspace),
+      session_id: Map.get(entry, :session_id),
+      state: Map.get(entry, :state),
+      status: archived_status(outcome),
+      outcome: outcome,
       started_at: started_at,
-      finished_at: iso8601(entry.finished_at) || to_string(entry.finished_at),
-      exit_reason: entry.exit_reason,
+      finished_at: finished_at,
+      duration_ms: duration_ms(started_value, finished_value),
+      exit_reason: outcome,
       non_active_state: Map.get(entry, :non_active_state),
-      turn_count: entry.turn_count,
+      turn_count: Map.get(entry, :turn_count),
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
-      tokens: entry.tokens,
+      tokens: tokens,
+      cost: archived_cost(entry, tokens),
+      model: model_info.model,
+      provider: model_info.provider,
       model_routing: Map.get(entry, :model_routing),
       model: display_model(entry),
       provider: provider_from_entry(entry),
       cost: log_cost(entry),
       adapter: Map.get(entry, :adapter),
-      filename: run_filename(entry.started_at)
+      last_meaningful_result: last_meaningful_result(entry, outcome),
+      filename: run_filename(Map.get(entry, :started_at))
     }
   end
+
+  defp normalize_tokens(tokens) when is_map(tokens) do
+    %{
+      input_tokens: Map.get(tokens, :input_tokens) || Map.get(tokens, "input_tokens") || 0,
+      output_tokens: Map.get(tokens, :output_tokens) || Map.get(tokens, "output_tokens") || 0,
+      total_tokens: Map.get(tokens, :total_tokens) || Map.get(tokens, "total_tokens") || 0
+    }
+  end
+
+  defp normalize_tokens(_tokens), do: %{input_tokens: 0, output_tokens: 0, total_tokens: 0}
+
+  defp total_tokens(run), do: get_in(run, [:tokens, :total_tokens]) || 0
+
+  defp archived_status(outcome) when is_binary(outcome) do
+    cond do
+      outcome == "completed" -> "completed"
+      outcome == "terminated" -> "terminated"
+      outcome == "handed_off" -> "handed_off"
+      String.starts_with?(outcome, "exited") -> "failed"
+      true -> outcome
+    end
+  end
+
+  defp archived_status(_outcome), do: "unknown"
+
+  defp archived_model_info(entry) when is_map(entry) do
+    routing = archived_value(entry, :model_routing)
+    resolved = if is_map(routing), do: archived_value(routing, :resolved) || %{}, else: %{}
+    model = archived_value(resolved, :model)
+    adapter = archived_value(resolved, :adapter) || archived_value(entry, :adapter)
+
+    %{model: model || adapter, provider: ModelUsage.provider_from_model(model) || adapter}
+  end
+
+  defp archived_value(map, key) when is_map(map) and is_atom(key) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  end
+
+  defp archived_cost(entry, tokens) do
+    Map.get(entry, :cost) || Map.get(entry, "cost") || Map.get(tokens, :cost)
+  end
+
+  defp last_meaningful_result(entry, outcome) do
+    latest_gate = Map.get(entry, :latest_gate) || %{}
+
+    cond do
+      gate_status = Map.get(latest_gate, :status) || Map.get(latest_gate, "status") -> "gates #{gate_status}"
+      is_binary(outcome) -> outcome
+      true -> "n/a"
+    end
+  end
+
+  defp duration_ms(%DateTime{} = started_at, %DateTime{} = finished_at) do
+    max(DateTime.diff(finished_at, started_at, :millisecond), 0)
+  end
+
+  defp duration_ms(started_at, finished_at) when is_binary(started_at) and is_binary(finished_at) do
+    with {:ok, started, _} <- DateTime.from_iso8601(started_at),
+         {:ok, finished, _} <- DateTime.from_iso8601(finished_at) do
+      max(DateTime.diff(finished, started, :millisecond), 0)
+    else
+      _ -> nil
+    end
+  end
+
+  defp duration_ms(_started_at, _finished_at), do: nil
 
   defp run_filename(%DateTime{} = dt) do
     dt
