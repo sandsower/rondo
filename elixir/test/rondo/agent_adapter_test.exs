@@ -209,6 +209,57 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  defmodule ChangedFileProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "changed_file_process"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test, prompt: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: %{status: :ok, checks: %{available: :ok}}
+
+    @impl true
+    def select_gates(opts \\ []) do
+      changed_files = Keyword.get(opts, :changed_files, [])
+      selector_metadata = Keyword.get(opts, :changed_files_metadata, %{})
+
+      gates =
+        if "src/change.txt" in changed_files do
+          [%{name: "changed-proof", command: "echo changed > changed-gate.txt", timeout_ms: 1_000, action_id: nil, action_classes: ["read"]}]
+        else
+          []
+        end
+
+      {:ok,
+       Rondo.ProcessProvider.gate_selection_result(gates,
+         selected: Enum.map(gates, &%{name: &1.name, reason: "matched src/change.txt"}),
+         skipped: if(gates == [], do: [%{name: "changed-proof", reason: "no changed files matched src/change.txt"}], else: []),
+         changed_files: changed_files,
+         metadata: %{provider: id(), selector_mode: "changed_files", changed_files_source: Map.get(selector_metadata, :source)}
+       )}
+    end
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Changed-file prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []), do: %{}
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(action, classes, opts \\ []) do
+      {:ok, %{"decision" => "allow", "action" => action, "classes" => classes, "mode" => Keyword.fetch!(opts, :mode), "provider" => id()}}
+    end
+  end
+
   defmodule FakeProcessProvider do
     @behaviour Rondo.ProcessProvider
 
@@ -2085,6 +2136,64 @@ defmodule Rondo.AgentAdapterTest do
       assert gate_selection.selected == [%{name: "provider-proof", reason: "fake provider selected turn 1"}]
       assert gate_selection.skipped == [%{name: "slow-proof", reason: "not needed for fake provider test"}]
       assert gate_selection.metadata == %{provider: "fake_process", stage: :post_turn}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner passes collected changed files into provider gate selection and ledger results" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-changed-files-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      run_dir = Path.join(workspace_root, ".rondo_runs/MT-CHANGED/run-1")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 1,
+        hook_before_run:
+          "git init && git config user.email rondo@example.test && git config user.name 'Rondo Test' && mkdir -p src && printf base > README.md && git add README.md && git commit -m base"
+      )
+
+      parent = start_update_recorder(self())
+
+      issue = %Issue{
+        id: "issue-changed-files",
+        identifier: "MT-CHANGED",
+        title: "Changed-file provider proof",
+        description: "Provider should receive changed paths",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: ChangedFileProcessProvider,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 run_dir: run_dir,
+                 test_pid: parent,
+                 touch_workspace_on_invocation: 1,
+                 touch_workspace_path: "src/change.txt"
+               )
+
+      {:ok, workspace} = Rondo.PathSafety.canonicalize(Path.join(workspace_root, "MT-CHANGED"))
+      assert File.read!(Path.join(workspace, "changed-gate.txt")) == "changed\n"
+
+      assert_receive {
+                       :claude_worker_update,
+                       "issue-changed-files",
+                       %{event: :gates_completed, raw: %{status: :pass, gate_selection: gate_selection}}
+                     },
+                     500
+
+      assert gate_selection.changed_files == ["src/change.txt"]
+      assert gate_selection.metadata.selector_mode == "changed_files"
+
+      results_json = run_dir |> Path.join("artifacts/gates/turn-0001/results.json") |> File.read!() |> Jason.decode!()
+      assert results_json["gate_selection"]["changed_files"] == ["src/change.txt"]
+      assert results_json["gate_selection"]["metadata"]["selector_mode"] == "changed_files"
     after
       File.rm_rf(test_root)
     end

@@ -53,6 +53,8 @@ defmodule Rondo.ProcessProvider.Native do
     {:ok,
      ProcessProvider.gate_selection_result(gates,
        selected: Enum.map(gates, &selected_gate_reason/1),
+       changed_files: Keyword.get(opts, :changed_files, []),
+       diff_source: changed_files_source(opts),
        metadata: %{provider: id(), source: "WORKFLOW.md", stage: Keyword.get(opts, :stage)}
      )}
   end
@@ -78,6 +80,12 @@ defmodule Rondo.ProcessProvider.Native do
   @impl true
   def evaluate_action_policy(action, classes, opts \\ []) do
     ActionPolicy.evaluate(action, classes, opts)
+  end
+
+  defp changed_files_source(opts) do
+    opts
+    |> Keyword.get(:changed_files_metadata, %{})
+    |> Map.get(:source)
   end
 
   defp selected_gate_reason(gate) do

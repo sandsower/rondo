@@ -266,8 +266,11 @@ Notes:
   values are `native` and fixture-backed `beislid`. The native provider preserves standalone
   `WORKFLOW.md` behavior for flat gates, prompts, action-policy evaluation, model hints, and run
   metadata. The Beislið provider consumes an explicit approved process artifact and maps its gate,
-  guide/proof metadata, prompt context, and fixture action-policy decision onto the same boundary;
-  it does not run a Beislið exporter/runtime or make Beislið required for Rondo.
+  guide/proof metadata, prompt context, and fixture action-policy decision onto the same boundary.
+  Artifacts can declare changed-file `gate_sets`; Rondo passes changed paths collected from the git
+  workspace before post-turn gates, and the provider returns a deterministic de-duplicated union of
+  matching gates with unmatched-path warnings. It does not run a Beislið exporter/runtime or make
+  Beislið required for Rondo.
 - `process_provider.artifact_path` optionally points at an approved Beislið process artifact JSON
   when `kind: beislid`. For manifest runs, `source_contract.process_provider.artifact_path` takes
   precedence; `source_contract.path` is used only when that file is explicitly a Beislið process
@@ -302,7 +305,8 @@ Notes:
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - Use top-level `gates` for deterministic validation commands Rondo runs after each successful
   agent turn. Gates run in the issue workspace and persist stdout/stderr plus `results.json` under
-  the run ledger. The first gate failure, error, or timeout causes the run to fail/retry with gate
+  the run ledger. `results.json` includes the provider gate-selection envelope, including changed
+  files, selected/skipped reasons, warnings, and selector/provider metadata when available. The first gate failure, error, or timeout causes the run to fail/retry with gate
   evidence preserved; a repeated gate-failed retry pauses the run with a durable human interrupt
   instead of continuing automatic retries. When `gate_reuse.enabled: true` (default), Rondo also
   records a workspace identity plus gate signature and can reuse the prior passing gate result on an
