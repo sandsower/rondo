@@ -6,6 +6,7 @@ defmodule Rondo.Workspace do
   require Logger
   alias Rondo.Config
   alias Rondo.PathSafety
+  alias Rondo.RemoteShell
   alias Rondo.SideEffectPolicy
 
   @excluded_entries MapSet.new([".elixir_ls", "tmp"])
@@ -18,7 +19,7 @@ defmodule Rondo.Workspace do
       safe_id = safe_identifier(issue_context.issue_identifier)
 
       with {:ok, workspace} <- workspace_path_for_issue(safe_id),
-           :ok <- validate_workspace_path(workspace),
+           :ok <- validate_workspace_path(workspace, opts),
            {:ok, created?} <- ensure_workspace(workspace, issue_context, opts),
            :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, opts) do
         {:ok, workspace}
@@ -32,53 +33,87 @@ defmodule Rondo.Workspace do
 
   defp ensure_workspace(workspace, issue_context, opts) do
     fresh? = Keyword.get(opts, :fresh, false)
+    remote? = remote_workspace?(opts)
 
     cond do
-      fresh? and File.dir?(workspace) ->
-        with :ok <- authorize_workspace_action(:remove, workspace, issue_context, opts),
-             :ok <- remove_workspace_dir(workspace) do
-          create_workspace(workspace, issue_context, opts)
-        end
-
-      fresh? and File.exists?(workspace) ->
-        with :ok <- authorize_workspace_action(:remove_stale_path, workspace, issue_context, opts),
-             {:ok, _removed} <- File.rm_rf(workspace) do
-          create_workspace(workspace, issue_context, opts)
-        end
-
-      File.dir?(workspace) ->
-        with :ok <- clean_tmp_artifacts(workspace, issue_context, opts) do
-          {:ok, false}
-        end
-
-      File.exists?(workspace) ->
-        with :ok <- authorize_workspace_action(:remove_stale_path, workspace, issue_context, opts),
-             {:ok, _removed} <- File.rm_rf(workspace) do
-          create_workspace(workspace, issue_context, opts)
-        end
-
-      true ->
-        create_workspace(workspace, issue_context, opts)
+      remote? -> ensure_remote_workspace(workspace, issue_context, opts, fresh?)
+      fresh? -> ensure_fresh_workspace(workspace, issue_context, opts)
+      File.dir?(workspace) -> ensure_clean_workspace(workspace, issue_context, opts)
+      File.exists?(workspace) -> ensure_stale_workspace_removed(workspace, issue_context, opts)
+      true -> create_workspace(workspace, issue_context, opts)
     end
   end
 
-  defp remove_workspace_dir(workspace) do
-    case File.rm_rf(workspace) do
-      {:ok, _removed} -> :ok
-      error -> error
+  defp ensure_remote_workspace(workspace, issue_context, opts, fresh?) do
+    if fresh? do
+      with :ok <- authorize_workspace_action(:remove, workspace, issue_context, opts),
+           :ok <- remove_workspace_dir(workspace, opts) do
+        create_workspace(workspace, issue_context, opts)
+      end
+    else
+      create_workspace(workspace, issue_context, opts)
+    end
+  end
+
+  defp ensure_fresh_workspace(workspace, issue_context, opts) do
+    if File.dir?(workspace) do
+      with :ok <- authorize_workspace_action(:remove, workspace, issue_context, opts),
+           :ok <- remove_workspace_dir(workspace, opts) do
+        create_workspace(workspace, issue_context, opts)
+      end
+    else
+      ensure_stale_workspace_removed(workspace, issue_context, opts)
+    end
+  end
+
+  defp ensure_clean_workspace(workspace, issue_context, opts) do
+    with :ok <- clean_tmp_artifacts(workspace, issue_context, opts) do
+      {:ok, false}
+    end
+  end
+
+  defp ensure_stale_workspace_removed(workspace, issue_context, opts) do
+    with :ok <- authorize_workspace_action(:remove_stale_path, workspace, issue_context, opts),
+         {:ok, _removed} <- File.rm_rf(workspace) do
+      create_workspace(workspace, issue_context, opts)
+    end
+  end
+
+  defp remove_workspace_dir(workspace, opts) do
+    if remote_workspace?(opts) do
+      case RemoteShell.run("rm -rf #{RemoteShell.shell_escape(workspace)}", opts) do
+        {_output, 0} -> :ok
+        result -> result
+      end
+    else
+      case File.rm_rf(workspace) do
+        {:ok, _removed} -> :ok
+        error -> error
+      end
     end
   end
 
   defp create_workspace(workspace, issue_context, opts) do
     with :ok <- authorize_workspace_action(:create, workspace, issue_context, opts),
-         :ok <- File.mkdir_p(workspace) do
+         :ok <- create_workspace_dir(workspace, opts) do
       {:ok, true}
+    end
+  end
+
+  defp create_workspace_dir(workspace, opts) do
+    if remote_workspace?(opts) do
+      case RemoteShell.run("mkdir -p #{RemoteShell.shell_escape(workspace)}", opts) do
+        {_output, 0} -> :ok
+        result -> result
+      end
+    else
+      File.mkdir_p(workspace)
     end
   end
 
   @spec remove(Path.t(), keyword()) :: {:ok, [String.t()]} | {:error, term()} | {:error, term(), String.t()}
   def remove(workspace, opts \\ []) do
-    if File.exists?(workspace) do
+    if remote_workspace?(opts) or File.exists?(workspace) do
       remove_existing_workspace(workspace, opts)
     else
       File.rm_rf(workspace)
@@ -86,17 +121,19 @@ defmodule Rondo.Workspace do
   end
 
   defp remove_existing_workspace(workspace, opts) do
-    case validate_workspace_path(workspace) do
-      :ok ->
-        issue_context = %{issue_id: nil, issue_identifier: Path.basename(workspace)}
+    case validate_workspace_path(workspace, opts) do
+      :ok -> remove_validated_workspace(workspace, opts)
+      {:error, reason} -> {:error, reason, ""}
+    end
+  end
 
-        with :ok <- authorize_workspace_action(:remove, workspace, issue_context, opts),
-             :ok <- maybe_run_before_remove_hook(workspace) do
-          File.rm_rf(workspace)
-        end
+  defp remove_validated_workspace(workspace, opts) do
+    issue_context = %{issue_id: nil, issue_identifier: Path.basename(workspace)}
 
-      {:error, reason} ->
-        {:error, reason, ""}
+    with :ok <- authorize_workspace_action(:remove, workspace, issue_context, opts),
+         :ok <- maybe_run_before_remove_hook(workspace, opts),
+         :ok <- remove_workspace_dir(workspace, opts) do
+      if remote_workspace?(opts), do: {:ok, []}, else: File.rm_rf(workspace)
     end
   end
 
@@ -161,15 +198,26 @@ defmodule Rondo.Workspace do
       @excluded_entries
       |> MapSet.to_list()
       |> Enum.map(&Path.join(workspace, &1))
-      |> Enum.filter(&File.exists?/1)
+      |> Enum.filter(&(remote_workspace?(opts) or File.exists?(&1)))
 
     if cleanup_targets == [] do
       :ok
     else
       with :ok <- authorize_workspace_action(:cleanup_tmp, workspace, issue_context, opts) do
-        Enum.each(cleanup_targets, &File.rm_rf/1)
-        :ok
+        clean_tmp_targets(cleanup_targets, opts)
       end
+    end
+  end
+
+  defp clean_tmp_targets(cleanup_targets, opts) do
+    if remote_workspace?(opts) do
+      case Enum.map_join(cleanup_targets, " ", &RemoteShell.shell_escape/1) do
+        "" -> :ok
+        paths -> RemoteShell.run("rm -rf #{paths}", opts)
+      end
+    else
+      Enum.each(cleanup_targets, &File.rm_rf/1)
+      :ok
     end
   end
 
@@ -189,25 +237,24 @@ defmodule Rondo.Workspace do
     end
   end
 
-  defp maybe_run_before_remove_hook(workspace) do
-    case File.dir?(workspace) do
-      true ->
-        case Config.workspace_hooks()[:before_remove] do
-          nil ->
-            :ok
+  defp maybe_run_before_remove_hook(workspace, opts) do
+    if remote_workspace?(opts) or File.dir?(workspace) do
+      case Config.workspace_hooks()[:before_remove] do
+        nil ->
+          :ok
 
-          command ->
-            run_hook(
-              command,
-              workspace,
-              %{issue_id: nil, issue_identifier: Path.basename(workspace)},
-              "before_remove"
-            )
-            |> ignore_optional_hook_failure()
-        end
-
-      false ->
-        :ok
+        command ->
+          run_hook(
+            command,
+            workspace,
+            %{issue_id: nil, issue_identifier: Path.basename(workspace)},
+            "before_remove",
+            opts
+          )
+          |> ignore_optional_hook_failure()
+      end
+    else
+      :ok
     end
   end
 
@@ -220,7 +267,7 @@ defmodule Rondo.Workspace do
   defp ignore_optional_hook_failure({:error, {:action_policy_failed, _failure} = reason}), do: {:error, reason}
   defp ignore_optional_hook_failure({:error, _reason}), do: :ok
 
-  defp run_hook(command, workspace, issue_context, hook_name, opts \\ []) do
+  defp run_hook(command, workspace, issue_context, hook_name, opts) do
     timeout_ms = Config.workspace_hooks()[:timeout_ms]
     command = interpolate_hook_command(command, workspace, issue_context)
 
@@ -229,7 +276,7 @@ defmodule Rondo.Workspace do
 
       task =
         Task.async(fn ->
-          System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
+          RemoteShell.run_in_workspace(command, workspace, opts)
         end)
 
       case Task.yield(task, timeout_ms) do
@@ -376,31 +423,51 @@ defmodule Rondo.Workspace do
     end
   end
 
-  defp validate_workspace_path(workspace) when is_binary(workspace) do
+  defp validate_workspace_path(workspace, opts) when is_binary(workspace) do
+    if remote_workspace?(opts) do
+      validate_remote_workspace_path(workspace)
+    else
+      validate_local_workspace_path(workspace)
+    end
+  end
+
+  defp validate_remote_workspace_path(workspace) do
+    if String.trim(workspace) == "" do
+      {:error, {:workspace_path_unreadable, workspace, :empty}}
+    else
+      :ok
+    end
+  end
+
+  defp validate_local_workspace_path(workspace) do
     expanded_workspace = Path.expand(workspace)
     expanded_root = Path.expand(Config.workspace_root())
     expanded_root_prefix = expanded_root <> "/"
 
     with {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded_workspace),
          {:ok, canonical_root} <- PathSafety.canonicalize(expanded_root) do
-      canonical_root_prefix = canonical_root <> "/"
-
-      cond do
-        canonical_workspace == canonical_root ->
-          {:error, {:workspace_equals_root, canonical_workspace, canonical_root}}
-
-        String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
-          :ok
-
-        String.starts_with?(expanded_workspace <> "/", expanded_root_prefix) ->
-          {:error, {:workspace_symlink_escape, expanded_workspace, canonical_root}}
-
-        true ->
-          {:error, {:workspace_outside_root, canonical_workspace, canonical_root}}
-      end
+      validate_workspace_paths(canonical_workspace, canonical_root, expanded_workspace, expanded_root_prefix)
     else
       {:error, {:path_canonicalize_failed, path, reason}} ->
         {:error, {:workspace_path_unreadable, path, reason}}
+    end
+  end
+
+  defp validate_workspace_paths(canonical_workspace, canonical_root, expanded_workspace, expanded_root_prefix) do
+    canonical_root_prefix = canonical_root <> "/"
+
+    cond do
+      canonical_workspace == canonical_root ->
+        {:error, {:workspace_equals_root, canonical_workspace, canonical_root}}
+
+      String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
+        :ok
+
+      String.starts_with?(expanded_workspace <> "/", expanded_root_prefix) ->
+        {:error, {:workspace_symlink_escape, expanded_workspace, canonical_root}}
+
+      true ->
+        {:error, {:workspace_outside_root, canonical_workspace, canonical_root}}
     end
   end
 
@@ -412,6 +479,10 @@ defmodule Rondo.Workspace do
 
   defp shell_escape(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
+  end
+
+  defp remote_workspace?(opts) do
+    RemoteShell.enabled?(opts)
   end
 
   defp issue_context(%{id: issue_id, identifier: identifier}) do

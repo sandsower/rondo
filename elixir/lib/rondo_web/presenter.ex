@@ -98,11 +98,17 @@ defmodule RondoWeb.Presenter do
     do: (running && running.issue_id) || (retry && retry.issue_id) || (paused && paused.issue_id)
 
   defp workspace_payload(issue_identifier, paused) do
-    %{path: paused_workspace(paused) || Path.join(Config.workspace_root(), issue_identifier)}
+    %{
+      path: paused_workspace(paused) || Path.join(Config.workspace_root(), issue_identifier),
+      worker_host: paused_worker_host(paused)
+    }
   end
 
   defp paused_workspace(nil), do: nil
   defp paused_workspace(paused), do: Map.get(paused, :workspace)
+
+  defp paused_worker_host(nil), do: nil
+  defp paused_worker_host(paused), do: Map.get(paused, :worker_host)
 
   defp attempts_payload(retry) do
     %{
@@ -152,6 +158,8 @@ defmodule RondoWeb.Presenter do
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       model_routing: Map.get(entry, :model_routing),
       model_fallback: Map.get(entry, :model_fallback),
+      worker_host: Map.get(entry, :worker_host),
+      workspace_path: Map.get(entry, :workspace_path) || Map.get(entry, :workspace),
       tokens: %{
         input_tokens: entry.claude_input_tokens,
         output_tokens: entry.claude_output_tokens,
@@ -188,6 +196,8 @@ defmodule RondoWeb.Presenter do
       run_id: Map.get(entry, :run_id),
       run_dir: Map.get(entry, :run_dir),
       workspace: Map.get(entry, :workspace),
+      workspace_path: Map.get(entry, :workspace_path) || Map.get(entry, :workspace),
+      worker_host: Map.get(entry, :worker_host),
       paused_at: timestamp_payload(Map.get(entry, :paused_at)),
       retry_attempt: Map.get(entry, :retry_attempt),
       tracker_visibility: Map.get(entry, :tracker_visibility),
@@ -257,6 +267,7 @@ defmodule RondoWeb.Presenter do
       latest_gate: gate_payload(Map.get(running, :latest_gate)),
       model_routing: Map.get(running, :model_routing),
       model_fallback: Map.get(running, :model_fallback),
+      worker_host: Map.get(running, :worker_host),
       tokens: %{
         input_tokens: running.claude_input_tokens,
         output_tokens: running.claude_output_tokens,

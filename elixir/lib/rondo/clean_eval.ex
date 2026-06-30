@@ -117,7 +117,7 @@ defmodule Rondo.CleanEval do
     cond do
       !File.regular?(patch_path) -> {:skipped, "missing_patch_artifact"}
       is_nil(context.eval_workspace) -> {:error, "missing_workspace_root"}
-      !is_binary(context.workspace) or !File.dir?(context.workspace) -> {:error, "missing_workspace"}
+      !is_binary(context.workspace) or !workspace_accessible?(context) -> {:error, "missing_workspace"}
       true -> load_patch_metadata(context, patch_path)
     end
   end
@@ -306,6 +306,10 @@ defmodule Rondo.CleanEval do
       {output, 0} -> {:ok, output}
       {output, status} -> {:error, status, output}
     end
+  end
+
+  defp workspace_accessible?(context) do
+    match?({:ok, _}, git(context, context.workspace, ["rev-parse", "--git-dir"]))
   end
 
   defp run_git(args, cwd) do
