@@ -609,6 +609,11 @@ defmodule RondoWeb.DashboardLive do
                     <td>
                       <div class="issue-stack">
                         <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <% model_info = run_model_info(entry) %>
+                        <div class="model-badge-row">
+                          <span class={provider_badge_class(model_info.provider)}><%= model_info.provider || "unknown" %></span>
+                          <span class="model-chip"><%= model_info.model || model_info.adapter || "unknown" %></span>
+                        </div>
                         <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"} onclick="event.stopPropagation()">JSON</a>
                         <%= render_entry_links(%{entry: entry, compact: true}) %>
                       </div>
@@ -725,6 +730,7 @@ defmodule RondoWeb.DashboardLive do
           <%= if (@payload[:archived_table] || []) == [] do %>
             <p class="empty-state">No archived runs yet.</p>
           <% else %>
+
             <form class="archive-filter-bar" phx-change="filter_archived">
               <input type="hidden" name="page_size" value={archived_view.page_size} />
               <input class="archive-filter-input" type="search" name="search" value={archived_view.filters.search} placeholder="Search issue, title, repo, model, result" />
@@ -841,6 +847,7 @@ defmodule RondoWeb.DashboardLive do
                 <button type="button" class="subtle-button" phx-click="page_archived" phx-value-page={archived_view.page + 1} disabled={archived_view.page >= archived_view.page_count}>Next</button>
               </div>
             <% end %>
+
           <% end %>
         </section>
       <% end %>
@@ -894,8 +901,27 @@ defmodule RondoWeb.DashboardLive do
               <span class="numeric"><%= selected_time_value(@selected_issue_data, @now) %></span>
             </div>
             <div class="panel-metric">
-              <span class="panel-metric-label">Tokens</span>
-              <span class="numeric"><%= format_int(selected_total_tokens(@selected_issue_data)) %></span>
+              <span class="panel-metric-label">Model</span>
+              <% model_info = selected_model_info(@selected_issue_data) %>
+              <div class="detail-stack">
+                <div class="model-badge-row">
+                  <span class={provider_badge_class(model_info.provider)}><%= model_info.provider || "unknown" %></span>
+                  <span class="model-chip"><%= model_info.model || model_info.adapter || "unknown" %></span>
+                </div>
+                <%= if model_info.status do %>
+                  <span class="muted" style="font-size: 11px;"><%= model_info.status %></span>
+                <% end %>
+              </div>
+            </div>
+            <div class="panel-metric">
+              <span class="panel-metric-label">Token mix</span>
+              <% token_usage = selected_token_usage(@selected_issue_data) %>
+              <div class="token-stack numeric">
+                <span>In <%= format_int(token_usage.input_tokens) %></span>
+                <span>Out <%= format_int(token_usage.output_tokens) %></span>
+                <span>Cached <%= format_int(token_usage.cached_tokens) %></span>
+                <span>Total <%= format_int(token_usage.total_tokens) %></span>
+              </div>
             </div>
             <div class="panel-metric">
               <%= if @selected_issue_data[:exit_reason] do %>
@@ -1037,6 +1063,7 @@ defmodule RondoWeb.DashboardLive do
             <span class="muted" style="font-size: 11px;"><%= length(filtered_events) %> events</span>
           </div>
 
+
           <form class="event-toolbar" phx-change="filter_events">
             <label class="logs-control">
               <span class="logs-control-label">Search</span>
@@ -1074,7 +1101,24 @@ defmodule RondoWeb.DashboardLive do
             </div>
           </form>
 
+
+          <% model_switches = model_change_events(selected_event_log(@selected_issue_data)) %>
+          <%= if model_switches != [] do %>
+            <div class="panel-stream-model-timeline">
+              <span class="panel-metric-label">Model switches</span>
+              <div class="model-timeline">
+                <div :for={switch <- model_switches} class="model-timeline-row">
+                  <span class="mono model-timeline-at"><%= switch.at || "n/a" %></span>
+                  <span class={provider_badge_class(switch.provider)}><%= switch.provider || "unknown" %></span>
+                  <span class="model-chip"><%= switch.model || "unknown" %></span>
+                  <span class="muted model-timeline-boundary"><%= switch.message || "model change" %></span>
+                </div>
+              </div>
+            </div>
+          <% end %>
+
           <%= if filtered_events == [] do %>
+
             <p class="empty-state">Waiting for agent activity...</p>
           <% else %>
             <div class="event-token-histogram" aria-hidden="true">
@@ -1132,8 +1176,23 @@ defmodule RondoWeb.DashboardLive do
                 <span class={event_type_class(entry.event)}>
                   <%= if tool_event?(entry.event) do %><svg class="event-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg><% end %><%= entry.event %>
                 </span>
-                <span class="event-row-message"><%= render_event_message(entry.message) %></span>
-                <span class="event-row-tokens numeric"><%= selected_event_total_tokens(entry) %></span>
+
+                <div class="detail-stack">
+                  <span class="event-text" title={entry.message}><%= render_event_message(entry.message) %></span>
+                  <div class="event-meta-row">
+                    <span class="muted event-meta"><%= entry.at || "n/a" %></span>
+                    <%= if entry.tokens do %>
+                      <span class="token-chip numeric">
+                        Δ in <%= format_int(entry.tokens.input_tokens) %> / out <%= format_int(entry.tokens.output_tokens) %> / cached <%= format_int(entry.tokens.cached_tokens) %>
+                      </span>
+                    <% end %>
+                    <%= if entry.model_change do %>
+                      <span class={provider_badge_class(entry.model_change.provider)}><%= entry.model_change.provider || "unknown" %></span>
+                      <span class="model-chip"><%= entry.model_change.model || "unknown" %></span>
+                    <% end %>
+                  </div>
+                </div>
+
               </div>
             </div>
           <% end %>
@@ -1858,7 +1917,7 @@ defmodule RondoWeb.DashboardLive do
   end
 
   defp selected_total_tokens(selected_issue_data) do
-    get_in(selected_issue_data, [:tokens, :total_tokens])
+    get_in(selected_issue_data, [:tokens, :total_tokens]) || 0
   end
 
   defp selected_event_log(selected_issue_data) do
@@ -2196,14 +2255,14 @@ defmodule RondoWeb.DashboardLive do
   defp model_routing_section(selected_issue_data, nil) do
     model_routing = selected_issue_data[:model_routing]
     adapter = selected_issue_data[:adapter]
-    is_map(model_routing) or is_binary(adapter)
+    is_map(model_routing) or is_binary(adapter) or has_model_switches?(selected_issue_data)
   end
 
   defp model_routing_section(selected_issue_data, selected_runs) when is_list(selected_runs) do
     model_routing = selected_issue_data[:model_routing]
     adapter = selected_issue_data[:adapter]
     has_mr = is_map(model_routing) or is_binary(adapter)
-    has_mr or any_run_has_routing?(selected_runs)
+    has_mr or any_run_has_routing?(selected_runs) or has_model_switches?(selected_issue_data)
   end
 
   defp any_run_has_routing?(selected_runs) do
@@ -2212,6 +2271,12 @@ defmodule RondoWeb.DashboardLive do
         mr = r[:model_routing] || r["model_routing"]
         is_map(mr) and map_size(mr) > 0
       end)
+  end
+
+  defp has_model_switches?(issue_data) do
+    selected_event_log(issue_data)
+    |> model_change_events()
+    |> Enum.any?()
   end
 
   defp routing_status(run) when is_map(run) do
@@ -2223,65 +2288,216 @@ defmodule RondoWeb.DashboardLive do
     assigns = %{data: selected_issue_data, runs: selected_runs}
 
     ~H"""
-    <%= if @runs && length(@runs) > 0 do %>
-      <div style="margin-bottom: 10px;">
-        <%= for {run, idx} <- Enum.with_index(@runs) do %>
-          <% model_info = run_model_info(run) %>
-          <div style="display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 12px;">
-            <span class="muted" style="min-width: 48px;">Run <%= idx + 1 %></span>
-            <span class={provider_badge_class(model_info.provider)} style="font-size: 10px; padding: 1px 6px; border-radius: 8px;">
-              <%= model_info.provider || "unknown" %>
-            </span>
-            <span class="mono" style="font-size: 11px;"><%= model_info.model || "unknown" %></span>
-            <%= if status = routing_status(run) do %>
-              <span class="muted" style="font-size: 10px;">(<%= status %>)</span>
-            <% end %>
-          </div>
-        <% end %>
-      </div>
-      <% active = List.last(@runs) |> run_model_info() %>
-      <% past = Enum.drop(@runs, -1) |> Enum.map(&run_model_info/1) |> Enum.uniq_by(& &1.model) %>
-      <%= if past != [] do %>
-        <div style="margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 11px;">
-          <span class="muted">Historical: </span>
-          <%= Enum.map_join(past, ", ", fn mi -> "#{mi.model}" end) %>
-        </div>
-      <% end %>
-      <%= if active.model && Map.has_key?(active, :model) do %>
-        <div style="margin-top: 4px; font-size: 11px;">
-          <span class="muted">Active: </span>
-          <span class={provider_badge_class(active.provider)} style="font-size: 10px; padding: 1px 6px; border-radius: 8px;">
-            <%= active.provider || "unknown" %>
-          </span>
-          <span class="mono" style="font-size: 11px;"><%= active.model %></span>
-        </div>
-      <% end %>
-    <% else %>
-      <% model_info = run_model_info(@data) %>
-      <div style="display: flex; align-items: center; gap: 8px; font-size: 12px;">
-        <span class={provider_badge_class(model_info.provider)} style="font-size: 10px; padding: 1px 6px; border-radius: 8px;">
-          <%= model_info.provider || "unknown" %>
+    <% run_timeline = if @runs && length(@runs) > 0, do: ModelUsage.model_timeline(@runs), else: [] %>
+    <% stream_switches = model_change_events(Map.get(@data, :event_log, [])) %>
+    <% current_source = if is_list(@runs) and @runs != [], do: List.last(@runs), else: @data %>
+    <% current_model = run_model_info(current_source) %>
+
+    <div class="model-routing-card">
+      <div class="model-routing-summary">
+        <span class="muted" style="font-size: 11px;">Current</span>
+        <span class={provider_badge_class(current_model.provider)} style="font-size: 10px; padding: 1px 6px; border-radius: 8px;">
+          <%= current_model.provider || "unknown" %>
         </span>
-        <span class="mono" style="font-size: 11px;"><%= model_info.model || model_info.adapter || "unknown" %></span>
-        <%= if status = routing_status(@data) do %>
+        <span class="model-chip"><%= current_model.model || current_model.adapter || "unknown" %></span>
+        <%= if status = routing_status(current_source) do %>
           <span class="muted" style="font-size: 10px;">(<%= status %>)</span>
         <% end %>
       </div>
-    <% end %>
+
+      <%= if run_timeline != [] do %>
+        <div class="model-timeline">
+          <div class="model-timeline-heading">Run timeline</div>
+          <%= for entry <- run_timeline do %>
+            <div class="model-timeline-row">
+              <span class="mono model-timeline-at"><%= entry.at || "n/a" %></span>
+              <span class={provider_badge_class(entry.provider)}><%= entry.provider || "unknown" %></span>
+              <span class="model-chip"><%= entry.model || entry.adapter || "unknown" %></span>
+              <span class="muted model-timeline-boundary"><%= entry.boundary %></span>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+
+      <%= if stream_switches != [] do %>
+        <div class="model-timeline" style="margin-top: 10px;">
+          <div class="model-timeline-heading">Stream switches</div>
+          <%= for switch <- stream_switches do %>
+            <div class="model-timeline-row">
+              <span class="mono model-timeline-at"><%= switch.at || "n/a" %></span>
+              <span class={provider_badge_class(switch.provider)}><%= switch.provider || "unknown" %></span>
+              <span class="model-chip"><%= switch.model || "unknown" %></span>
+              <span class="muted model-timeline-boundary"><%= switch.message || "model change" %></span>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+    </div>
     """
   end
 
   defp run_model_info(run) when is_map(run) do
     mr = run[:model_routing] || run["model_routing"]
-    resolved = (is_map(mr) && (mr[:resolved] || mr["resolved"])) || %{}
-    model = resolved[:model] || resolved["model"]
-    adapter = resolved[:adapter] || resolved["adapter"] || run[:adapter] || run["adapter"]
+    resolved = model_routing_resolved(mr)
+    model = resolved_model(resolved) || run[:model] || run["model"]
+    adapter = resolved_adapter(resolved) || run[:adapter] || run["adapter"]
 
     %{
       model: model,
       adapter: adapter,
-      provider: ModelUsage.provider_from_model(model)
+      provider: ModelUsage.provider_from_model(model),
+      status: routing_status(run)
     }
+  end
+
+  defp model_routing_resolved(mr) when is_map(mr), do: mr[:resolved] || mr["resolved"]
+  defp model_routing_resolved(_mr), do: nil
+
+  defp resolved_model(resolved) when is_map(resolved), do: resolved[:model] || resolved["model"]
+  defp resolved_model(_resolved), do: nil
+
+  defp resolved_adapter(resolved) when is_map(resolved), do: resolved[:adapter] || resolved["adapter"]
+  defp resolved_adapter(_resolved), do: nil
+
+  defp selected_model_info(selected_issue_data) when is_map(selected_issue_data) do
+    run_model_info(selected_issue_data)
+  end
+
+  defp selected_model_info(_selected_issue_data), do: %{model: nil, adapter: nil, provider: nil, status: nil}
+
+  defp selected_token_usage(selected_issue_data) do
+    case selected_issue_data |> selected_event_log() |> event_token_totals() do
+      nil ->
+        token_usage_from_entry(selected_issue_data)
+
+      totals ->
+        if token_totals_zero?(totals) and selected_total_tokens(selected_issue_data) > 0 do
+          token_usage_from_entry(selected_issue_data)
+        else
+          totals
+        end
+    end
+  end
+
+  defp model_change_events(log) when is_list(log) do
+    log
+    |> Enum.filter(&Map.get(&1, :model_change))
+    |> Enum.map(fn entry ->
+      change = Map.get(entry, :model_change) || %{}
+
+      %{
+        at: Map.get(entry, :at),
+        provider: Map.get(change, :provider),
+        model: Map.get(change, :model),
+        message: Map.get(entry, :message),
+        tokens: Map.get(entry, :tokens)
+      }
+    end)
+  end
+
+  defp model_change_events(_log), do: []
+
+  defp token_usage_from_entry(%{} = selected_issue_data) do
+    tokens = Map.get(selected_issue_data, :tokens) || Map.get(selected_issue_data, "tokens") || %{}
+
+    %{
+      input_tokens: token_integer(tokens, [:input_tokens, "input_tokens", :input, "input"]),
+      output_tokens: token_integer(tokens, [:output_tokens, "output_tokens", :output, "output"]),
+      cached_tokens: cache_tokens(tokens),
+      total_tokens: token_integer(tokens, [:total_tokens, "total_tokens", :total, "total"])
+    }
+    |> normalize_token_totals()
+  end
+
+  defp event_token_totals(log) when is_list(log) do
+    totals =
+      Enum.reduce(log, nil, fn entry, acc ->
+        case Map.get(entry, :tokens) do
+          nil -> acc
+          tokens -> merge_token_totals(acc, token_usage_from_event(tokens))
+        end
+      end)
+
+    if is_nil(totals), do: nil, else: normalize_token_totals(totals)
+  end
+
+  defp event_token_totals(_log), do: nil
+
+  defp token_usage_from_event(tokens) when is_map(tokens) do
+    %{
+      input_tokens: token_integer(tokens, [:input_tokens, "input_tokens", :input, "input"]),
+      output_tokens: token_integer(tokens, [:output_tokens, "output_tokens", :output, "output"]),
+      cached_tokens: cache_tokens(tokens),
+      total_tokens: token_integer(tokens, [:total_tokens, "total_tokens", :total, "total"])
+    }
+  end
+
+  defp token_usage_from_event(_tokens), do: %{input_tokens: nil, output_tokens: nil, cached_tokens: nil, total_tokens: nil}
+
+  defp merge_token_totals(nil, totals), do: totals
+
+  defp merge_token_totals(left, right) when is_map(left) and is_map(right) do
+    %{
+      input_tokens: sum_token_field(left, right, :input_tokens),
+      output_tokens: sum_token_field(left, right, :output_tokens),
+      cached_tokens: sum_token_field(left, right, :cached_tokens),
+      total_tokens: sum_token_field(left, right, :total_tokens)
+    }
+  end
+
+  defp token_integer(tokens, keys) when is_map(tokens) and is_list(keys) do
+    keys
+    |> Enum.find_value(&Map.get(tokens, &1))
+    |> case do
+      value when is_integer(value) ->
+        value
+
+      value when is_binary(value) ->
+        case Integer.parse(value) do
+          {parsed, ""} -> parsed
+          _ -> 0
+        end
+
+      _ ->
+        0
+    end
+  end
+
+  defp token_integer(_tokens, _keys), do: 0
+
+  defp sum_token_field(left, right, field) do
+    Map.get(left, field, 0) + Map.get(right, field, 0)
+  end
+
+  defp cache_tokens(tokens) when is_map(tokens) do
+    cached_total = token_integer(tokens, [:cached_tokens, "cached_tokens"])
+
+    if cached_total > 0 do
+      cached_total
+    else
+      token_integer(tokens, [:cache_read_tokens, "cache_read_tokens", :cached_input_tokens, "cached_input_tokens"]) +
+        token_integer(tokens, [:cache_write_tokens, "cache_write_tokens"])
+    end
+  end
+
+  defp cache_tokens(_tokens), do: 0
+
+  defp normalize_token_totals(nil), do: %{input_tokens: 0, output_tokens: 0, cached_tokens: 0, total_tokens: 0}
+
+  defp normalize_token_totals(totals) when is_map(totals) do
+    %{
+      input_tokens: Map.get(totals, :input_tokens, 0) || 0,
+      output_tokens: Map.get(totals, :output_tokens, 0) || 0,
+      cached_tokens: Map.get(totals, :cached_tokens, 0) || 0,
+      total_tokens: Map.get(totals, :total_tokens, 0) || 0
+    }
+  end
+
+  defp token_totals_zero?(totals) when is_map(totals) do
+    Map.get(totals, :input_tokens, 0) == 0 and
+      Map.get(totals, :output_tokens, 0) == 0 and
+      Map.get(totals, :cached_tokens, 0) == 0 and
+      Map.get(totals, :total_tokens, 0) == 0
   end
 
   defp provider_badge_class("codex"), do: "state-badge state-badge-active"
