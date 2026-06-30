@@ -1,7 +1,7 @@
 defmodule RondoWeb.Live.DashboardLiveTest do
   use Rondo.TestSupport
 
-  alias RondoWeb.DashboardLive
+  alias RondoWeb.{ArchivedRuns, DashboardLive}
 
   test "selects the matching run projection for live and archived selections" do
     payload = %{
@@ -27,6 +27,20 @@ defmodule RondoWeb.Live.DashboardLiveTest do
           started_at: "2026-05-10T15:31:00Z",
           timeline: []
         }
+      ],
+      archived: [
+        %{
+          issue_identifier: "MT-ARCHIVE",
+          runs: [
+            %{
+              filename: "2026-05-10T15-30-00Z.json",
+              issue_identifier: "MT-ARCHIVE",
+              started_at: "2026-05-10T15:30:00Z",
+              finished_at: "2026-05-10T15:31:00Z",
+              exit_reason: "completed"
+            }
+          ]
+        }
       ]
     }
 
@@ -47,6 +61,44 @@ defmodule RondoWeb.Live.DashboardLiveTest do
                issue_identifier: "MT-ARCHIVE",
                started_at: "2026-05-10T15:30:00Z"
              })
+
+    socket = %Phoenix.LiveView.Socket{
+      assigns: %{
+        __changed__: %{},
+        payload: payload,
+        archived_filters: ArchivedRuns.default_filters(),
+        selected_issue: "stale",
+        selected_issue_data: nil,
+        selected_runs: [%{filename: "stale.json"}],
+        selected_run_index: 9,
+        selected_run_projection: %{stale: true},
+        selected_event_index: 3,
+        selected_event_mode: :raw,
+        event_filters: %{query: "stale", role: "user"}
+      }
+    }
+
+    {:noreply, updated_socket} =
+      DashboardLive.handle_event(
+        "select_archived_run",
+        %{"identifier" => "MT-ARCHIVE", "filename" => "2026-05-10T15-30-00Z.json"},
+        socket
+      )
+
+    assert updated_socket.assigns.selected_issue == "MT-ARCHIVE"
+    assert updated_socket.assigns.selected_run_index == 0
+    assert [%{filename: "2026-05-10T15-30-00Z.json"}] = updated_socket.assigns.selected_runs
+    assert updated_socket.assigns.selected_issue_data.finished_at == "2026-05-10T15:31:00Z"
+    assert updated_socket.assigns.selected_issue_data.event_log == []
+    assert updated_socket.assigns.selected_run_projection.run_id == "run-live"
+    assert updated_socket.assigns.selected_event_index == 0
+    assert updated_socket.assigns.selected_event_mode == :pretty
+    assert updated_socket.assigns.event_filters == %{query: "", role: "all"}
+  end
+
+  test "archive activity style handles zero-token runs without relying on exceptions" do
+    assert DashboardLive.archive_activity_style_for_test(%{tokens: %{total_tokens: 0}}) == "width: 8%"
+    assert DashboardLive.archive_activity_style_for_test(%{tokens: %{total_tokens: nil}}) == "width: 8%"
   end
 
   test "renders ledger browser metadata from run timeline steps" do
