@@ -692,12 +692,16 @@ defmodule RondoWeb.DashboardLive do
             <p class="empty-state">No issues are currently backing off.</p>
           <% else %>
             <div class="table-wrap">
-              <table class="data-table" style="min-width: 680px;">
+              <table class="data-table" style="min-width: 960px;">
                 <thead>
                   <tr>
                     <th>Issue</th>
                     <th>Attempt</th>
                     <th>Due at</th>
+                    <th>Action</th>
+                    <th>Phase</th>
+                    <th>PR</th>
+                    <th>Blocked</th>
                     <th>Error</th>
                   </tr>
                 </thead>
@@ -711,6 +715,18 @@ defmodule RondoWeb.DashboardLive do
                     </td>
                     <td><%= entry.attempt %></td>
                     <td class="mono"><%= entry.due_at || "n/a" %></td>
+                    <td><%= release_loop_display(entry, :action) %></td>
+                    <td><%= release_loop_display(entry, :phase) %></td>
+                    <td>
+                      <%= if release_loop_pr_url(entry) do %>
+                        <a class="issue-link" href={release_loop_pr_url(entry)} target="_blank" rel="noreferrer">
+                          #<%= release_loop_pr_number(entry) || "n/a" %>
+                        </a>
+                      <% else %>
+                        n/a
+                      <% end %>
+                    </td>
+                    <td><%= release_loop_display(entry, :blocked_reason) %></td>
                     <td><%= entry.error || "n/a" %></td>
                   </tr>
                 </tbody>
@@ -2092,6 +2108,19 @@ defmodule RondoWeb.DashboardLive do
       end
     end
   end
+
+  defp release_loop_display(entry, key) do
+    entry
+    |> get_in([:release_loop, key])
+    |> case do
+      nil -> "n/a"
+      value when is_atom(value) -> Atom.to_string(value)
+      value -> to_string(value)
+    end
+  end
+
+  defp release_loop_pr_url(entry), do: get_in(entry, [:release_loop, :pr, :url])
+  defp release_loop_pr_number(entry), do: get_in(entry, [:release_loop, :pr, :number])
 
   defp tracker_state(%{paused: paused}) when is_map(paused), do: Map.get(paused, :tracker_state) || Map.get(paused, :state)
   defp tracker_state(%{running: running}) when is_map(running), do: Map.get(running, :state)

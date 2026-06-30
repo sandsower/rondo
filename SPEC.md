@@ -1397,6 +1397,9 @@ Rondo does not require first-class tracker write APIs in the orchestrator.
 
 - Ticket mutations (state transitions, comments, PR metadata) are typically handled by the coding
   agent using tools defined by the workflow prompt.
+- When a workflow explicitly configures PR review/babysit states, the orchestrator may own the
+  review/merge/Done handoff and should keep those tickets on the PR lifecycle path until the merge
+  succeeds.
 - The service remains a scheduler/runner and tracker reader.
 - Workflow-specific success often means "reached the next handoff state" (for example
   `Human Review`) rather than tracker terminal state `Done`.

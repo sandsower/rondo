@@ -128,6 +128,65 @@ defmodule Rondo.PresenterTest do
            }
   end
 
+  test "retry payloads expose release-loop lifecycle metadata" do
+    snapshot = %{
+      running: [],
+      retrying: [
+        %{
+          issue_id: "issue-release-loop",
+          identifier: "MT-RELEASE-LOOP",
+          attempt: 3,
+          due_in_ms: 9_000,
+          error: "release loop waiting for PR checks",
+          release_loop: %{
+            phase: :wait,
+            action: :wait,
+            blocked_reason: :checks_pending,
+            wait_interval_seconds: 9,
+            recovery_kind: :verification_failure,
+            closeout_state: "review",
+            feedback_count: 2,
+            feedback_comment_ids: ["c1", "c2"],
+            mergeable: "UNKNOWN",
+            merge_state_status: "DIRTY",
+            pr: %{
+              number: 15,
+              url: "https://github.com/sandsower/rondo/pull/15",
+              title: "Release loop metadata",
+              head_ref_name: "feature/review-loop",
+              base_ref_name: "main",
+              is_draft: false
+            },
+            checks: %{state: :pending, conclusion: nil}
+          }
+        }
+      ],
+      archived: [],
+      claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    server_name = Module.concat(__MODULE__, :ReleaseLoopRetrySnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+    [retry] = payload.retrying
+    assert is_binary(retry.due_at)
+    assert retry.release_loop.phase == :wait
+    assert retry.release_loop.action == :wait
+    assert retry.release_loop.blocked_reason == :checks_pending
+    assert retry.release_loop.pr.number == 15
+    assert retry.release_loop.pr.url == "https://github.com/sandsower/rondo/pull/15"
+
+    assert {:ok, issue_payload} = RondoWeb.Presenter.issue_payload("MT-RELEASE-LOOP", server_name, 1_000)
+    assert is_binary(issue_payload.retry.due_at)
+    assert issue_payload.retry.release_loop.phase == :wait
+    assert issue_payload.retry.release_loop.action == :wait
+    assert issue_payload.retry.release_loop.blocked_reason == :checks_pending
+    assert issue_payload.retry.release_loop.recovery_kind == :verification_failure
+    assert issue_payload.retry.release_loop.pr.number == 15
+  end
+
   test "state payload exposes tracker, PR, branch, and final report links" do
     workflow_path = Workflow.workflow_file_path()
     original_workflow = File.read!(workflow_path)

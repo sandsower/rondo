@@ -248,6 +248,7 @@ defmodule Rondo.TestSupport do
     tracker_state_label_prefix = Keyword.get(config, :tracker_state_label_prefix)
     tracker_assignee = Keyword.get(config, :tracker_assignee)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
+    tracker_review_states = Keyword.get(config, :tracker_review_states)
     tracker_terminal_states = Keyword.get(config, :tracker_terminal_states)
     tracker_label_filter = Keyword.get(config, :tracker_label_filter)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
@@ -345,6 +346,7 @@ defmodule Rondo.TestSupport do
         "  state_label_prefix: #{yaml_value(tracker_state_label_prefix)}",
         "  assignee: #{yaml_value(tracker_assignee)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
+        "  review_states: #{yaml_value(tracker_review_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
         "  label_filter: #{yaml_value(tracker_label_filter)}",
         "polling:",
