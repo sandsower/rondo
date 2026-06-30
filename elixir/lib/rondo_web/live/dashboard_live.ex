@@ -1782,11 +1782,6 @@ defmodule RondoWeb.DashboardLive do
     max(trunc(ratio * 100), if(tokens > 0, do: 8, else: 2))
   end
 
-  defp format_cost(nil), do: "n/a"
-  defp format_cost(cost) when is_float(cost), do: "$#{Float.round(cost, 3)}"
-  defp format_cost(cost) when is_integer(cost), do: "$#{cost}"
-  defp format_cost(_), do: "n/a"
-
   defp format_speed(nil), do: "n/a"
   defp format_speed(speed) when is_number(speed), do: "#{Float.round(speed, 1)} tok/s"
   defp format_speed(_), do: "n/a"
@@ -1820,14 +1815,6 @@ defmodule RondoWeb.DashboardLive do
   defp log_row_message(row), do: dashboard_log_message(row)
   defp log_row_source_link(row), do: dashboard_log_source_link(row)
   defp log_row_finish_class(row), do: dashboard_log_finish_class(row)
-
-  defp sort_indicator(filters, field) do
-    if filters[:sort_by] == field do
-      if filters[:sort_dir] == "asc", do: "▲", else: "▼"
-    else
-      ""
-    end
-  end
 
   defp load_payload do
     Presenter.state_payload(orchestrator(), snapshot_timeout_ms())

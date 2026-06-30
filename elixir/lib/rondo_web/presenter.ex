@@ -687,8 +687,6 @@ defmodule RondoWeb.Presenter do
     finished_value = Map.get(entry, :finished_at)
     started_at = timestamp_payload(started_value)
     finished_at = timestamp_payload(finished_value)
-    model_info = archived_model_info(entry)
-    tokens = normalize_tokens(Map.get(entry, :tokens, %{}))
     outcome = Map.get(entry, :exit_reason)
 
     %{
@@ -712,14 +710,11 @@ defmodule RondoWeb.Presenter do
       non_active_state: Map.get(entry, :non_active_state),
       turn_count: Map.get(entry, :turn_count),
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
-      tokens: tokens,
-      cost: archived_cost(entry, tokens),
-      model: model_info.model,
-      provider: model_info.provider,
-      model_routing: Map.get(entry, :model_routing),
+      tokens: normalize_tokens(Map.get(entry, :tokens, %{})),
+      cost: log_cost(entry),
       model: display_model(entry),
       provider: provider_from_entry(entry),
-      cost: log_cost(entry),
+      model_routing: Map.get(entry, :model_routing),
       adapter: Map.get(entry, :adapter),
       last_meaningful_result: last_meaningful_result(entry, outcome),
       links: entry_links(entry),
@@ -750,23 +745,6 @@ defmodule RondoWeb.Presenter do
   end
 
   defp archived_status(_outcome), do: "unknown"
-
-  defp archived_model_info(entry) when is_map(entry) do
-    routing = archived_value(entry, :model_routing)
-    resolved = if is_map(routing), do: archived_value(routing, :resolved) || %{}, else: %{}
-    model = archived_value(resolved, :model)
-    adapter = archived_value(resolved, :adapter) || archived_value(entry, :adapter)
-
-    %{model: model || adapter, provider: ModelUsage.provider_from_model(model) || adapter}
-  end
-
-  defp archived_value(map, key) when is_map(map) and is_atom(key) do
-    Map.get(map, key) || Map.get(map, Atom.to_string(key))
-  end
-
-  defp archived_cost(entry, tokens) do
-    Map.get(entry, :cost) || Map.get(entry, "cost") || Map.get(tokens, :cost)
-  end
 
   defp last_meaningful_result(entry, outcome) do
     latest_gate = Map.get(entry, :latest_gate) || %{}
