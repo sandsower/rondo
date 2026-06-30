@@ -1894,6 +1894,7 @@ defmodule Rondo.Orchestrator do
       turn_count: Map.get(running_entry, :turn_count, 0),
       continuation_count: get_in(interrupt, ["final_report", "continuation_count"]) || 0,
       latest_gate: Map.get(running_entry, :latest_gate),
+      final_report: Map.get(running_entry, :final_report),
       model_routing_context: Map.get(running_entry, :model_routing_context) || get_in(interrupt, ["resume", "model_routing_context"]),
       interrupt: interrupt,
       tracker_visibility: "known",
@@ -3167,6 +3168,7 @@ defmodule Rondo.Orchestrator do
         },
         cost: Map.get(running_entry, :claude_last_reported_cost, 0),
         latest_gate: Map.get(running_entry, :latest_gate),
+        final_report: Map.get(running_entry, :final_report),
         event_log: Map.get(running_entry, :event_log, [])
       }
       |> maybe_put_non_active_state(reason, issue)
@@ -3485,7 +3487,7 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  @archive_keys ~w(issue_id identifier issue_title issue_url project repo workspace pr_url run_id run_dir session_id state started_at finished_at exit_reason non_active_state turn_count tokens cost latest_gate event_log model_routing adapter)
+  @archive_keys ~w(issue_id identifier issue_title issue_url project repo workspace pr_url run_id run_dir session_id state started_at finished_at exit_reason non_active_state turn_count tokens cost latest_gate event_log model_routing adapter final_report)
   @token_keys ~w(input_tokens output_tokens total_tokens)
   @event_keys ~w(at event message tokens)
 

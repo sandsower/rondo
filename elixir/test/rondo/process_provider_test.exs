@@ -18,6 +18,7 @@ defmodule Rondo.ProcessProviderTest do
   test "native provider exposes current workflow gates and unsupported rich features" do
     write_workflow_file!(Workflow.workflow_file_path(),
       gates: [%{name: "unit", command: "mix test", timeout_ms: 120_000}],
+      clean_eval_gates: [%{name: "clean-eval", command: "mix test --list", timeout_ms: 30_000}],
       claude_model: "claude-test",
       claude_allowed_tools: ["Read", "Bash"]
     )
@@ -35,6 +36,15 @@ defmodule Rondo.ProcessProviderTest do
             }} = Native.select_gates()
 
     assert reason =~ "WORKFLOW.md"
+
+    assert {:ok,
+            %{
+              gates: [%{name: "clean-eval", command: "mix test --list", timeout_ms: 30_000, action_classes: ["read"]}],
+              selected: [%{name: "clean-eval", reason: pre_pr_reason}],
+              metadata: %{stage: "pre_pr"}
+            }} = Native.select_gates(stage: "pre_pr")
+
+    assert pre_pr_reason =~ "pre-PR"
 
     assert {:ok, []} = Native.select_guides()
     assert {:ok, []} = Native.proof_requirements()
@@ -115,6 +125,36 @@ defmodule Rondo.ProcessProviderTest do
             }} = Beislid.select_gates(stage: :post_turn)
   end
 
+  test "beislid provider filters staged gates for pre-PR selection" do
+    temp_dir = Path.join(System.tmp_dir!(), "rondo-beislid-provider-stages-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(temp_dir)
+    on_exit(fn -> File.rm_rf(temp_dir) end)
+
+    artifact_path =
+      write_json!(temp_dir, "staged.json", %{
+        "schema" => "beislid-process-artifact-v1",
+        "id" => "staged-fixture",
+        "status" => "approved",
+        "gates" => [
+          %{"name" => "turn", "command" => "true", "stage" => "post_turn"},
+          %{"name" => "pre-pr", "command" => "true", "stage" => "pre_pr"},
+          %{"name" => "shared", "command" => "true", "stage" => "shared"},
+          %{"name" => "unstaged", "command" => "true"}
+        ]
+      })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      process_provider_kind: "beislid",
+      process_provider_artifact_path: artifact_path
+    )
+
+    assert {:ok, %{gates: pre_pr_gates, metadata: %{stage: :pre_pr}}} = Beislid.select_gates(stage: :pre_pr)
+    assert Enum.map(pre_pr_gates, & &1.name) == ["pre-pr", "shared", "unstaged"]
+
+    assert {:ok, %{gates: post_turn_gates}} = Beislid.select_gates(stage: :post_turn)
+    assert Enum.map(post_turn_gates, & &1.name) == ["turn", "shared", "unstaged"]
+  end
+
   test "beislid provider selects deterministic gate union from changed-file selectors" do
     temp_dir = Path.join(System.tmp_dir!(), "rondo-beislid-provider-selectors-#{System.unique_integer([:positive])}")
     File.mkdir_p!(temp_dir)
@@ -169,6 +209,44 @@ defmodule Rondo.ProcessProviderTest do
     assert Enum.any?(List.wrap(skipped), &(&1.name == "runtime" and &1.reason =~ "matched")) == false
     assert [%{message: warning, path: "docs/usage.md"}] = warnings
     assert warning =~ "no provider gate selector matched"
+  end
+
+  test "beislid provider reports selectors that match paths but no gates for selected stage" do
+    temp_dir = Path.join(System.tmp_dir!(), "rondo-beislid-provider-stage-empty-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(temp_dir)
+    on_exit(fn -> File.rm_rf(temp_dir) end)
+
+    artifact_path =
+      write_json!(temp_dir, "stage-empty.json", %{
+        "schema" => "beislid-process-artifact-v1",
+        "id" => "stage-empty-artifact",
+        "status" => "approved",
+        "gate_sets" => [
+          %{
+            "id" => "runtime",
+            "paths" => ["lib/**/*.ex"],
+            "gates" => [
+              %{"name" => "post-turn-only", "command" => "mix test", "stage" => "post_turn"}
+            ]
+          }
+        ]
+      })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      process_provider_kind: "beislid",
+      process_provider_artifact_path: artifact_path
+    )
+
+    assert {:ok,
+            %{
+              gates: [],
+              selected: [],
+              skipped: [%{name: "runtime", reason: reason}],
+              warnings: [%{selector: "runtime", stage: "pre_pr"}],
+              metadata: %{matched_selectors: [], stage_empty_selectors: ["runtime"]}
+            }} = Beislid.select_gates(changed_files: ["lib/rondo/gates.ex"], stage: :pre_pr)
+
+    assert reason =~ "no gates matched stage pre_pr"
   end
 
   test "beislid provider matches trailing slash and prefix selectors deterministically" do

@@ -1,6 +1,7 @@
 defmodule Rondo.PresenterTest do
   use Rondo.TestSupport
 
+  alias Rondo.Linear.Issue
   alias Rondo.RunLedger
 
   defmodule SnapshotServer do
@@ -74,6 +75,72 @@ defmodule Rondo.PresenterTest do
 
     assert {:ok, issue_payload} = RondoWeb.Presenter.issue_payload("MT-GATE", server_name, 1_000)
     assert issue_payload.running.latest_gate.status == :fail
+  end
+
+  test "state and issue payloads surface readable last results" do
+    report = %{
+      "schema" => "rondo.final_report/v0",
+      "summary" => "Did the work",
+      "changed_files" => ["lib/rondo_web/result_summary.ex"],
+      "gates_run" => [%{"name" => "format", "status" => "pass"}],
+      "failures" => [],
+      "risks" => [],
+      "next_state" => "ready_for_review"
+    }
+
+    snapshot = %{
+      running: [
+        %{
+          issue_id: "issue-result",
+          identifier: "MT-RESULT",
+          state: "In Progress",
+          session_id: "session-result",
+          turn_count: 2,
+          last_claude_event: :result,
+          last_claude_message: %{event: :result, message: Jason.encode!(report)},
+          last_claude_timestamp: ~U[2026-05-27 12:00:00Z],
+          started_at: ~U[2026-05-27 11:59:00Z],
+          latest_gate: nil,
+          claude_input_tokens: 4,
+          claude_output_tokens: 5,
+          claude_total_tokens: 9,
+          event_log: []
+        }
+      ],
+      retrying: [],
+      archived: [
+        %{
+          issue_id: "issue-archived-result",
+          identifier: "MT-RESULT-ARCHIVE",
+          session_id: "session-archive-result",
+          state: "Done",
+          started_at: ~U[2026-05-27 10:00:00Z],
+          finished_at: ~U[2026-05-27 10:10:00Z],
+          exit_reason: "completed",
+          turn_count: 2,
+          final_report: report,
+          tokens: %{input_tokens: 10, output_tokens: 20, total_tokens: 30},
+          event_log: []
+        }
+      ],
+      claude_totals: %{input_tokens: 4, output_tokens: 5, total_tokens: 9, seconds_running: 120}
+    }
+
+    server_name = Module.concat(__MODULE__, :ResultSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+    [running] = payload.running
+    assert running.last_message == "ready_for_review · Did the work"
+    assert running.last_result_payload == Jason.encode!(report)
+
+    [archived_group] = payload.archived
+    assert archived_group.latest_result_payload == report
+
+    assert {:ok, issue_payload} = RondoWeb.Presenter.issue_payload("MT-RESULT", server_name, 1_000)
+    assert issue_payload.running.last_message == "ready_for_review · Did the work"
+    assert issue_payload.running.last_result_payload == Jason.encode!(report)
   end
 
   test "archived payload normalizes finished outcomes for rows, charts, and detail drawers" do

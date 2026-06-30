@@ -612,27 +612,7 @@ defmodule Rondo.RunOnceTest do
       clean_eval_enabled: true
     )
 
-    agent_runner = fn run_issue, agent_opts ->
-      run_dir = Keyword.fetch!(agent_opts, :run_dir)
-      workspace = Path.join(workspace_root, run_issue.identifier)
-      File.mkdir_p!(workspace)
-      git = fn args -> {_output, 0} = System.cmd("git", args, cd: workspace, stderr_to_stdout: true) end
-      git.(["init"])
-      git.(["config", "user.email", "run-once@example.com"])
-      git.(["config", "user.name", "Run Once"])
-      git.(["config", "commit.gpgsign", "false"])
-      File.write!(Path.join(workspace, "file.txt"), "one\n")
-      git.(["add", "--all"])
-      git.(["commit", "-m", "base"])
-      {base_ref, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace)
-      File.write!(Path.join(workspace, "file.txt"), "one\ntwo\n")
-      {diff, 0} = System.cmd("git", ["diff", "--binary", "HEAD"], cd: workspace)
-      File.write!(Path.join(run_dir, "artifacts/changes.patch"), diff)
-
-      metadata = %{"schema" => "rondo.patch/v0", "base_ref" => String.trim(base_ref), "patch_path" => "artifacts/changes.patch"}
-      File.write!(Path.join(run_dir, "artifacts/patch.json"), Jason.encode!(metadata))
-      :ok
-    end
+    agent_runner = agent_runner_with_patch(workspace_root)
 
     log =
       capture_log(fn ->
@@ -648,6 +628,29 @@ defmodule Rondo.RunOnceTest do
     manifest = latest_run_manifest!(workspace_root, "GH-1")
     assert manifest["clean_eval"] == %{"status" => "pass", "result_path" => "clean_eval/result.json"}
     assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "clean_eval_completed"))
+  end
+
+  test "blocks successful run-once completion when clean eval fails" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-clean-eval-fail")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      clean_eval_enabled: true,
+      gates: [%{name: "clean eval failure", command: "false", timeout_ms: 10_000}]
+    )
+
+    assert {:error, {:clean_eval_failed, :fail, _summary}} =
+             RunOnce.run("issue-1",
+               deps: deps(issue("issue-1", state: "In Progress"), parent, agent_runner: agent_runner_with_patch(workspace_root))
+             )
+
+    manifest = latest_run_manifest!(workspace_root, "GH-1")
+    assert manifest["clean_eval"] == %{"status" => "fail", "result_path" => "clean_eval/result.json"}
+    assert manifest["status"] == "failed"
+    assert manifest["failure_classification"] == "task_failure"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "failed"))
   end
 
   test "does not run clean eval when disabled" do
@@ -839,6 +842,30 @@ defmodule Rondo.RunOnceTest do
     path = Path.join(dir, "request.json")
     File.write!(path, Jason.encode!(payload))
     path
+  end
+
+  defp agent_runner_with_patch(workspace_root) do
+    fn run_issue, agent_opts ->
+      run_dir = Keyword.fetch!(agent_opts, :run_dir)
+      workspace = Path.join(workspace_root, run_issue.identifier)
+      File.mkdir_p!(workspace)
+      git = fn args -> {_output, 0} = System.cmd("git", args, cd: workspace, stderr_to_stdout: true) end
+      git.(["init"])
+      git.(["config", "user.email", "run-once@example.com"])
+      git.(["config", "user.name", "Run Once"])
+      git.(["config", "commit.gpgsign", "false"])
+      File.write!(Path.join(workspace, "file.txt"), "one\n")
+      git.(["add", "--all"])
+      git.(["commit", "-m", "base"])
+      {base_ref, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace)
+      File.write!(Path.join(workspace, "file.txt"), "one\ntwo\n")
+      {diff, 0} = System.cmd("git", ["diff", "--binary", "HEAD"], cd: workspace)
+      File.write!(Path.join(run_dir, "artifacts/changes.patch"), diff)
+
+      metadata = %{"schema" => "rondo.patch/v0", "base_ref" => String.trim(base_ref), "patch_path" => "artifacts/changes.patch"}
+      File.write!(Path.join(run_dir, "artifacts/patch.json"), Jason.encode!(metadata))
+      :ok
+    end
   end
 
   defp deps(fetch_result, parent, opts \\ []) do

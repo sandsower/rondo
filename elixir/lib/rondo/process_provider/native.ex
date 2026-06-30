@@ -48,11 +48,11 @@ defmodule Rondo.ProcessProvider.Native do
 
   @impl true
   def select_gates(opts \\ []) do
-    gates = Config.gates()
+    gates = gates_for_stage(Keyword.get(opts, :stage))
 
     {:ok,
      ProcessProvider.gate_selection_result(gates,
-       selected: Enum.map(gates, &selected_gate_reason/1),
+       selected: Enum.map(gates, &selected_gate_reason(&1, Keyword.get(opts, :stage))),
        changed_files: Keyword.get(opts, :changed_files, []),
        diff_source: changed_files_source(opts),
        metadata: %{provider: id(), source: "WORKFLOW.md", stage: Keyword.get(opts, :stage)}
@@ -82,13 +82,23 @@ defmodule Rondo.ProcessProvider.Native do
     ActionPolicy.evaluate(action, classes, opts)
   end
 
+  defp gates_for_stage(:pre_pr), do: Config.clean_eval_gates()
+  defp gates_for_stage("pre_pr"), do: Config.clean_eval_gates()
+  defp gates_for_stage(_stage), do: Config.gates()
+
   defp changed_files_source(opts) do
     opts
     |> Keyword.get(:changed_files_metadata, %{})
     |> Map.get(:source)
   end
 
-  defp selected_gate_reason(gate) do
+  defp selected_gate_reason(gate, :pre_pr) do
+    %{name: Map.get(gate, :name, "gate"), reason: "selected from clean_eval/top-level gates for native pre-PR clean evaluation"}
+  end
+
+  defp selected_gate_reason(gate, "pre_pr"), do: selected_gate_reason(gate, :pre_pr)
+
+  defp selected_gate_reason(gate, _stage) do
     %{name: Map.get(gate, :name, "gate"), reason: "selected from flat WORKFLOW.md gates by native process provider"}
   end
 
