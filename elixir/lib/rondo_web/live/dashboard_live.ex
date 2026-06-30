@@ -7,7 +7,16 @@ defmodule RondoWeb.DashboardLive do
 
   alias Rondo.RunOutcome
 
-  alias RondoWeb.{ArchivedRuns, DashboardEventStream, Endpoint, EventInspector, ObservabilityPubSub, Presenter, ResultSummary}
+  alias RondoWeb.{
+    ArchivedRuns,
+    DashboardEventStream,
+    Endpoint,
+    EventInspector,
+    ObservabilityPubSub,
+    Presenter,
+    ResultSummary
+  }
+
   @runtime_tick_ms 1_000
 
   @impl true
@@ -99,7 +108,7 @@ defmodule RondoWeb.DashboardLive do
       |> assign(:selected_event_index, nil)
       |> assign(:selected_event_view, :summary)
       |> assign(:selected_event_detail, nil)
-      |> assign(:event_stream_view, DashboardEventStream.build(%{}, nil, nil, 0, %{}))
+      |> rebuild_event_stream_view(DashboardEventStream.default_filters())
       |> assign(:event_query, "")
       |> assign(:event_category, :all)
 
@@ -194,7 +203,7 @@ defmodule RondoWeb.DashboardLive do
        |> assign(:selected_runs, group.runs)
        |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, latest_run))
        |> reset_event_filters()
-       |> rebuild_event_stream_view()
+       |> rebuild_event_stream_view(DashboardEventStream.default_filters())
        |> push_run_charts(group.runs)}
     else
       {:noreply, socket}
@@ -221,7 +230,7 @@ defmodule RondoWeb.DashboardLive do
          |> assign(:selected_runs, runs)
          |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, selected_run))
          |> reset_event_filters()
-         |> rebuild_event_stream_view()
+         |> rebuild_event_stream_view(DashboardEventStream.default_filters())
          |> push_run_charts(runs)}
 
       _ ->
@@ -273,7 +282,7 @@ defmodule RondoWeb.DashboardLive do
        |> assign(:selected_run_index, index)
        |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, run))
        |> reset_event_filters()
-       |> rebuild_event_stream_view()}
+       |> rebuild_event_stream_view(DashboardEventStream.default_filters())}
     else
       {:noreply, socket}
     end
@@ -326,7 +335,7 @@ defmodule RondoWeb.DashboardLive do
      |> assign(:selected_run_index, 0)
      |> assign(:selected_run_projection, nil)
      |> reset_event_filters()
-     |> rebuild_event_stream_view()}
+     |> rebuild_event_stream_view(DashboardEventStream.default_filters())}
   end
 
   @impl true
@@ -1595,7 +1604,7 @@ defmodule RondoWeb.DashboardLive do
 
       cond do
         key not in @dashboard_query_keys -> acc
-        value in [nil, ""] -> acc
+        is_nil(value) -> acc
         true -> Map.put(acc, key, to_string(value))
       end
     end)

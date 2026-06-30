@@ -143,7 +143,9 @@ defmodule RondoWeb.DashboardEventStreamTest do
       end
     )
 
-    _ = DashboardEventStream.build(payload, selected_issue_data, nil, 0, %{from: "2026-06-29T10:00:00Z", to: "2026-06-29T10:05:00Z"})
+    date_only_view = DashboardEventStream.build(payload, selected_issue_data, nil, 0, %{from: "2026-06-29T10:00:00Z", to: "2026-06-29T10:05:00Z"})
+    assert date_only_view.selected_run.session_id == "session-100-b"
+    assert Enum.all?(date_only_view.rows, &(&1.at >= "2026-06-29T10:00:00Z" and &1.at <= "2026-06-29T10:05:00Z"))
   end
 
   test "build selects archived runs from the supplied list and falls back when the selection misses" do
@@ -206,7 +208,25 @@ defmodule RondoWeb.DashboardEventStreamTest do
     string_key_view = DashboardEventStream.build(string_key_payload, nil, [%{session_id: "session-201", started_at: @start_two}], 0, %{})
     assert string_key_view.selected_run["session_id"] == "session-201"
 
-    _ = DashboardEventStream.build(%{run_timelines: [%{"identifier" => "MT-202", "session_id" => "session-202", "timeline" => []}]}, nil, nil, 0, %{})
+    string_key_live_view =
+      DashboardEventStream.build(
+        %{
+          run_timelines: [
+            %{"identifier" => "MT-202", "session_id" => "finished", "started_at" => @start_one, "finished_at" => @start_two, "timeline" => []},
+            %{"identifier" => "MT-202", "session_id" => "in-progress", "started_at" => @start_two, "timeline" => []}
+          ]
+        },
+        %{"issue_identifier" => "MT-202", "session_id" => "missing"},
+        nil,
+        0,
+        %{}
+      )
+
+    assert string_key_live_view.selected_run["session_id"] == "in-progress"
+
+    empty_timeline_view = DashboardEventStream.build(%{run_timelines: [%{"identifier" => "MT-202", "session_id" => "session-202", "timeline" => []}]}, nil, nil, 0, %{})
+    assert empty_timeline_view.selected_run["session_id"] == "session-202"
+    assert empty_timeline_view.rows == []
   end
 
   test "build handles rich rows across search facets, sources, artifacts, and fallbacks" do
@@ -423,6 +443,7 @@ defmodule RondoWeb.DashboardEventStreamTest do
              "facet" => "tool",
              "model" => "glm-5.2",
              "from" => "2026-06-29T10:00:00Z",
+             "to" => "",
              "_target" => "query",
              "_csrf_token" => "token",
              "junk" => "drop me"
@@ -432,7 +453,8 @@ defmodule RondoWeb.DashboardEventStreamTest do
              "query" => "gate",
              "facet" => "tool",
              "model" => "glm-5.2",
-             "from" => "2026-06-29T10:00:00Z"
+             "from" => "2026-06-29T10:00:00Z",
+             "to" => ""
            }
   end
 

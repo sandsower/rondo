@@ -132,8 +132,13 @@ defmodule RondoWeb.DashboardEventStream do
     runs
     |> Enum.find(&same_run?(&1, session_id, started_at))
     |> case do
-      nil -> runs |> Enum.find(&is_nil(Map.get(&1, :finished_at))) || List.first(runs)
-      run -> run
+      nil ->
+        runs
+        |> Enum.find(&is_nil(Map.get(&1, :finished_at) || Map.get(&1, "finished_at"))) ||
+          List.first(runs)
+
+      run ->
+        run
     end
   end
 

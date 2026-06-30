@@ -581,11 +581,13 @@ body {
   color: var(--text-secondary);
   font-size: 11px;
 }
+.event-stream {
   display: flex;
   flex-direction: column;
   gap: 10px;
   min-height: 0;
   padding: 0 0 8px;
+}
 .event-table-wrap {
   overflow: auto;
   min-height: 0;
@@ -653,7 +655,7 @@ body {
 .event-summary {
   color: var(--text-secondary);
   white-space: normal;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   line-height: 1.4;
 }
 .event-summary code { font-family: var(--font-mono); font-size: 11px; background: var(--surface-2); padding: 1px 4px; border-radius: 3px; }
@@ -668,5 +670,5 @@ body {
 .event-artifacts {
   color: var(--text-muted);
   font-size: 11px;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
