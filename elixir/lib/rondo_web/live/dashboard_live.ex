@@ -1140,10 +1140,6 @@ defmodule RondoWeb.DashboardLive do
     |> ArchivedRuns.view(filters)
   end
 
-  defp sort_indicator(%{sort_by: field, sort_dir: "asc"}, field), do: "↑"
-  defp sort_indicator(%{sort_by: field, sort_dir: "desc"}, field), do: "↓"
-  defp sort_indicator(_filters, _field), do: ""
-
   defp archived_row_class(run, selected_issue, selected_issue_data) do
     selected? =
       (selected_issue == run.issue_identifier and selected_issue_data) &&
@@ -1179,9 +1175,6 @@ defmodule RondoWeb.DashboardLive do
   end
 
   defp format_duration_ms(_ms), do: "n/a"
-
-  defp format_cost(cost) when is_number(cost) and cost > 0, do: "$#{:erlang.float_to_binary(cost / 1.0, decimals: 4)}"
-  defp format_cost(_cost), do: "cost n/a"
 
   defp archive_activity_style(run) do
     total_tokens = get_in(run, [:tokens, :total_tokens]) || 0
