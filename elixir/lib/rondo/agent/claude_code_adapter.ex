@@ -12,7 +12,7 @@ defmodule Rondo.Agent.ClaudeCodeAdapter do
 
   alias Rondo.Agent.Adapter
   alias Rondo.Claude.{CLI, StreamParser}
-  alias Rondo.{Config, PathSafety}
+  alias Rondo.{Config, PathSafety, RemoteShell}
 
   @id "claude_code"
 
@@ -35,8 +35,8 @@ defmodule Rondo.Agent.ClaudeCodeAdapter do
   end
 
   @impl true
-  def probe(_opts \\ []) do
-    command_status = command_probe_status(Config.claude_command())
+  def probe(opts \\ []) do
+    command_status = command_probe_status(Config.claude_command(), opts)
 
     Adapter.probe_result(aggregate_probe_status([command_status, :ok, :ok]), %{
       command: command_status,
@@ -59,7 +59,7 @@ defmodule Rondo.Agent.ClaudeCodeAdapter do
         end)
 
       result =
-        with :ok <- validate_workspace(workspace) do
+        with :ok <- validate_workspace(workspace, opts) do
           invoke_cli(prompt, workspace, previous_run_ref, cli_opts)
         end
 
@@ -98,23 +98,47 @@ defmodule Rondo.Agent.ClaudeCodeAdapter do
     end
   end
 
-  defp command_probe_status(command) when is_binary(command) do
+  defp command_probe_status(command, opts) when is_binary(command) do
     command
     |> String.trim()
     |> case do
       "" -> :missing
-      trimmed -> command_binary_status(trimmed)
+      trimmed -> command_binary_status(trimmed, opts)
     end
   end
 
-  defp command_binary_status(command) do
+  defp command_binary_status(command, opts) do
     command
     |> String.split(~r/\s+/, parts: 2)
     |> List.first()
-    |> System.find_executable()
     |> case do
+      binary when is_binary(binary) and binary != "" ->
+        binary_status(binary, opts)
+
+      _ ->
+        :missing
+    end
+  end
+
+  defp binary_status(binary, opts) do
+    if RemoteShell.enabled?(opts) do
+      remote_binary_status(binary, opts)
+    else
+      local_binary_status(binary)
+    end
+  end
+
+  defp remote_binary_status(binary, opts) do
+    case RemoteShell.run("command -v #{RemoteShell.shell_escape(binary)}", opts) do
+      {_output, 0} -> :ok
+      _ -> :missing
+    end
+  end
+
+  defp local_binary_status(binary) do
+    case System.find_executable(binary) do
+      executable when is_binary(executable) -> :ok
       nil -> :missing
-      _path -> :ok
     end
   end
 
@@ -127,32 +151,52 @@ defmodule Rondo.Agent.ClaudeCodeAdapter do
     end
   end
 
-  defp validate_workspace(workspace) do
+  defp validate_workspace(workspace, opts) do
+    if RemoteShell.enabled?(opts) do
+      validate_remote_workspace(workspace)
+    else
+      validate_local_workspace(workspace)
+    end
+  end
+
+  defp validate_remote_workspace(workspace) do
+    if is_binary(workspace) and String.trim(workspace) != "" do
+      :ok
+    else
+      {:error, {:invalid_workspace_cwd, :not_a_directory}}
+    end
+  end
+
+  defp validate_local_workspace(workspace) do
     expanded = Path.expand(workspace)
     root = Path.expand(Config.workspace_root())
 
     with true <- File.dir?(expanded),
          {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded),
          {:ok, canonical_root} <- PathSafety.canonicalize(root) do
-      canonical_root_prefix = canonical_root <> "/"
-      expanded_root_prefix = root <> "/"
-
-      cond do
-        canonical_workspace == canonical_root ->
-          {:error, {:invalid_workspace_cwd, :workspace_equals_root}}
-
-        String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
-          :ok
-
-        String.starts_with?(expanded <> "/", expanded_root_prefix) ->
-          {:error, {:invalid_workspace_cwd, :symlink_escape}}
-
-        true ->
-          {:error, {:invalid_workspace_cwd, :outside_root}}
-      end
+      validate_workspace_paths(canonical_workspace, canonical_root, expanded, root)
     else
       false -> {:error, {:invalid_workspace_cwd, :not_a_directory}}
       {:error, {:path_canonicalize_failed, _path, reason}} -> {:error, {:invalid_workspace_cwd, reason}}
+    end
+  end
+
+  defp validate_workspace_paths(canonical_workspace, canonical_root, expanded, root) do
+    canonical_root_prefix = canonical_root <> "/"
+    expanded_root_prefix = root <> "/"
+
+    cond do
+      canonical_workspace == canonical_root ->
+        {:error, {:invalid_workspace_cwd, :workspace_equals_root}}
+
+      String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
+        :ok
+
+      String.starts_with?(expanded <> "/", expanded_root_prefix) ->
+        {:error, {:invalid_workspace_cwd, :symlink_escape}}
+
+      true ->
+        {:error, {:invalid_workspace_cwd, :outside_root}}
     end
   end
 

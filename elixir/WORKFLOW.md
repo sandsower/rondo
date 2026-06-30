@@ -50,6 +50,15 @@ model_routing:
   defaults:
     tier: standard
     mode: prefer
+  step_hints:
+    initial_spawn:
+      phase: planning
+      tier: frontier
+      mode: prefer
+    phases:
+      - phase: implementation
+        tier: standard
+        mode: prefer
   profiles:
     bulk_implementation:
       tier: light

@@ -444,13 +444,14 @@ defmodule Rondo.ReleaseLoop do
 
   defp maybe_run_release_gates(nil, _decision, _config, _opts, ledger), do: {:ok, ledger}
 
-  defp maybe_run_release_gates(workspace, %{action: :merge} = decision, config, _opts, ledger) when is_binary(workspace) do
+  defp maybe_run_release_gates(workspace, %{action: :merge} = decision, config, opts, ledger) when is_binary(workspace) do
     if Map.get(config, :run_configured_gates_before_push, true) do
       case Gates.run(Config.gates(), workspace,
              run_dir: Map.get(ledger || %{}, :run_dir),
              execution_id: "release-loop-merge",
              action_policy: true,
-             action_policy_evaluator: &ActionPolicy.evaluate/3
+             action_policy_evaluator: &ActionPolicy.evaluate/3,
+             worker_host: Keyword.get(opts, :worker_host)
            ) do
         {:ok, summary} ->
           ledger = record_release_gate_summary(ledger, decision, summary)
@@ -482,7 +483,7 @@ defmodule Rondo.ReleaseLoop do
       side_effect_id: "pr-merge:#{issue.id}:#{Map.get(pr, :number)}"
     }
 
-    case SideEffectPolicy.evaluate(side_effect, ledger: ledger, workspace: Keyword.get(opts, :workspace)) do
+    case SideEffectPolicy.evaluate(side_effect, ledger: ledger, workspace: Keyword.get(opts, :workspace), worker_host: Keyword.get(opts, :worker_host)) do
       {:ok, decision} ->
         {:ok, Map.get(decision, :ledger, ledger)}
 
