@@ -75,6 +75,7 @@ defmodule Rondo.TestSupport do
     case Process.whereis(RondoWeb.Endpoint) do
       pid when is_pid(pid) ->
         Process.unlink(pid)
+        ref = Process.monitor(pid)
 
         try do
           Supervisor.stop(pid, :shutdown, 2_000)
@@ -82,10 +83,25 @@ defmodule Rondo.TestSupport do
           :exit, _ -> :ok
         end
 
-        :ok
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+        after
+          2_000 -> :ok
+        end
+
+        await_http_server_shutdown()
 
       _ ->
-        :ok
+        await_http_server_shutdown()
+    end
+  end
+
+  defp await_http_server_shutdown do
+    if Process.whereis(RondoWeb.Endpoint) || Rondo.HttpServer.bound_port() do
+      Process.sleep(25)
+      await_http_server_shutdown()
+    else
+      :ok
     end
   end
 

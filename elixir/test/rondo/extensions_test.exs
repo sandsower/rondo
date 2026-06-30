@@ -754,53 +754,7 @@ defmodule Rondo.ExtensionsTest do
   end
 
   defp stop_endpoint do
-    # Trap exits to avoid test process crashing from linked endpoint shutdown
-    was_trapping = Process.flag(:trap_exit, true)
-
-    try do
-      # Terminate the supervisor child (prevents restart by Rondo.Supervisor)
-      try do
-        Supervisor.terminate_child(Rondo.Supervisor, Rondo.HttpServer)
-      catch
-        :exit, _ -> :ok
-      end
-
-      case Process.whereis(RondoWeb.Endpoint) do
-        pid when is_pid(pid) ->
-          Process.unlink(pid)
-
-          try do
-            Supervisor.stop(pid, :shutdown, 2_000)
-          catch
-            :exit, _ -> :ok
-          end
-
-          # Wait for the process to terminate
-          ref = Process.monitor(pid)
-
-          receive do
-            {:DOWN, ^ref, :process, ^pid, _} -> :ok
-          after
-            2_000 -> :ok
-          end
-
-        _ ->
-          :ok
-      end
-
-      # Drain any EXIT messages from linked processes
-      drain_exits()
-    after
-      Process.flag(:trap_exit, was_trapping)
-    end
-  end
-
-  defp drain_exits do
-    receive do
-      {:EXIT, _pid, _reason} -> drain_exits()
-    after
-      50 -> :ok
-    end
+    stop_default_http_server()
   end
 
   defp http_request(port, method, path, body \\ nil, extra_headers \\ []) do
