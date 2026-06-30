@@ -337,15 +337,22 @@ defmodule Rondo.ProcessProvider.Beislid do
     diff_source = opts |> Keyword.get(:changed_files_metadata, %{}) |> Map.get(:source)
 
     gate_sets = Enum.map(gate_sets, fn gate_set -> %{gate_set | gates: gates_for_stage(gate_set.gates, stage)} end)
-    {matched_sets, unmatched_sets} = Enum.split_with(gate_sets, &gate_set_matches?(&1, changed_files))
+    {path_matched_sets, unmatched_sets} = Enum.split_with(gate_sets, &gate_set_matches?(&1, changed_files))
+    {matched_sets, stage_empty_sets} = Enum.split_with(path_matched_sets, &(&1.gates != []))
     {gates, selected} = selected_gates_from_sets(matched_sets)
-    unmatched_files = unmatched_changed_files(changed_files, matched_sets)
+    unmatched_files = unmatched_changed_files(changed_files, path_matched_sets)
 
     %{
       gates: gates,
       selected: selected,
-      skipped: artifact.skipped ++ skipped_gate_sets(unmatched_sets),
-      warnings: artifact.warnings ++ selector_warnings(unmatched_files),
+      skipped:
+        artifact.skipped ++
+          skipped_gate_sets(unmatched_sets) ++
+          skipped_stage_gate_sets(stage_empty_sets, stage),
+      warnings:
+        artifact.warnings ++
+          selector_warnings(unmatched_files) ++
+          stage_selector_warnings(stage_empty_sets, stage),
       changed_files: changed_files,
       diff_source: diff_source,
       metadata:
@@ -353,6 +360,7 @@ defmodule Rondo.ProcessProvider.Beislid do
         |> Map.merge(%{
           selector_mode: "changed_files",
           matched_selectors: Enum.map(matched_sets, & &1.id),
+          stage_empty_selectors: Enum.map(stage_empty_sets, & &1.id),
           unmatched_changed_files: unmatched_files
         })
     }
@@ -397,6 +405,17 @@ defmodule Rondo.ProcessProvider.Beislid do
   defp skipped_gate_sets(gate_sets) do
     Enum.map(gate_sets, &%{name: &1.id, reason: "no changed files matched selectors: #{Enum.join(&1.paths, ", ")}"})
   end
+
+  defp skipped_stage_gate_sets(gate_sets, stage) do
+    Enum.map(gate_sets, &%{name: &1.id, reason: "selector matched changed files but no gates matched stage #{stage_label(stage)}"})
+  end
+
+  defp stage_selector_warnings(gate_sets, stage) do
+    Enum.map(gate_sets, &%{message: "provider gate selector matched changed files but selected no gates for stage", selector: &1.id, stage: stage_label(stage)})
+  end
+
+  defp stage_label(nil), do: "any"
+  defp stage_label(stage), do: to_string(stage)
 
   defp selector_warnings(changed_files) do
     Enum.map(changed_files, &%{message: "no provider gate selector matched changed file", path: &1})

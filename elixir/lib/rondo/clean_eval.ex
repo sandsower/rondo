@@ -209,8 +209,8 @@ defmodule Rondo.CleanEval do
 
   defp run_gates(context) do
     case select_gate_selection(context) do
-      {:ok, %{gates: []}} ->
-        %{status: :pass, gates: nil}
+      {:ok, %{gates: []} = gate_selection} ->
+        empty_gate_selection_outcome(gate_selection)
 
       {:ok, gate_selection} ->
         {action_policy_provider, gate_selection} = action_policy_provider_for_gates(gate_selection, context)
@@ -228,6 +228,25 @@ defmodule Rondo.CleanEval do
       {:error, reason} ->
         %{status: :error, reason: "gate_selection_failed #{cap(inspect(reason))}"}
     end
+  end
+
+  defp empty_gate_selection_outcome(gate_selection) do
+    metadata = Map.get(gate_selection, :metadata, %{})
+    changed_files = Map.get(gate_selection, :changed_files, [])
+
+    if Map.get(metadata, :selector_mode) == "changed_files" and changed_files != [] do
+      %{status: :error, reason: "gate_selection_empty #{cap(inspect(empty_gate_selection_reason(gate_selection)))}"}
+    else
+      %{status: :pass, gates: nil}
+    end
+  end
+
+  defp empty_gate_selection_reason(gate_selection) do
+    %{
+      changed_files: Map.get(gate_selection, :changed_files, []),
+      skipped: Map.get(gate_selection, :skipped, []),
+      warnings: Map.get(gate_selection, :warnings, [])
+    }
   end
 
   defp gates_outcome({:ok, summary}), do: %{status: :pass, gates: Gates.summary_to_json(summary)}
@@ -278,9 +297,14 @@ defmodule Rondo.CleanEval do
     else
       provider_id = provider_id(provider)
       Logger.warning("Process provider clean-eval gate selection failed provider=#{provider_id} reason=#{inspect(reason)}; falling back to native gates")
-      selection = ProcessProvider.select_gate_selection!(Native, opts)
 
-      {:ok, annotate_native_fallback(selection, provider_id, reason) |> Map.put(:action_policy_provider, Native)}
+      case ProcessProvider.select_gate_selection(Native, opts) do
+        {:ok, selection} ->
+          {:ok, annotate_native_fallback(selection, provider_id, reason) |> Map.put(:action_policy_provider, Native)}
+
+        {:error, native_reason} ->
+          {:error, {:native_fallback_gate_selection_failed, native_reason}}
+      end
     end
   end
 

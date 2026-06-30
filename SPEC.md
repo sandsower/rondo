@@ -757,6 +757,9 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `clean_eval.base_ref`: string or null, optional override for the patch metadata base ref
 - `clean_eval.gates`: list of gate maps or null; native-provider override for pre-PR clean-eval
   gates, where null falls back to top-level `gates` and `[]` means apply-only evaluation
+- Clean eval asks the configured `process_provider` for `pre_pr` gates. If provider selection
+  fails and `process_provider.required` is false, Rondo falls back to native gate selection;
+  invalid Beislið artifacts and required-provider failures fail closed instead of falling back.
 - `server.port` (extension): integer, optional; enables the optional HTTP server, `0` may be used
   for ephemeral local bind, and CLI `--port` overrides it
 
