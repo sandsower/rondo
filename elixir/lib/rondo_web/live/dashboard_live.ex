@@ -6,7 +6,7 @@ defmodule RondoWeb.DashboardLive do
   use Phoenix.LiveView, layout: {RondoWeb.Layouts, :app}
 
   alias Rondo.RunOutcome
-  alias RondoWeb.{ArchivedRuns, Endpoint, ObservabilityPubSub, Presenter}
+  alias RondoWeb.{ArchivedRuns, Endpoint, EventInspector, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
   @impl true
@@ -16,9 +16,6 @@ defmodule RondoWeb.DashboardLive do
       |> assign(:payload, load_payload())
       |> assign(:now, DateTime.utc_now())
       |> assign(:log_filters, default_log_filters())
-      |> assign(:event_filters, default_event_filters())
-      |> assign(:selected_event_index, 0)
-      |> assign(:selected_event_mode, :pretty)
       |> assign(:selected_issue, nil)
       |> assign(:selected_issue_data, nil)
       |> assign(:selected_outcome, nil)
@@ -26,6 +23,11 @@ defmodule RondoWeb.DashboardLive do
       |> assign(:selected_run_index, 0)
       |> assign(:selected_run_projection, nil)
       |> assign(:archived_filters, ArchivedRuns.default_filters())
+      |> assign(:event_query, "")
+      |> assign(:event_category, :all)
+      |> assign(:selected_event_index, nil)
+      |> assign(:selected_event_view, :summary)
+      |> assign(:selected_event_detail, nil)
 
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
@@ -74,7 +76,7 @@ defmodule RondoWeb.DashboardLive do
           if entry, do: assign(socket, :selected_issue_data, entry), else: socket
       end
 
-    {:noreply, socket}
+    {:noreply, maybe_refresh_selected_event_detail(socket)}
   end
 
   @impl true
@@ -92,11 +94,66 @@ defmodule RondoWeb.DashboardLive do
       |> assign(:selected_runs, nil)
       |> assign(:selected_run_index, 0)
       |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, entry))
-      |> assign(:selected_event_index, 0)
-      |> assign(:selected_event_mode, :pretty)
-      |> assign(:event_filters, default_event_filters())
+      |> assign(:selected_event_index, nil)
+      |> assign(:selected_event_view, :summary)
+      |> assign(:selected_event_detail, nil)
+      |> assign(:event_query, "")
+      |> assign(:event_category, :all)
 
     {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("filter_events", params, socket) do
+    filters = event_filters(params)
+
+    visible_event_indexes =
+      socket.assigns[:selected_issue_data]
+      |> event_entries(filters)
+      |> Enum.map(& &1.index)
+
+    socket =
+      socket
+      |> assign(:event_query, filters.query)
+      |> assign(:event_category, filters.category)
+
+    socket =
+      if socket.assigns[:selected_event_index] in visible_event_indexes do
+        maybe_refresh_selected_event_detail(socket)
+      else
+        socket
+        |> assign(:selected_event_index, nil)
+        |> assign(:selected_event_view, :summary)
+        |> assign(:selected_event_detail, nil)
+      end
+
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_event("select_event", %{"index" => index_str}, socket) do
+    case Integer.parse(index_str) do
+      {index, ""} when index >= 0 ->
+        case EventInspector.select_event_detail(socket.assigns.selected_issue_data, index) do
+          {:ok, detail} ->
+            {:noreply,
+             socket
+             |> assign(:selected_event_index, index)
+             |> assign(:selected_event_view, :summary)
+             |> assign(:selected_event_detail, detail)}
+
+          {:error, _reason} ->
+            {:noreply, reset_selected_event(socket)}
+        end
+
+      _ ->
+        {:noreply, reset_selected_event(socket)}
+    end
+  end
+
+  @impl true
+  def handle_event("toggle_event_view", %{"view" => view}, socket) do
+    {:noreply, assign(socket, :selected_event_view, parse_event_view(view))}
   end
 
   @impl true
@@ -111,7 +168,8 @@ defmodule RondoWeb.DashboardLive do
     {:noreply,
      socket
      |> assign(:payload, load_payload())
-     |> assign(:now, DateTime.utc_now())}
+     |> assign(:now, DateTime.utc_now())
+     |> maybe_refresh_selected_event_detail()}
   end
 
   def handle_event("select_archived", %{"identifier" => identifier}, socket) do
@@ -131,9 +189,7 @@ defmodule RondoWeb.DashboardLive do
        |> assign(:selected_run_index, latest_index)
        |> assign(:selected_runs, group.runs)
        |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, latest_run))
-       |> assign(:selected_event_index, 0)
-       |> assign(:selected_event_mode, :pretty)
-       |> assign(:event_filters, default_event_filters())
+       |> reset_event_filters()
        |> push_run_charts(group.runs)}
     else
       {:noreply, socket}
@@ -159,9 +215,7 @@ defmodule RondoWeb.DashboardLive do
          |> assign(:selected_run_index, selected_index)
          |> assign(:selected_runs, runs)
          |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, selected_run))
-         |> assign(:selected_event_index, 0)
-         |> assign(:selected_event_mode, :pretty)
-         |> assign(:event_filters, default_event_filters())
+         |> reset_event_filters()
          |> push_run_charts(runs)}
 
       _ ->
@@ -212,9 +266,7 @@ defmodule RondoWeb.DashboardLive do
        |> assign(:selected_outcome, selected_outcome(run_with_log))
        |> assign(:selected_run_index, index)
        |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, run))
-       |> assign(:selected_event_index, 0)
-       |> assign(:selected_event_mode, :pretty)
-       |> assign(:event_filters, default_event_filters())}
+       |> reset_event_filters()}
     else
       {:noreply, socket}
     end
@@ -234,25 +286,6 @@ defmodule RondoWeb.DashboardLive do
   end
 
   @impl true
-  def handle_event("filter_events", params, socket) do
-    {:noreply,
-     socket
-     |> assign(:event_filters, merge_event_filters(socket.assigns.event_filters, params))
-     |> assign(:selected_event_index, 0)}
-  end
-
-  @impl true
-  def handle_event("select_event", %{"index" => index_str}, socket) do
-    {:noreply, assign(socket, :selected_event_index, String.to_integer(index_str))}
-  end
-
-  @impl true
-  def handle_event("toggle_event_mode", _params, socket) do
-    mode = if socket.assigns.selected_event_mode == :raw, do: :pretty, else: :raw
-    {:noreply, assign(socket, :selected_event_mode, mode)}
-  end
-
-  @impl true
   def handle_event("close_panel", _params, socket) do
     {:noreply,
      socket
@@ -262,9 +295,7 @@ defmodule RondoWeb.DashboardLive do
      |> assign(:selected_runs, nil)
      |> assign(:selected_run_index, 0)
      |> assign(:selected_run_projection, nil)
-     |> assign(:selected_event_index, 0)
-     |> assign(:selected_event_mode, :pretty)
-     |> assign(:event_filters, default_event_filters())}
+     |> reset_event_filters()}
   end
 
   @impl true
@@ -1083,148 +1114,147 @@ defmodule RondoWeb.DashboardLive do
             </div>
           <% end %>
 
-          <% filtered_events = filtered_selected_event_log(@selected_issue_data, @event_filters) %>
-          <% selected_event = selected_event_entry(filtered_events, @selected_event_index) %>
-          <% max_hist_tokens = Enum.reduce(filtered_events, 0, fn entry, acc -> max(acc, selected_event_total_tokens(entry)) end) %>
-
           <div class="panel-stream-header">
-            <span class="panel-metric-label">Event stream</span>
-            <span class="muted" style="font-size: 11px;"><%= length(filtered_events) %> events</span>
+            <div>
+              <span class="panel-metric-label">Event inspector</span>
+              <p class="muted" style="font-size: 11px; margin-top: 4px;">Open a row to inspect the underlying prompt, tool call, result, or metadata.</p>
+            </div>
+            <span class="muted" style="font-size: 11px;"><%= length(event_entries(@selected_issue_data, %{query: @event_query, category: @event_category})) %> visible / <%= length(selected_event_log(@selected_issue_data)) %> total</span>
           </div>
 
-
-          <form class="event-toolbar" phx-change="filter_events">
-            <label class="logs-control">
-              <span class="logs-control-label">Search</span>
-              <input
-                type="search"
-                name="query"
-                value={@event_filters.query}
-                placeholder="Search event text"
-                class="logs-search-input"
-                phx-debounce="250"
-              />
-            </label>
-
-            <label class="logs-control">
-              <span class="logs-control-label">Role</span>
-              <select name="role" class="logs-select">
-                <option value="all" selected={@event_filters.role == "all"}>All roles</option>
-                <option value="assistant" selected={@event_filters.role == "assistant"}>Assistant</option>
-                <option value="user" selected={@event_filters.role == "user"}>User</option>
-                <option value="system" selected={@event_filters.role == "system"}>System</option>
-                <option value="tool" selected={@event_filters.role == "tool"}>Tool</option>
-                <option value="read" selected={@event_filters.role == "read"}>Read</option>
-                <option value="write" selected={@event_filters.role == "write"}>Write</option>
-                <option value="edit" selected={@event_filters.role == "edit"}>Edit</option>
-                <option value="grep" selected={@event_filters.role == "grep"}>Grep</option>
-                <option value="bash" selected={@event_filters.role == "bash"}>Bash</option>
-                <option value="linear" selected={@event_filters.role == "linear"}>Linear</option>
-                <option value="github" selected={@event_filters.role == "github"}>GitHub</option>
-              </select>
-            </label>
-
-            <div class="event-view-toggle">
-              <span class="logs-control-label">View</span>
-              <button type="button" class="subtle-button" phx-click="toggle_event_mode"><%= if @selected_event_mode == :raw, do: "Pretty", else: "Raw" %></button>
-            </div>
+          <form class="event-inspector-toolbar" phx-change="filter_events">
+            <input
+              type="search"
+              name="event_query"
+              value={@event_query}
+              aria-label="Search event inspector"
+              placeholder="Search prompts, tools, results, metadata..."
+              phx-debounce="200"
+            />
+            <select name="event_category" aria-label="Filter events by category">
+              <option value="all" selected={@event_category == :all}>All roles</option>
+              <option value="prompt" selected={@event_category == :prompt}>Prompt</option>
+              <option value="tool" selected={@event_category == :tool}>Tool</option>
+              <option value="result" selected={@event_category == :result}>Result</option>
+              <option value="gate" selected={@event_category == :gate}>Gate</option>
+              <option value="system" selected={@event_category == :system}>System</option>
+              <option value="other" selected={@event_category == :other}>Other</option>
+            </select>
           </form>
 
-
-          <% model_switches = model_change_events(selected_event_log(@selected_issue_data)) %>
-          <%= if model_switches != [] do %>
-            <div class="panel-stream-model-timeline">
-              <span class="panel-metric-label">Model switches</span>
-              <div class="model-timeline">
-                <div :for={switch <- model_switches} class="model-timeline-row">
-                  <span class="mono model-timeline-at"><%= switch.at || "n/a" %></span>
-                  <span class={provider_badge_class(switch.provider)}><%= switch.provider || "unknown" %></span>
-                  <span class="model-chip"><%= switch.model || "unknown" %></span>
-                  <span class="muted model-timeline-boundary"><%= switch.message || "model change" %></span>
-                </div>
-              </div>
-            </div>
-          <% end %>
-
-          <%= if filtered_events == [] do %>
-
-            <p class="empty-state">Waiting for agent activity...</p>
-          <% else %>
-            <div class="event-token-histogram" aria-hidden="true">
-              <%= for {entry, idx} <- Enum.with_index(filtered_events) do %>
+          <% visible_events = event_entries(@selected_issue_data, %{query: @event_query, category: @event_category}) %>
+          <div class="event-inspector-split">
+            <div class="event-stream event-stream-list" id="event-stream" phx-hook="ScrollBottom">
+              <%= if visible_events == [] do %>
+                <%= if selected_event_log(@selected_issue_data) == [] do %>
+                  <p class="empty-state">Waiting for agent activity...</p>
+                <% else %>
+                  <p class="empty-state">No events match the current filters.</p>
+                <% end %>
+              <% else %>
                 <button
+                  :for={entry <- visible_events}
                   type="button"
-                  class={"event-token-bar #{if idx == @selected_event_index, do: "event-token-bar-selected", else: ""}"}
+                  class={"event-row event-row-button #{if @selected_event_index == entry.index, do: "event-row-selected", else: ""}"}
                   phx-click="select_event"
-                  phx-value-index={idx}
-                  title={"#{to_string(entry.event)} · #{selected_event_total_tokens(entry)} tokens"}
-                  style={"height: #{event_histogram_height(entry, max_hist_tokens)}px"}
-                ></button>
+                  phx-value-index={entry.index}
+                >
+                  <span class={event_type_class(entry.event)}>
+                    <%= if tool_event?(entry.event) do %><svg class="event-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg><% end %><%= entry.event %>
+                  </span>
+                  <div class="event-row-message event-row-message-stack">
+                    <div class="event-row-message-meta">
+                      <span class="event-row-category"><%= entry.category_label %></span>
+                      <span class="muted"><%= format_event_time(entry.at) %></span>
+                    </div>
+                    <span><%= render_event_message(entry.message) %></span>
+                  </div>
+                </button>
               <% end %>
             </div>
 
-            <%= if selected_event do %>
-              <div class="event-detail-card">
+            <div class="event-detail-panel">
+              <%= if @selected_event_detail do %>
                 <div class="event-detail-header">
-                  <div>
-                    <p class="panel-metric-label"><%= selected_event.event %></p>
-                    <p class="muted" style="font-size: 12px;"><%= selected_event.at %></p>
+                  <div class="detail-stack">
+                    <span class={event_type_class(@selected_event_detail.display_event || @selected_event_detail.event)}><%= @selected_event_detail.event || @selected_event_detail.display_event || "n/a" %></span>
+                    <div class="event-row-message-meta">
+                      <span class="event-row-category"><%= @selected_event_detail.category_label %></span>
+                      <span class="muted"><%= @selected_event_detail.at || "n/a" %></span>
+                    </div>
                   </div>
                   <div class="event-detail-actions">
-                    <button type="button" class="subtle-button" phx-click="toggle_event_mode"><%= if @selected_event_mode == :raw, do: "Pretty", else: "Raw" %></button>
+                    <button type="button" class={"subtle-button #{if @selected_event_view == :summary, do: "subtle-button-active", else: ""}"} phx-click="toggle_event_view" phx-value-view="summary">Summary</button>
+                    <button type="button" class={"subtle-button #{if @selected_event_view == :raw, do: "subtle-button-active", else: ""}"} phx-click="toggle_event_view" phx-value-view="raw">Raw</button>
                     <button
                       type="button"
                       class="subtle-button"
-                      data-label="Copy"
-                      data-copy={selected_event_raw_text(selected_event)}
-                      onclick="event.stopPropagation(); navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);"
+                      data-label="Copy raw"
+                      data-raw-text={@selected_event_detail.raw_json || ""}
+                      onclick="event.stopPropagation(); const text = this.dataset.rawText || ''; const label = this.dataset.label || 'Copy raw'; const finish = () => { this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = label }, 1200); }; const fallback = () => { const textarea = document.createElement('textarea'); textarea.value = text; textarea.setAttribute('readonly', ''); textarea.style.position = 'fixed'; textarea.style.opacity = '0'; document.body.appendChild(textarea); textarea.focus(); textarea.select(); document.execCommand('copy'); textarea.remove(); finish(); }; if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(finish).catch(fallback); } else { fallback(); }"
                     >
-                      Copy
+                      Copy raw
                     </button>
                   </div>
                 </div>
-                <div class="event-detail-body">
-                  <div class="event-detail-metadata">
-                    <span class={event_type_class(selected_event.event)}><%= selected_event.event %></span>
-                    <span class="muted">Tokens <%= selected_event_total_tokens(selected_event) %></span>
-                    <%= if selected_event_token_cost(selected_event) do %>
-                      <span class="muted">Cost <%= format_cost(selected_event_token_cost(selected_event)) %></span>
-                    <% end %>
-                  </div>
-                  <%= if @selected_event_mode == :raw do %>
-                    <pre class="code-panel"><%= selected_event_raw_text(selected_event) %></pre>
-                  <% else %>
-                    <div class="event-detail-message"><%= render_event_message(selected_event.message) %></div>
+
+                <div class="event-detail-metadata">
+                  <%= for {label, value} <- [{"Timestamp", @selected_event_detail.at}, {"Session", @selected_event_detail.session_id}, {"Run", @selected_event_detail.run_id}, {"Turn", @selected_event_detail.turn_id || @selected_event_detail.turn_count}, {"Adapter", @selected_event_detail.adapter}, {"Provider", @selected_event_detail.provider}, {"Model", @selected_event_detail.model}, {"Source path", @selected_event_detail.source_path}] do %>
+                    <div class="event-detail-metric">
+                      <span class="panel-metric-label"><%= label %></span>
+                      <span class="mono event-detail-value"><%= value || "n/a" %></span>
+                    </div>
                   <% end %>
                 </div>
-              </div>
-            <% end %>
 
-            <div class="event-stream" id="event-stream" phx-hook="ScrollBottom">
-              <div :for={{entry, idx} <- Enum.with_index(filtered_events)} class={"event-row #{if idx == @selected_event_index, do: "event-row-selected", else: ""}"} phx-click="select_event" phx-value-index={idx}>
-                <span class={event_type_class(entry.event)}>
-                  <%= if tool_event?(entry.event) do %><svg class="event-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg><% end %><%= entry.event %>
-                </span>
-
-                <div class="detail-stack">
-                  <span class="event-text" title={entry.message}><%= render_event_message(entry.message) %></span>
-                  <div class="event-meta-row">
-                    <span class="muted event-meta"><%= entry.at || "n/a" %></span>
-                    <%= if entry.tokens do %>
-                      <span class="token-chip numeric">
-                        Δ in <%= format_int(entry.tokens.input_tokens) %> / out <%= format_int(entry.tokens.output_tokens) %> / cached <%= format_int(entry.tokens.cached_tokens) %>
-                      </span>
-                    <% end %>
-                    <%= if entry.model_change do %>
-                      <span class={provider_badge_class(entry.model_change.provider)}><%= entry.model_change.provider || "unknown" %></span>
-                      <span class="model-chip"><%= entry.model_change.model || "unknown" %></span>
+                <div class="event-detail-body">
+                  <div class="event-detail-summary">
+                    <span class="panel-metric-label">Summary</span>
+                    <p><%= @selected_event_detail.summary || "No summary available." %></p>
+                    <%= if @selected_event_detail.has_redacted_content? do %>
+                      <p class="muted" style="font-size: 11px; margin-top: 8px;">Raw content is rendered from the ledger’s redacted event stream.</p>
                     <% end %>
                   </div>
-                </div>
 
-              </div>
+                  <%= if @selected_event_view == :raw do %>
+                    <pre id="selected-event-raw" class="code-panel event-raw-block"><%= @selected_event_detail.raw_json %></pre>
+                  <% else %>
+                    <div class="event-detail-structured">
+                      <div class="event-detail-group">
+                        <span class="panel-metric-label">Structured fields</span>
+                        <div class="event-detail-field-list">
+                          <%= for {label, value} <- @selected_event_detail.structured_fields do %>
+                            <div class="event-detail-field">
+                              <span class="muted"><%= label %></span>
+                              <span class="mono"><%= value || "n/a" %></span>
+                            </div>
+                          <% end %>
+                        </div>
+                      </div>
+
+                      <%= if @selected_event_detail.artifact_links != [] do %>
+                        <div class="event-detail-group">
+                          <span class="panel-metric-label">Artifact links</span>
+                          <div class="event-detail-artifacts">
+                            <%= for artifact <- @selected_event_detail.artifact_links do %>
+                              <div class="event-detail-artifact">
+                                <span class="mono"><%= artifact.label %></span>
+                                <span class="muted"><%= artifact.path %></span>
+                              </div>
+                            <% end %>
+                          </div>
+                        </div>
+                      <% end %>
+
+                      <p class="muted event-detail-raw-hint">Raw payload loads on demand in the Raw view.</p>
+                    </div>
+                  <% end %>
+                </div>
+              <% else %>
+                <p class="empty-state">Select an event to inspect the underlying prompt, tool call, or result.</p>
+              <% end %>
             </div>
-          <% end %>
+          </div>
         <% else %>
           <p class="empty-state">Issue not currently running.</p>
         <% end %>
@@ -1462,10 +1492,6 @@ defmodule RondoWeb.DashboardLive do
     %{query: "", status: "all", window: "all", sort_by: "date", sort_dir: "desc"}
   end
 
-  defp default_event_filters do
-    %{query: "", role: "all"}
-  end
-
   defp merge_log_filters(filters, params) do
     %{
       query: normalize_filter_text(Map.get(params, "query", Map.get(filters, :query, ""))),
@@ -1473,13 +1499,6 @@ defmodule RondoWeb.DashboardLive do
       window: normalize_filter_choice(Map.get(params, "window", Map.get(filters, :window, "all")), "all"),
       sort_by: Map.get(filters, :sort_by, "date"),
       sort_dir: Map.get(filters, :sort_dir, "desc")
-    }
-  end
-
-  defp merge_event_filters(filters, params) do
-    %{
-      query: normalize_filter_text(Map.get(params, "query", Map.get(filters, :query, ""))),
-      role: normalize_filter_choice(Map.get(params, "role", Map.get(filters, :role, "all")), "all")
     }
   end
 
@@ -1824,60 +1843,6 @@ defmodule RondoWeb.DashboardLive do
 
   defp dashboard_timestamp(_), do: nil
 
-  defp filtered_selected_event_log(selected_issue_data, filters) do
-    selected_event_log(selected_issue_data)
-    |> Enum.filter(&dashboard_event_matches?(&1, filters))
-  end
-
-  defp dashboard_event_matches?(entry, filters) do
-    query = filters[:query] || ""
-    role = filters[:role] || "all"
-
-    role_match? = role == "all" or to_string(entry.event) == role
-
-    query_match? =
-      if query == "" do
-        true
-      else
-        haystack =
-          [entry.event, entry.message]
-          |> Enum.reject(&is_nil/1)
-          |> Enum.map_join(" ", &String.downcase(to_string(&1)))
-
-        String.contains?(haystack, String.downcase(query))
-      end
-
-    role_match? and query_match?
-  end
-
-  defp selected_event_entry(events, index) when is_list(events) do
-    Enum.at(events, index) || List.first(events)
-  end
-
-  defp selected_event_tokens(%{tokens: tokens}) when is_map(tokens), do: tokens
-  defp selected_event_tokens(_), do: %{}
-
-  defp selected_event_total_tokens(entry) do
-    tokens = selected_event_tokens(entry)
-    Map.get(tokens, :total_tokens) || Map.get(tokens, "total_tokens") || 0
-  end
-
-  defp selected_event_token_cost(entry) do
-    tokens = selected_event_tokens(entry)
-    Map.get(tokens, :cost) || Map.get(tokens, "cost")
-  end
-
-  defp selected_event_raw_text(%{message: message}) when is_binary(message), do: message
-  defp selected_event_raw_text(_), do: ""
-
-  defp event_histogram_height(_entry, 0), do: 8
-
-  defp event_histogram_height(entry, max_tokens) do
-    tokens = selected_event_total_tokens(entry)
-    ratio = if max_tokens > 0, do: tokens / max_tokens, else: 0
-    max(trunc(ratio * 100), if(tokens > 0, do: 8, else: 2))
-  end
-
   defp format_speed(nil), do: "n/a"
   defp format_speed(speed) when is_number(speed), do: "#{Float.round(speed, 1)} tok/s"
   defp format_speed(_), do: "n/a"
@@ -1959,6 +1924,61 @@ defmodule RondoWeb.DashboardLive do
 
   defp selected_event_log(selected_issue_data) do
     Map.get(selected_issue_data, :event_log, []) || []
+  end
+
+  defp event_entries(selected_issue_data, filters) do
+    EventInspector.event_entries(selected_issue_data, filters)
+  end
+
+  defp event_filters(params) when is_map(params) do
+    %{
+      query: Map.get(params, "event_query") || Map.get(params, :event_query) || "",
+      category: parse_event_category(Map.get(params, "event_category") || Map.get(params, :event_category))
+    }
+  end
+
+  @event_category_map %{
+    "all" => :all,
+    "prompt" => :prompt,
+    "tool" => :tool,
+    "result" => :result,
+    "gate" => :gate,
+    "system" => :system,
+    "other" => :other
+  }
+
+  defp parse_event_category(nil), do: :all
+  defp parse_event_category(category) when is_atom(category), do: category
+  defp parse_event_category(category) when is_binary(category), do: Map.get(@event_category_map, category, :all)
+  defp parse_event_category(category), do: category |> to_string() |> parse_event_category()
+
+  defp parse_event_view("raw"), do: :raw
+  defp parse_event_view(_), do: :summary
+
+  defp maybe_refresh_selected_event_detail(%{assigns: %{selected_issue_data: data, selected_event_index: index}} = socket)
+       when not is_nil(index) and is_map(data) do
+    case EventInspector.select_event_detail(data, index) do
+      {:ok, detail} -> assign(socket, :selected_event_detail, detail)
+      {:error, _reason} -> assign(socket, :selected_event_detail, nil)
+    end
+  end
+
+  defp maybe_refresh_selected_event_detail(socket), do: socket
+
+  defp reset_selected_event(socket) do
+    socket
+    |> assign(:selected_event_index, nil)
+    |> assign(:selected_event_view, :summary)
+    |> assign(:selected_event_detail, nil)
+  end
+
+  defp reset_event_filters(socket) do
+    socket
+    |> assign(:selected_event_index, nil)
+    |> assign(:selected_event_view, :summary)
+    |> assign(:selected_event_detail, nil)
+    |> assign(:event_query, "")
+    |> assign(:event_category, :all)
   end
 
   defp selected_outcome(entry) when is_map(entry) do
@@ -2245,6 +2265,7 @@ defmodule RondoWeb.DashboardLive do
 
   defp render_event_message(text) when is_binary(text) do
     text
+    |> Rondo.Redaction.redact()
     |> Phoenix.HTML.html_escape()
     |> Phoenix.HTML.safe_to_string()
     |> String.replace(~r/`([^`]+)`/, "<code>\\1</code>")
@@ -2254,22 +2275,26 @@ defmodule RondoWeb.DashboardLive do
 
   @tool_events ~w(linear github bash read write edit grep glob agent tool)a
 
-  defp tool_event?(event), do: event in @tool_events
+  defp tool_event?(event), do: event in [:tool_started, :tool_updated, :tool_completed] or event in @tool_events
 
-  defp event_type_class(event) do
-    base = "event-row-type mono"
+  defp event_type_class(event), do: "event-row-type mono #{event_type_variant(event)}"
 
-    case event do
-      :linear -> "#{base} event-type-linear"
-      :github -> "#{base} event-type-github"
-      e when e in [:bash, :read, :write, :edit, :grep, :glob, :agent, :tool] -> "#{base} event-type-tool"
-      e when e in [:error, :fail] -> "#{base} event-type-danger"
-      e when e in [:session_started, :claude_starting] -> "#{base} event-type-success"
-      e when e in [:result] -> "#{base} event-type-muted"
-      :rate_limit -> "#{base} event-type-danger"
-      _ -> base
-    end
-  end
+  defp event_type_variant(:linear), do: "event-type-linear"
+  defp event_type_variant(:github), do: "event-type-github"
+
+  defp event_type_variant(event) when event in [:tool_started, :tool_updated, :tool_completed, :bash, :read, :write, :edit, :grep, :glob, :agent, :tool],
+    do: "event-type-tool"
+
+  defp event_type_variant(event) when event in [:gates_completed, :gates_reused, :session_started, :claude_starting],
+    do: "event-type-success"
+
+  defp event_type_variant(event) when event in [:error, :fail, :rate_limit],
+    do: "event-type-danger"
+
+  defp event_type_variant(event) when event in [:result, :invocation_completed, :turn_completed, :final_report, :final_report_validated],
+    do: "event-type-muted"
+
+  defp event_type_variant(_event), do: ""
 
   defp schedule_runtime_tick do
     Process.send_after(self(), :runtime_tick, @runtime_tick_ms)

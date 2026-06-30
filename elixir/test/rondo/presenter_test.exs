@@ -49,6 +49,8 @@ defmodule Rondo.PresenterTest do
           exit_reason: "exited: gate failed",
           turn_count: 1,
           latest_gate: latest_gate,
+          run_id: "archived-run-id",
+          run_dir: "/tmp/rondo/.rondo_runs/MT-ARCHIVE-GATE/run",
           tokens: %{input_tokens: 1, output_tokens: 2, total_tokens: 3}
         }
       ],
@@ -60,8 +62,15 @@ defmodule Rondo.PresenterTest do
     on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
 
     payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
-    assert payload.running |> hd() |> Map.fetch!(:latest_gate) |> Map.fetch!(:status) == :fail
-    assert payload.archived |> hd() |> Map.fetch!(:runs) |> hd() |> Map.fetch!(:latest_gate) |> Map.fetch!(:status) == :fail
+    running_entry = hd(payload.running)
+    archived_entry = payload.archived |> hd() |> Map.fetch!(:runs) |> hd()
+
+    assert running_entry.run_id == nil
+    assert running_entry.run_dir == nil
+    assert running_entry.latest_gate.status == :fail
+    assert archived_entry.run_id == "archived-run-id"
+    assert archived_entry.run_dir == "/tmp/rondo/.rondo_runs/MT-ARCHIVE-GATE/run"
+    assert archived_entry.latest_gate.status == :fail
 
     assert {:ok, issue_payload} = RondoWeb.Presenter.issue_payload("MT-GATE", server_name, 1_000)
     assert issue_payload.running.latest_gate.status == :fail
@@ -388,6 +397,9 @@ defmodule Rondo.PresenterTest do
 
     payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
     assert [%{identifier: "MT-PRESENTER-TL", timeline: timeline}] = payload.run_timelines
+    [running_entry] = payload.running
+    assert running_entry.run_id == ledger.run_id
+    assert running_entry.run_dir == ledger.run_dir
     kinds = Enum.map(timeline, & &1.kind)
     assert "dispatch" in kinds
     assert "turn_started" in kinds
