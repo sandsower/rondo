@@ -404,6 +404,121 @@ defmodule Rondo.PresenterTest do
     assert RondoWeb.Presenter.run_duration_comparison(runs).labels == ["Run 1", "Run 2", "Run 3 (11:14)"]
   end
 
+  test "state payload exposes flat archived run table metadata" do
+    snapshot = %{
+      running: [],
+      retrying: [],
+      paused: [],
+      archived: [
+        %{
+          issue_id: "issue-archived-1",
+          identifier: "MT-ARCH-1",
+          issue_title: "Fix archive visibility",
+          issue_url: "https://linear.app/example/MT-ARCH-1",
+          project: "rondo-intake",
+          repo: "sandsower/rondo",
+          session_id: "session-arch-1",
+          state: "Done",
+          started_at: ~U[2026-06-28 10:00:00Z],
+          finished_at: ~U[2026-06-28 10:12:30Z],
+          exit_reason: "completed",
+          turn_count: 3,
+          latest_gate: %{status: :pass},
+          model_routing: %{resolved: %{model: "openrouter/anthropic/claude-sonnet-4"}},
+          adapter: "pi",
+          tokens: %{input_tokens: 100, output_tokens: 25, total_tokens: 125},
+          cost: 0.015
+        },
+        %{
+          issue_id: "issue-archived-2",
+          identifier: "MT-ARCH-2",
+          state: "In Progress",
+          started_at: ~U[2026-06-29 11:00:00Z],
+          finished_at: ~U[2026-06-29 11:01:00Z],
+          exit_reason: "exited: gate failed",
+          turn_count: 1,
+          latest_gate: %{"status" => "fail"},
+          tokens: %{total_tokens: 75},
+          adapter: "codex"
+        }
+      ],
+      claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    server_name = Module.concat(__MODULE__, :ArchivedTableSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+
+    assert [failed, completed] = payload.archived_table
+    assert failed.issue_identifier == "MT-ARCH-2"
+    assert failed.status == "failed"
+    assert failed.last_meaningful_result == "gates fail"
+    assert failed.model == "codex"
+    assert completed.issue_title == "Fix archive visibility"
+    assert completed.provider == "openrouter"
+    assert completed.duration_ms == 750_000
+    assert completed.linear_url == "https://linear.app/example/MT-ARCH-1"
+  end
+
+  test "archived runs table filters, sorts, and paginates" do
+    rows = [
+      %{
+        issue_identifier: "MT-1",
+        issue_title: "Searchable logs",
+        status: "completed",
+        outcome: "completed",
+        project: "alpha",
+        model: "sonnet",
+        provider: "openrouter",
+        finished_at: "2026-06-28T10:00:00Z",
+        started_at: "2026-06-28T09:00:00Z",
+        duration_ms: 3_600_000,
+        tokens: %{total_tokens: 100},
+        last_meaningful_result: "completed"
+      },
+      %{
+        issue_identifier: "MT-2",
+        issue_title: "Important failure",
+        status: "failed",
+        outcome: "exited: boom",
+        project: "alpha",
+        model: "codex",
+        provider: "codex",
+        finished_at: "2026-06-29T10:00:00Z",
+        started_at: "2026-06-29T09:59:00Z",
+        duration_ms: 60_000,
+        tokens: %{total_tokens: 25},
+        last_meaningful_result: "gates fail"
+      },
+      %{
+        issue_identifier: "MT-3",
+        issue_title: "Other",
+        status: "completed",
+        outcome: "completed",
+        project: "beta",
+        model: "sonnet",
+        provider: "openrouter",
+        finished_at: "2026-06-27T10:00:00Z",
+        started_at: "2026-06-27T09:00:00Z",
+        duration_ms: 3_600_000,
+        tokens: %{total_tokens: 500},
+        last_meaningful_result: "completed"
+      }
+    ]
+
+    view = RondoWeb.ArchivedRuns.view(rows, %{search: "failure", status: "failed", sort_by: "ended", sort_dir: "desc"})
+    assert view.total == 1
+    assert [%{issue_identifier: "MT-2"}] = view.rows
+    assert [%{issue_identifier: "MT-2"}] = view.recent_failures
+
+    view = RondoWeb.ArchivedRuns.view(rows, %{model: "sonnet", sort_by: "tokens", sort_dir: "desc", page_size: 1})
+    assert view.total == 2
+    assert view.page_count == 2
+    assert [%{issue_identifier: "MT-3"}] = view.rows
+  end
+
   defp tmp_dir(name) do
     Path.join(System.tmp_dir!(), "rondo-#{name}-#{System.unique_integer([:positive])}")
   end

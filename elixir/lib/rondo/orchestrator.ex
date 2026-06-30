@@ -2878,6 +2878,11 @@ defmodule Rondo.Orchestrator do
       %{
         issue_id: issue && issue.id,
         identifier: identifier,
+        issue_title: issue && issue.title,
+        issue_url: issue && issue.url,
+        project: Config.linear_project_slug(),
+        repo: tracker_repo(),
+        workspace: Map.get(running_entry, :workspace),
         run_id: Map.get(running_entry, :run_id),
         run_dir: Map.get(running_entry, :run_dir),
         session_id: Map.get(running_entry, :session_id),
@@ -2893,6 +2898,7 @@ defmodule Rondo.Orchestrator do
           output_tokens: Map.get(running_entry, :claude_output_tokens, 0),
           total_tokens: Map.get(running_entry, :claude_total_tokens, 0)
         },
+        cost: Map.get(running_entry, :claude_last_reported_cost, 0),
         latest_gate: Map.get(running_entry, :latest_gate),
         event_log: Map.get(running_entry, :event_log, [])
       }
@@ -3212,7 +3218,7 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  @archive_keys ~w(issue_id identifier run_id run_dir session_id state started_at finished_at exit_reason non_active_state turn_count tokens latest_gate event_log model_routing adapter)
+  @archive_keys ~w(issue_id identifier issue_title issue_url project repo workspace pr_url run_id run_dir session_id state started_at finished_at exit_reason non_active_state turn_count tokens cost latest_gate event_log model_routing adapter)
   @token_keys ~w(input_tokens output_tokens total_tokens)
   @event_keys ~w(at event message tokens)
 
