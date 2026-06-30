@@ -4,6 +4,7 @@ defmodule RondoWeb.Presenter do
   """
 
   alias Rondo.{Config, ModelUsage, Orchestrator, RunTimeline}
+  alias RondoWeb.ResultSummary
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
@@ -147,6 +148,8 @@ defmodule RondoWeb.Presenter do
       turn_count: Map.get(entry, :turn_count, 0),
       last_event: entry.last_claude_event,
       last_message: summarize_message(entry.last_claude_message),
+      last_result_payload: result_payload(entry),
+      final_report: Map.get(entry, :final_report),
       started_at: iso8601(entry.started_at),
       last_event_at: iso8601(entry.last_claude_timestamp),
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
@@ -198,6 +201,8 @@ defmodule RondoWeb.Presenter do
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       model_routing: Map.get(entry, :model_routing),
       model_fallback: Map.get(entry, :model_fallback),
+      final_report: Map.get(entry, :final_report),
+      last_result_payload: result_payload(entry),
       suggested_responses: guidance_responses_from_interrupt(interrupt),
       upcoming_transitions: Map.get(interrupt, :upcoming_transitions, %{}),
       interrupt: interrupt,
@@ -234,7 +239,9 @@ defmodule RondoWeb.Presenter do
       :stale_reason,
       :revalidated_at,
       :tokens,
-      :event_log
+      :event_log,
+      :final_report,
+      :last_result_payload
     ])
     |> Map.merge(%{
       guidance_severity: Map.get(interrupt, :guidance_severity),
@@ -253,6 +260,8 @@ defmodule RondoWeb.Presenter do
       started_at: iso8601(running.started_at),
       last_event: running.last_claude_event,
       last_message: summarize_message(running.last_claude_message),
+      last_result_payload: result_payload(running),
+      final_report: Map.get(running, :final_report),
       last_event_at: iso8601(running.last_claude_timestamp),
       latest_gate: gate_payload(Map.get(running, :latest_gate)),
       model_routing: Map.get(running, :model_routing),
@@ -402,6 +411,7 @@ defmodule RondoWeb.Presenter do
       %{
         issue_identifier: identifier,
         latest_result: latest.exit_reason,
+        latest_result_payload: Map.get(latest, :final_report),
         latest_finished_at: latest.finished_at,
         total_tokens: Enum.reduce(runs, 0, fn r, acc -> acc + r.tokens.total_tokens end),
         run_count: length(runs),
@@ -428,6 +438,8 @@ defmodule RondoWeb.Presenter do
       tokens: entry.tokens,
       model_routing: Map.get(entry, :model_routing),
       adapter: Map.get(entry, :adapter),
+      final_report: Map.get(entry, :final_report),
+      last_result_payload: Map.get(entry, :final_report),
       filename: run_filename(entry.started_at)
     }
   end
@@ -506,8 +518,8 @@ defmodule RondoWeb.Presenter do
     ]
   end
 
-  defp summarize_message(%{message: message}) when is_binary(message), do: message
-  defp summarize_message(message) when is_binary(message), do: message
+  defp summarize_message(%{message: message}), do: ResultSummary.preview(message)
+  defp summarize_message(message) when is_binary(message), do: ResultSummary.preview(message)
   defp summarize_message(_message), do: nil
 
   defp due_at_iso8601(due_in_ms) when is_integer(due_in_ms) do
@@ -524,6 +536,16 @@ defmodule RondoWeb.Presenter do
   end
 
   defp guidance_responses_from_interrupt(_interrupt), do: []
+
+  defp result_payload(entry) when is_map(entry) do
+    Map.get(entry, :final_report) ||
+      Map.get(entry, "final_report") ||
+      case Map.get(entry, :last_claude_message) || Map.get(entry, "last_claude_message") do
+        %{message: message} -> message
+        %{"message" => message} -> message
+        _ -> nil
+      end
+  end
 
   defp state_mismatch?(paused_state, tracker_state) when is_binary(paused_state) and is_binary(tracker_state),
     do: paused_state != tracker_state
