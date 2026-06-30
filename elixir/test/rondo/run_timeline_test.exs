@@ -115,6 +115,31 @@ defmodule Rondo.RunTimelineTest do
     assert step.summary =~ "resolved planning tier frontier"
   end
 
+  test "projects planning_completed checkpoints as planning phase steps" do
+    {ledger, issue} = create_ledger!("timeline-planning-completed")
+
+    _ledger = write_checkpoint!(ledger, :planning_completed, %{summary: "planning wrapped"}, @turn1_started)
+
+    run = %{
+      identifier: issue.identifier,
+      run_id: ledger.run_id,
+      run_dir: ledger.run_dir,
+      session_id: "session-planning-completed",
+      started_at: @start,
+      finished_at: @finished,
+      exit_reason: "completed",
+      turn_count: 1,
+      event_log: []
+    }
+
+    projection = RunTimeline.project_run(run)
+    step = Enum.find(projection.timeline, &(&1.kind == "planning_completed"))
+
+    assert step.phase == "planning"
+    assert step.summary == "planning wrapped"
+    assert step.status == "completed"
+  end
+
   test "projects multi-turn runs with turn and gate boundaries in order" do
     {ledger, issue} = create_ledger!("timeline-multi-turn")
 
