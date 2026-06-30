@@ -65,6 +65,60 @@ defmodule Rondo.PresenterTest do
     assert issue_payload.running.latest_gate.status == :fail
   end
 
+  test "archived payload normalizes finished outcomes for rows, charts, and detail drawers" do
+    snapshot = %{
+      running: [],
+      retrying: [],
+      archived: [
+        archived_run("MT-SUCCESS", "completed", "In Progress", ~U[2026-05-27 11:10:00Z], 10),
+        archived_run("MT-REVIEW", "terminated", "Human Review", ~U[2026-05-27 11:20:00Z], 20),
+        archived_run("MT-DONE", "terminated", "Done", ~U[2026-05-27 11:30:00Z], 30),
+        archived_run("MT-FAILED", "failed", "In Progress", ~U[2026-05-27 11:40:00Z], 40),
+        archived_run("MT-PAUSED", "paused", "Blocked", ~U[2026-05-27 11:50:00Z], 50),
+        archived_run("MT-TERM", "terminated", "In Progress", ~U[2026-05-27 12:00:00Z], 60)
+      ],
+      claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    server_name = Module.concat(__MODULE__, :OutcomeSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+    outcomes = payload.archived |> Enum.map(&{&1.issue_identifier, &1.latest_outcome}) |> Map.new()
+
+    assert outcomes["MT-SUCCESS"] == %{
+             kind: "success",
+             label: "success",
+             class: "state-badge state-badge-active",
+             detail: nil
+           }
+
+    assert outcomes["MT-REVIEW"] == %{
+             kind: "review_handoff",
+             label: "review handoff",
+             class: "state-badge state-badge-handoff",
+             detail: "issue → Human Review"
+           }
+
+    assert outcomes["MT-DONE"] == %{
+             kind: "merged_done",
+             label: "merged/done",
+             class: "state-badge state-badge-active",
+             detail: "issue → Done"
+           }
+
+    assert outcomes["MT-FAILED"].kind == "failed"
+    assert outcomes["MT-PAUSED"].kind == "blocked_paused"
+    assert outcomes["MT-TERM"].kind == "terminated"
+
+    assert RondoWeb.Presenter.run_outcomes(payload.archived) == %{
+             labels: ["MT-TERM", "MT-PAUSED", "MT-FAILED", "MT-DONE", "MT-REVIEW", "MT-SUCCESS"],
+             values: [60, 50, 40, 30, 20, 10],
+             colors: ["terminated", "blocked_paused", "failed", "merged_done", "review_handoff", "success"]
+           }
+  end
+
   test "state and issue API payloads expose paused interrupts" do
     snapshot = %{
       running: [],
@@ -334,5 +388,20 @@ defmodule Rondo.PresenterTest do
 
     assert RondoWeb.Presenter.run_token_comparison(runs).labels == ["Run 1", "Run 2", "Run 3 (11:14)"]
     assert RondoWeb.Presenter.run_duration_comparison(runs).labels == ["Run 1", "Run 2", "Run 3 (11:14)"]
+  end
+
+  defp archived_run(identifier, exit_reason, state, finished_at, total_tokens) do
+    %{
+      issue_id: "issue-#{identifier}",
+      identifier: identifier,
+      session_id: "session-#{identifier}",
+      state: state,
+      started_at: DateTime.add(finished_at, -600, :second),
+      finished_at: finished_at,
+      exit_reason: exit_reason,
+      turn_count: 1,
+      tokens: %{input_tokens: total_tokens, output_tokens: total_tokens, total_tokens: total_tokens},
+      latest_gate: %{status: :pass, failed: []}
+    }
   end
 end

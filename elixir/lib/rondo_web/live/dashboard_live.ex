@@ -5,6 +5,7 @@ defmodule RondoWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {RondoWeb.Layouts, :app}
 
+  alias Rondo.RunOutcome
   alias RondoWeb.{Endpoint, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
@@ -15,6 +16,7 @@ defmodule RondoWeb.DashboardLive do
       |> assign(:payload, load_payload())
       |> assign(:now, DateTime.utc_now())
       |> assign(:selected_issue, nil)
+      |> assign(:selected_outcome, nil)
       |> assign(:selected_run_index, 0)
 
     if connected?(socket) do
@@ -78,6 +80,7 @@ defmodule RondoWeb.DashboardLive do
       socket
       |> assign(:selected_issue, identifier)
       |> assign(:selected_issue_data, entry)
+      |> assign(:selected_outcome, nil)
       |> assign(:selected_runs, nil)
       |> assign(:selected_run_index, 0)
 
@@ -112,6 +115,7 @@ defmodule RondoWeb.DashboardLive do
        socket
        |> assign(:selected_issue, identifier)
        |> assign(:selected_issue_data, run_with_log)
+       |> assign(:selected_outcome, selected_outcome(run_with_log))
        |> assign(:selected_run_index, latest_index)
        |> assign(:selected_runs, group.runs)
        |> push_run_charts(group.runs)}
@@ -132,6 +136,7 @@ defmodule RondoWeb.DashboardLive do
       {:noreply,
        socket
        |> assign(:selected_issue_data, run_with_log)
+       |> assign(:selected_outcome, selected_outcome(run_with_log))
        |> assign(:selected_run_index, index)}
     else
       {:noreply, socket}
@@ -144,6 +149,7 @@ defmodule RondoWeb.DashboardLive do
      socket
      |> assign(:selected_issue, nil)
      |> assign(:selected_issue_data, nil)
+     |> assign(:selected_outcome, nil)
      |> assign(:selected_runs, nil)
      |> assign(:selected_run_index, 0)}
   end
@@ -516,8 +522,8 @@ defmodule RondoWeb.DashboardLive do
                     </td>
                     <td class="numeric"><%= group.run_count %></td>
                     <td>
-                      <span class={exit_reason_class(group.latest_result)}>
-                        <%= group.latest_result %>
+                      <span class={group.latest_outcome.class}>
+                        <%= group.latest_outcome.label %>
                       </span>
                     </td>
                     <td class="numeric"><%= format_int(group.total_tokens) %></td>
@@ -583,12 +589,12 @@ defmodule RondoWeb.DashboardLive do
               <span class="numeric"><%= format_int(selected_total_tokens(@selected_issue_data)) %></span>
             </div>
             <div class="panel-metric">
-              <%= if @selected_issue_data[:exit_reason] do %>
+              <%= if @selected_issue_data[:finished_at] && @selected_outcome do %>
                 <span class="panel-metric-label">Result</span>
                 <div class="detail-stack">
-                  <span class={exit_reason_class(@selected_issue_data[:exit_reason])}><%= @selected_issue_data[:exit_reason] %></span>
-                  <%= if @selected_issue_data[:exit_reason] == "handed_off" && @selected_issue_data[:non_active_state] do %>
-                    <span class="muted" style="font-size: 11px;">issue &rarr; <%= @selected_issue_data[:non_active_state] %></span>
+                  <span class={@selected_outcome.class}><%= @selected_outcome.label %></span>
+                  <%= if @selected_outcome.detail do %>
+                    <span class="muted" style="font-size: 11px;"><%= @selected_outcome.detail %></span>
                   <% end %>
                 </div>
               <% else %>
@@ -760,6 +766,10 @@ defmodule RondoWeb.DashboardLive do
 
   defp selected_event_log(selected_issue_data) do
     Map.get(selected_issue_data, :event_log, []) || []
+  end
+
+  defp selected_outcome(entry) when is_map(entry) do
+    Map.get(entry, :outcome) || RunOutcome.display(entry)
   end
 
   defp total_runtime_seconds(payload, now) do
@@ -961,10 +971,6 @@ defmodule RondoWeb.DashboardLive do
       _ -> iso_string
     end
   end
-
-  defp exit_reason_class("completed"), do: "state-badge state-badge-active"
-  defp exit_reason_class("handed_off"), do: "state-badge state-badge-handoff"
-  defp exit_reason_class(_), do: "state-badge state-badge-danger"
 
   defp render_event_message(nil), do: ""
   defp render_event_message(""), do: ""

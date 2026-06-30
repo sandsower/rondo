@@ -3,7 +3,7 @@ defmodule RondoWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias Rondo.{Config, ModelUsage, Orchestrator}
+  alias Rondo.{Config, ModelUsage, Orchestrator, RunOutcome}
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
@@ -401,6 +401,7 @@ defmodule RondoWeb.Presenter do
       %{
         issue_identifier: identifier,
         latest_result: latest.exit_reason,
+        latest_outcome: Map.get(latest, :outcome) || RunOutcome.display(latest),
         latest_finished_at: latest.finished_at,
         total_tokens: Enum.reduce(runs, 0, fn r, acc -> acc + r.tokens.total_tokens end),
         run_count: length(runs),
@@ -422,6 +423,7 @@ defmodule RondoWeb.Presenter do
       finished_at: iso8601(entry.finished_at) || to_string(entry.finished_at),
       exit_reason: entry.exit_reason,
       non_active_state: Map.get(entry, :non_active_state),
+      outcome: RunOutcome.display(entry),
       turn_count: entry.turn_count,
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       tokens: entry.tokens,
@@ -586,11 +588,16 @@ defmodule RondoWeb.Presenter do
     %{
       labels: Enum.map(archived_groups, & &1.issue_identifier),
       values: Enum.map(archived_groups, & &1.total_tokens),
-      colors: Enum.map(archived_groups, & &1.latest_result)
+      colors: Enum.map(archived_groups, &archived_outcome_kind/1)
     }
   end
 
   def run_outcomes(_), do: %{labels: [], values: [], colors: []}
+
+  defp archived_outcome_kind(%{latest_outcome: %{kind: kind}}) when is_binary(kind), do: kind
+  defp archived_outcome_kind(%{latest_outcome: %{kind: kind}}), do: to_string(kind)
+  defp archived_outcome_kind(%{latest_result: result}) when is_binary(result), do: result
+  defp archived_outcome_kind(_), do: "terminated"
 
   @spec run_token_comparison(list()) :: map()
   def run_token_comparison(runs) when is_list(runs) do
