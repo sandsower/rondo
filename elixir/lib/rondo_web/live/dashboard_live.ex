@@ -527,6 +527,7 @@ defmodule RondoWeb.DashboardLive do
                       <div class="issue-stack">
                         <span class="issue-id"><%= entry.issue_identifier %></span>
                         <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"} onclick="event.stopPropagation()">JSON</a>
+                        <%= render_entry_links(%{entry: entry, compact: true}) %>
                       </div>
                     </td>
                     <td>
@@ -609,6 +610,7 @@ defmodule RondoWeb.DashboardLive do
                       <div class="issue-stack">
                         <span class="issue-id"><%= entry.issue_identifier %></span>
                         <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"} onclick="event.stopPropagation()">JSON</a>
+                        <%= render_entry_links(%{entry: entry, compact: true}) %>
                       </div>
                     </td>
                     <td>
@@ -782,6 +784,8 @@ defmodule RondoWeb.DashboardLive do
                         <div class="issue-stack">
                           <span class="issue-id"><%= run.issue_identifier %></span>
                           <span :if={run.issue_title} class="muted archive-title" title={run.issue_title}><%= run.issue_title %></span>
+                          <a class="issue-link" href={"/api/v1/#{run.issue_identifier}"} onclick="event.stopPropagation()">JSON</a>
+                          <%= render_entry_links(%{entry: run, compact: true}) %>
                         </div>
                       </td>
                       <td>
@@ -972,6 +976,13 @@ defmodule RondoWeb.DashboardLive do
                   </span>
                 </div>
               </div>
+            </div>
+          <% end %>
+
+          <%= if entry_has_links?(@selected_issue_data) do %>
+            <div class="section-card" style="margin-bottom: 16px; padding: 16px;">
+              <p class="panel-metric-label">Links</p>
+              <%= render_entry_links(%{entry: @selected_issue_data, compact: false}) %>
             </div>
           <% end %>
 
@@ -2021,6 +2032,67 @@ defmodule RondoWeb.DashboardLive do
 
   defp paused_entry(%{paused: paused}) when is_map(paused), do: paused
   defp paused_entry(entry), do: entry
+
+  defp entry_links(entry) when is_map(entry), do: Map.get(entry, :links) || Map.get(entry, "links") || %{}
+  defp entry_links(_entry), do: %{}
+
+  defp entry_has_links?(entry) do
+    entry_links(entry)
+    |> Enum.any?(fn {_group, links} -> link_group_has_items?(links) end)
+  end
+
+  defp link_group(entry, group) do
+    entry_links(entry)
+    |> Map.get(group, %{available: [], unavailable: []})
+  end
+
+  defp link_group_has_items?(%{available: available, unavailable: unavailable}) do
+    (available || []) != [] or (unavailable || []) != []
+  end
+
+  defp link_group_has_items?(_group), do: false
+
+  defp render_entry_links(assigns) do
+    ~H"""
+    <div class={"entry-link-stack #{if @compact, do: "entry-link-stack-compact", else: ""}"}>
+      <%= for {group, label} <- [tracker: "Tracker", review: "Review"] do %>
+        <% links = link_group(@entry, group) %>
+        <%= if link_group_has_items?(links) do %>
+          <div class="entry-link-group">
+            <%= if !@compact do %>
+              <span class="entry-link-group-label"><%= label %></span>
+            <% end %>
+            <div class="entry-link-row">
+              <%= for link <- links.available || [] do %>
+                <a class={entry_link_class(link.kind)} href={link.url} target="_blank" rel="noreferrer noopener" onclick="event.stopPropagation()">
+                  <span class="entry-link-icon"><%= link.icon %></span>
+                  <span><%= link.label %></span>
+                </a>
+              <% end %>
+            </div>
+            <%= for link <- links.unavailable || [] do %>
+              <span class="entry-link-missing muted">
+                <%= if @compact do %>
+                  <%= link.label %> unavailable<%= if link.reason, do: ": #{link.reason}" %>
+                <% else %>
+                  <%= label %> · <%= link.label %> unavailable<%= if link.reason, do: ": #{link.reason}" %>
+                <% end %>
+              </span>
+            <% end %>
+          </div>
+        <% end %>
+      <% end %>
+    </div>
+    """
+  end
+
+  defp entry_link_class(:linear_issue), do: "entry-link-pill entry-link-pill-linear"
+  defp entry_link_class(:github_issue), do: "entry-link-pill entry-link-pill-github"
+  defp entry_link_class(:pull_request), do: "entry-link-pill entry-link-pill-review"
+  defp entry_link_class(:branch), do: "entry-link-pill entry-link-pill-branch"
+  defp entry_link_class(:final_report), do: "entry-link-pill entry-link-pill-report"
+  defp entry_link_class(:issue), do: "entry-link-pill entry-link-pill-issue"
+  defp entry_link_class(_), do: "entry-link-pill"
 
   defp humanize_interrupt_reason("repeated_gate_failure"), do: "Gate failure"
   defp humanize_interrupt_reason("action_policy_guidance_required"), do: "Action policy"
