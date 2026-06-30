@@ -234,6 +234,11 @@ defmodule RondoWeb.Layouts do
                   this.chart.data.datasets[0].data = payload.values;
                   var c = RondoTheme.colors();
                   this.chart.data.datasets[0].backgroundColor = payload.colors.map(function(t) {
+                    if (t === 'success' || t === 'merged_done') return c.success + 'aa';
+                    if (t === 'review_handoff') return c.accent + 'aa';
+                    if (t === 'blocked_paused') return c.warning + 'aa';
+                    if (t === 'canceled') return c.textMuted + 'aa';
+                    if (t === 'failed' || t === 'terminated') return c.danger + 'aa';
                     if (t === 'completed') return c.success + 'aa';
                     if (t === 'handed_off') return c.accent + 'aa';
                     return c.danger + 'aa';

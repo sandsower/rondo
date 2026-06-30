@@ -17,6 +17,8 @@ defmodule Rondo.RunTimeline do
                       "turn_completed",
                       "turn_failed",
                       "turn_cancelled",
+                      "model_routing_decision",
+                      "planning_completed",
                       "edit_batch",
                       "gates_completed",
                       "gates_reused",
@@ -187,6 +189,25 @@ defmodule Rondo.RunTimeline do
 
         "turn_cancelled" ->
           build_step("turn_cancelled", timestamp, payload, run, source_kind: "checkpoint", checkpoint_path: checkpoint_rel_path, manifest: manifest)
+
+        "model_routing_decision" ->
+          build_step("model_routing_decision", timestamp, payload, run,
+            source_kind: "checkpoint",
+            checkpoint_path: checkpoint_rel_path,
+            phase: model_routing_phase(payload),
+            status: payload_value(payload, :status) || "completed",
+            outcome: model_routing_outcome(payload),
+            summary: model_routing_summary(payload),
+            manifest: manifest
+          )
+
+        "planning_completed" ->
+          build_step("planning_completed", timestamp, payload, run,
+            source_kind: "checkpoint",
+            checkpoint_path: checkpoint_rel_path,
+            phase: "planning",
+            manifest: manifest
+          )
 
         "edit_batch" ->
           build_step("tool_activity", timestamp, payload, run,
@@ -439,9 +460,31 @@ defmodule Rondo.RunTimeline do
   defp decision_kind?(kind), do: MapSet.member?(@decision_kinds, kind)
   defp terminal_kind?(kind), do: MapSet.member?(@terminal_kinds, kind)
 
+  defp model_routing_phase(payload) do
+    context = payload_value(payload, :context) || %{}
+    payload_value(context, :phase) || "model_routing"
+  end
+
+  defp model_routing_outcome(payload) do
+    resolved = payload_value(payload, :resolved) || %{}
+    payload_value(resolved, :model) || payload_value(payload, :requested_tier) || payload_value(payload, :status)
+  end
+
+  defp model_routing_summary(payload) do
+    tier = payload_value(payload, :requested_tier) || "unknown tier"
+    status = payload_value(payload, :status) || "unknown"
+    reason = payload_value(payload, :reason)
+
+    ["model routing", status, tier, reason]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join(" — ")
+  end
+
   defp phase_for_kind(kind) when kind in ["dispatch"], do: "dispatch"
   defp phase_for_kind(kind) when kind in ["action_policy_decision"], do: "policy"
   defp phase_for_kind(kind) when kind in ["workspace_ready"], do: "workspace"
+  defp phase_for_kind("model_routing_decision"), do: "model_routing"
+  defp phase_for_kind("planning_completed"), do: "planning"
   defp phase_for_kind(kind) when kind in ["turn_started", "turn_completed", "turn_failed", "turn_cancelled"], do: "turn"
   defp phase_for_kind(kind) when kind in ["tool_activity", "edit_batch"], do: "tool"
   defp phase_for_kind(kind) when kind in ["gates_completed", "gates_reused"], do: "gates"
@@ -456,6 +499,8 @@ defmodule Rondo.RunTimeline do
   defp summary_for_kind("workspace_ready", payload, _run), do: payload_value(payload, :summary) || "workspace ready"
   defp summary_for_kind("turn_started", payload, _run), do: payload_value(payload, :summary) || turn_summary("started", payload)
   defp summary_for_kind("turn_completed", payload, _run), do: payload_value(payload, :summary) || turn_summary("completed", payload)
+  defp summary_for_kind("model_routing_decision", payload, _run), do: model_routing_summary(payload)
+  defp summary_for_kind("planning_completed", payload, _run), do: payload_value(payload, :summary) || "planning phase completed"
   defp summary_for_kind("turn_failed", payload, _run), do: payload_value(payload, :summary) || turn_summary("failed", payload)
   defp summary_for_kind("turn_cancelled", payload, _run), do: payload_value(payload, :summary) || turn_summary("cancelled", payload)
   defp summary_for_kind("tool_activity", payload, _run), do: payload_value(payload, :summary) || "tool activity"
@@ -476,6 +521,8 @@ defmodule Rondo.RunTimeline do
   defp default_status("workspace_ready", _payload), do: "ready"
   defp default_status("turn_started", _payload), do: "started"
   defp default_status("turn_completed", _payload), do: "completed"
+  defp default_status("model_routing_decision", payload), do: payload_value(payload, :status) || "completed"
+  defp default_status("planning_completed", _payload), do: "completed"
   defp default_status("turn_failed", _payload), do: "failed"
   defp default_status("turn_cancelled", _payload), do: "cancelled"
   defp default_status("tool_activity", _payload), do: "completed"
@@ -496,6 +543,8 @@ defmodule Rondo.RunTimeline do
   defp default_outcome("workspace_ready", _payload), do: nil
   defp default_outcome("turn_started", _payload), do: "started"
   defp default_outcome("turn_completed", payload), do: payload_value(payload, :status) || payload_value(payload, :summary)
+  defp default_outcome("model_routing_decision", payload), do: model_routing_outcome(payload)
+  defp default_outcome("planning_completed", payload), do: payload_value(payload, :next_phase) || "implementation"
   defp default_outcome("turn_failed", payload), do: payload_value(payload, :status) || payload_value(payload, :summary)
   defp default_outcome("turn_cancelled", payload), do: payload_value(payload, :status) || payload_value(payload, :summary)
   defp default_outcome("tool_activity", payload), do: payload_value(payload, :reason_code) || payload_value(payload, :summary)

@@ -6,6 +6,7 @@ defmodule Rondo.RunTimelineTest do
   @start ~U[2026-05-10 15:30:00Z]
   @dispatch ~U[2026-05-10 15:30:01Z]
   @turn1_started ~U[2026-05-10 15:30:02Z]
+  @planning_completed ~U[2026-05-10 15:30:03Z]
   @turn1_completed ~U[2026-05-10 15:30:05Z]
   @turn2_started ~U[2026-05-10 15:30:10Z]
   @gate_completed ~U[2026-05-10 15:30:12Z]
@@ -73,6 +74,70 @@ defmodule Rondo.RunTimelineTest do
 
     tool = Enum.find(projection.timeline, &(&1.kind == "tool_activity"))
     assert tool.summary == "$ mix test"
+  end
+
+  test "projects model routing decision checkpoints with phase and selected model" do
+    {ledger, issue} = create_ledger!("timeline-model-routing")
+
+    _ledger =
+      write_checkpoint!(
+        ledger,
+        :model_routing_decision,
+        %{
+          status: "honored",
+          requested_tier: "frontier",
+          resolved: %{adapter: "pi", model: "openai-codex/gpt-5.5"},
+          reason: "resolved planning tier frontier",
+          context: %{stage: "initial_spawn", phase: "planning"}
+        },
+        @turn1_started
+      )
+
+    run = %{
+      identifier: issue.identifier,
+      run_id: ledger.run_id,
+      run_dir: ledger.run_dir,
+      session_id: "session-routing",
+      started_at: @start,
+      finished_at: @finished,
+      exit_reason: "completed",
+      turn_count: 1,
+      event_log: []
+    }
+
+    projection = RunTimeline.project_run(run)
+    step = Enum.find(projection.timeline, &(&1.kind == "model_routing_decision"))
+
+    assert step.phase == "planning"
+    assert step.status == "honored"
+    assert step.outcome == "openai-codex/gpt-5.5"
+    assert step.summary =~ "frontier"
+    assert step.summary =~ "resolved planning tier frontier"
+  end
+
+  test "projects planning_completed checkpoints as planning phase steps" do
+    {ledger, issue} = create_ledger!("timeline-planning-completed")
+
+    _ledger = write_checkpoint!(ledger, :planning_completed, %{summary: "planning wrapped"}, @turn1_started)
+
+    run = %{
+      identifier: issue.identifier,
+      run_id: ledger.run_id,
+      run_dir: ledger.run_dir,
+      session_id: "session-planning-completed",
+      started_at: @start,
+      finished_at: @finished,
+      exit_reason: "completed",
+      turn_count: 1,
+      event_log: []
+    }
+
+    projection = RunTimeline.project_run(run)
+    step = Enum.find(projection.timeline, &(&1.kind == "planning_completed"))
+
+    assert step.phase == "planning"
+    assert step.summary == "planning wrapped"
+    assert step.status == "completed"
   end
 
   test "projects multi-turn runs with turn and gate boundaries in order" do
@@ -278,6 +343,7 @@ defmodule Rondo.RunTimelineTest do
 
     ledger = write_checkpoint!(ledger, :dispatch, %{attempt: 1}, @dispatch)
     ledger = write_checkpoint!(ledger, :turn_started, %{turn_number: 1}, @turn1_started)
+    ledger = write_checkpoint!(ledger, :planning_completed, %{summary: "planning completed"}, @planning_completed)
     ledger = write_checkpoint!(ledger, :turn_failed, %{turn_number: 1, summary: "turn failed"}, @turn1_completed)
     ledger = write_checkpoint!(ledger, :turn_cancelled, %{turn_number: 1, summary: "turn cancelled"}, @turn2_started)
     ledger = write_checkpoint!(ledger, :edit_batch, %{summary: "edit batch"}, @turn2_completed)
@@ -296,7 +362,7 @@ defmodule Rondo.RunTimelineTest do
     final_report_text = "All done.\n```json\n#{Jason.encode!(report)}\n```\n"
     assert {:ok, ledger, :valid} = RunLedger.record_final_report(ledger, final_report_text)
 
-    assert :ok = File.rm(Path.join(ledger.run_dir, "checkpoints/0003-turn_failed.json"))
+    assert :ok = File.rm(Path.join(ledger.run_dir, "checkpoints/0004-turn_failed.json"))
 
     ledger = write_checkpoint!(ledger, :completed, %{reason: "completed"}, @finished)
     ledger = write_checkpoint!(ledger, :terminated, %{reason: "terminated"}, @finished)
@@ -317,6 +383,7 @@ defmodule Rondo.RunTimelineTest do
     kinds = Enum.map(projection.timeline, & &1.kind)
 
     assert "turn_failed" in kinds
+    assert "planning_completed" in kinds
     assert "turn_cancelled" in kinds
     assert "tool_activity" in kinds
     assert "gates_reused" in kinds

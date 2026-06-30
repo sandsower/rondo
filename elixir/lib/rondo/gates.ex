@@ -3,7 +3,7 @@ defmodule Rondo.Gates do
   Runs deterministic workflow gates inside an issue workspace and persists results.
   """
 
-  alias Rondo.{ActionPolicy, Config, PathSafety}
+  alias Rondo.{ActionPolicy, Config, PathSafety, RemoteShell}
 
   @results_filename "results.json"
   @state_filename "state.json"
@@ -25,6 +25,10 @@ defmodule Rondo.Gates do
           stdout_path: Path.t(),
           stderr_path: Path.t()
         }
+  @dialyzer {:nowarn_function, validate_workspace: 2}
+  @dialyzer {:nowarn_function, validate_remote_workspace: 1}
+  @dialyzer {:nowarn_function, ensure_workspace_under_root: 2}
+
   @type summary :: %{
           required(:status) => gate_status(),
           required(:results_path) => Path.t(),
@@ -46,7 +50,7 @@ defmodule Rondo.Gates do
     state_path = Path.join(gates_dir, @state_filename)
     gate_selection = Keyword.get(opts, :gate_selection)
 
-    with {:ok, workspace} <- validate_workspace(workspace),
+    with {:ok, workspace} <- validate_workspace(workspace, opts),
          :ok <- File.mkdir_p(Path.join(run_dir, relative_gates_dir)) do
       execute_gate_flow(
         gates,
@@ -73,7 +77,7 @@ defmodule Rondo.Gates do
        ) do
     policy_opts = action_policy_opts(opts, workspace)
     reuse_enabled = Keyword.get(opts, :gate_reuse_enabled, Config.gate_reuse_enabled?())
-    workspace_identity = workspace_identity(workspace)
+    workspace_identity = workspace_identity(workspace, opts)
     gate_signature = gate_signature(gates, policy_opts)
 
     summary =
@@ -121,14 +125,36 @@ defmodule Rondo.Gates do
     |> drop_nil_values()
   end
 
-  defp validate_workspace(workspace) do
-    with {:ok, workspace_root} <- PathSafety.canonicalize(Config.workspace_root()),
-         {:ok, workspace} <- PathSafety.canonicalize(workspace),
-         true <- under_root?(workspace, workspace_root) do
+  defp validate_workspace(workspace, opts) do
+    case RemoteShell.worker_host(opts) do
+      nil -> validate_local_workspace(workspace)
+      _host -> validate_remote_workspace(workspace)
+    end
+  end
+
+  defp validate_remote_workspace(workspace) do
+    if is_binary(workspace) and String.trim(workspace) != "" do
       {:ok, workspace}
     else
-      false -> {:error, {:invalid_workspace_cwd, :outside_root}}
+      {:error, {:invalid_workspace_cwd, :not_a_directory}}
+    end
+  end
+
+  defp validate_local_workspace(workspace) do
+    with {:ok, workspace_root} <- PathSafety.canonicalize(Config.workspace_root()),
+         {:ok, workspace} <- PathSafety.canonicalize(workspace),
+         :ok <- ensure_workspace_under_root(workspace, workspace_root) do
+      {:ok, workspace}
+    else
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp ensure_workspace_under_root(workspace, workspace_root) do
+    if under_root?(workspace, workspace_root) do
+      :ok
+    else
+      {:error, {:invalid_workspace_cwd, :outside_root}}
     end
   end
 
@@ -150,15 +176,14 @@ defmodule Rondo.Gates do
 
     case evaluate_gate_policy(gate, policy_opts) do
       {:ok, policy_decision} ->
+        gate_mode = gate_execution_mode(policy_opts)
+
         task =
           Task.async(fn ->
-            File.rm(exit_abs)
-            shell = gate_shell(command, stdout_abs, stderr_abs, exit_abs)
-            {_output, exit_status} = System.cmd("sh", ["-lc", shell], cd: workspace, stderr_to_stdout: true)
-            exit_status
+            gate_exit_status(command, workspace, stdout_abs, stderr_abs, exit_abs, policy_opts, gate_mode)
           end)
 
-        status = await_gate(task, timeout_ms, exit_abs)
+        status = await_gate(task, timeout_ms, if(gate_mode == :remote, do: nil, else: exit_abs))
         duration_ms = System.monotonic_time(:millisecond) - started_ms
 
         build_result(name, command, status, duration_ms, workspace, stdout_path, stderr_path, policy_decision)
@@ -188,6 +213,37 @@ defmodule Rondo.Gates do
     """
   end
 
+  defp gate_exit_status(command, workspace, stdout_abs, stderr_abs, _exit_abs, policy_opts, :remote) do
+    remote_gate_exit_status(command, workspace, stdout_abs, stderr_abs, policy_opts)
+  end
+
+  defp gate_exit_status(command, workspace, stdout_abs, stderr_abs, exit_abs, _policy_opts, :local) do
+    local_gate_exit_status(command, workspace, stdout_abs, stderr_abs, exit_abs)
+  end
+
+  defp gate_execution_mode(policy_opts) do
+    case RemoteShell.worker_host(policy_opts) do
+      nil -> :local
+      _host -> :remote
+    end
+  end
+
+  defp remote_gate_exit_status(command, workspace, stdout_abs, stderr_abs, policy_opts) do
+    shell =
+      RemoteShell.command_line_in_workspace(command, workspace, policy_opts) <>
+        " > #{shell_escape(stdout_abs)} 2> #{shell_escape(stderr_abs)}"
+
+    {_output, exit_status} = System.cmd("sh", ["-lc", shell], stderr_to_stdout: true)
+    exit_status
+  end
+
+  defp local_gate_exit_status(command, workspace, stdout_abs, stderr_abs, exit_abs) do
+    File.rm(exit_abs)
+    shell = gate_shell(command, stdout_abs, stderr_abs, exit_abs)
+    {_output, exit_status} = System.cmd("sh", ["-lc", shell], cd: workspace, stderr_to_stdout: true)
+    exit_status
+  end
+
   defp await_gate(task, timeout_ms, exit_abs) do
     case Task.yield(task, timeout_ms) do
       {:ok, exit_status} ->
@@ -202,6 +258,8 @@ defmodule Rondo.Gates do
   defp classify_exit(0), do: %{status: :pass, exit_status: 0}
   defp classify_exit(@command_not_found_exit_status), do: %{status: :error, exit_status: @command_not_found_exit_status}
   defp classify_exit(exit_status) when is_integer(exit_status), do: %{status: :fail, exit_status: exit_status}
+
+  defp read_exit_status(nil), do: nil
 
   defp read_exit_status(path) do
     with {:ok, contents} <- File.read(path),
@@ -384,16 +442,32 @@ defmodule Rondo.Gates do
     |> drop_nil_values()
   end
 
-  defp workspace_identity(workspace) do
+  defp workspace_identity(workspace, opts) do
+    case RemoteShell.worker_host(opts) do
+      nil -> local_workspace_identity(workspace, opts)
+      _host -> remote_workspace_identity(workspace, opts)
+    end
+  end
+
+  defp remote_workspace_identity(workspace, opts) do
     %{
-      head: git_head(workspace),
+      head: git_head(workspace, opts)
+    }
+    |> drop_nil_values()
+  end
+
+  defp local_workspace_identity(workspace, opts) do
+    %{
+      head: git_head(workspace, opts),
       tree_hash: workspace_tree_hash(workspace)
     }
     |> drop_nil_values()
   end
 
-  defp git_head(workspace) do
-    case System.cmd("git", ["rev-parse", "HEAD"], cd: workspace, stderr_to_stdout: true) do
+  defp git_head(workspace, opts) do
+    runner = RemoteShell.git_runner(opts)
+
+    case runner.("rev-parse" |> List.wrap() |> Enum.concat(["HEAD"]), workspace) do
       {output, 0} -> String.trim(output)
       _ -> nil
     end
@@ -534,10 +608,11 @@ defmodule Rondo.Gates do
     if Keyword.get(opts, :action_policy, false) do
       [
         workspace: workspace,
+        worker_host: Keyword.get(opts, :worker_host),
         command: Keyword.get(opts, :action_policy_command, Config.action_policy_command()),
         evaluator: Keyword.get(opts, :action_policy_evaluator, &ActionPolicy.evaluate/3),
         mode: Keyword.get(opts, :action_policy_run_mode, Config.action_policy_run_mode()),
-        sandbox_status: Keyword.get_lazy(opts, :sandbox_status, fn -> ActionPolicy.sandbox_status(workspace) end)
+        sandbox_status: Keyword.get_lazy(opts, :sandbox_status, fn -> ActionPolicy.sandbox_status(workspace, opts) end)
       ]
     else
       false
