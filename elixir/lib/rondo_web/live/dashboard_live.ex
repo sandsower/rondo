@@ -6,7 +6,7 @@ defmodule RondoWeb.DashboardLive do
   use Phoenix.LiveView, layout: {RondoWeb.Layouts, :app}
 
   alias Rondo.RunOutcome
-  alias RondoWeb.{ArchivedRuns, Endpoint, EventInspector, ObservabilityPubSub, Presenter}
+  alias RondoWeb.{ArchivedRuns, Endpoint, EventInspector, ObservabilityPubSub, Presenter, ResultSummary}
   @runtime_tick_ms 1_000
 
   @impl true
@@ -688,8 +688,8 @@ defmodule RondoWeb.DashboardLive do
                       <div class="detail-stack">
                         <span
                           class="event-text"
-                          title={entry.last_message || to_string(entry.last_event || "n/a")}
-                        ><%= entry.last_message || to_string(entry.last_event || "n/a") %></span>
+                          title={result_preview_text(entry.last_result_payload || entry.last_message || to_string(entry.last_event || "n/a"))}
+                        ><%= result_preview_text(entry.last_result_payload || entry.last_message || to_string(entry.last_event || "n/a")) %></span>
                         <span class="muted event-meta">
                           <%= entry.last_event || "n/a" %>
                           <%= if entry.last_event_at do %>
@@ -789,7 +789,6 @@ defmodule RondoWeb.DashboardLive do
           <%= if (@payload[:archived_table] || []) == [] do %>
             <p class="empty-state">No archived runs yet.</p>
           <% else %>
-
             <form class="archive-filter-bar" phx-change="filter_archived">
               <input type="hidden" name="page_size" value={archived_view.page_size} />
               <input class="archive-filter-input" type="search" name="search" value={archived_view.filters.search} placeholder="Search issue, title, repo, model, result" />
@@ -907,7 +906,6 @@ defmodule RondoWeb.DashboardLive do
                 <button type="button" class="subtle-button" phx-click="page_archived" phx-value-page={archived_view.page + 1} disabled={archived_view.page >= archived_view.page_count}>Next</button>
               </div>
             <% end %>
-
           <% end %>
         </section>
       <% end %>
@@ -984,20 +982,31 @@ defmodule RondoWeb.DashboardLive do
               </div>
             </div>
             <div class="panel-metric">
-              <%= if @selected_issue_data[:finished_at] && @selected_outcome do %>
-                <span class="panel-metric-label">Result</span>
-                <div class="detail-stack">
-                  <span class={@selected_outcome.class}><%= @selected_outcome.label %></span>
-                  <%= if @selected_outcome.detail do %>
-                    <span class="muted" style="font-size: 11px;"><%= @selected_outcome.detail %></span>
-                  <% end %>
-                </div>
-              <% else %>
+              <%= cond do %>
+                <% selected_result_payload(@selected_issue_data) -> %>
+                  <span class="panel-metric-label">Last result</span>
+                  <span class={result_summary_badge_class(selected_result_payload(@selected_issue_data))} style="font-size: 11px; line-height: 1.4;"><%= result_preview_text(selected_result_payload(@selected_issue_data)) %></span>
+                <% @selected_issue_data[:finished_at] && @selected_outcome -> %>
+                  <span class="panel-metric-label">Result</span>
+                  <div class="detail-stack">
+                    <span class={@selected_outcome.class}><%= @selected_outcome.label %></span>
+                    <%= if @selected_outcome.detail do %>
+                      <span class="muted" style="font-size: 11px;"><%= @selected_outcome.detail %></span>
+                    <% end %>
+                  </div>
+              <% true -> %>
                 <span class="panel-metric-label">Session</span>
                 <span class="mono" style="font-size: 11px;"><%= @selected_issue_data[:session_id] || "n/a" %></span>
               <% end %>
             </div>
           </div>
+
+          <%= if selected_result_payload(@selected_issue_data) do %>
+            <div class="section-card" style="margin: 0 24px 16px; padding: 16px;">
+              <p class="panel-metric-label">Last result</p>
+              <%= render_result_summary(selected_result_payload(@selected_issue_data)) %>
+            </div>
+          <% end %>
 
           <%= if @selected_runs && length(@selected_runs) > 0 do %>
             <div class="panel-charts">
@@ -1338,7 +1347,10 @@ defmodule RondoWeb.DashboardLive do
       case Rondo.Orchestrator.load_archived_run(identifier, filename) do
         {:ok, full_entry} ->
           event_log = RondoWeb.Presenter.format_event_log_public(Map.get(full_entry, :event_log, []))
-          Map.put(run, :event_log, event_log)
+
+          run
+          |> Map.merge(full_entry)
+          |> Map.put(:event_log, event_log)
 
         _ ->
           Map.put(run, :event_log, [])
@@ -2412,6 +2424,83 @@ defmodule RondoWeb.DashboardLive do
             </div>
           <% end %>
         </div>
+      <% end %>
+    </div>
+    """
+  end
+
+  defp selected_result_payload(selected_issue_data) when is_map(selected_issue_data) do
+    Map.get(selected_issue_data, :final_report) ||
+      get_in(selected_issue_data, [:interrupt, :final_report]) ||
+      Map.get(selected_issue_data, :last_result_payload) ||
+      Map.get(selected_issue_data, :last_message)
+  end
+
+  defp selected_result_payload(_selected_issue_data), do: nil
+
+  defp result_preview_text(nil), do: "n/a"
+  defp result_preview_text(result), do: ResultSummary.preview(result)
+
+  defp result_summary_badge_class(:final_report), do: "state-badge state-badge-active"
+  defp result_summary_badge_class(:json), do: "state-badge state-badge-warning"
+  defp result_summary_badge_class(:text), do: "state-badge"
+  defp result_summary_badge_class(nil), do: "state-badge"
+
+  defp result_summary_badge_class(result) do
+    case ResultSummary.describe(result).kind do
+      :final_report -> "state-badge state-badge-active"
+      :json -> "state-badge state-badge-warning"
+      :text -> "state-badge"
+    end
+  end
+
+  defp render_result_summary(result) do
+    assigns = %{summary: ResultSummary.describe(result)}
+
+    ~H"""
+    <div class="detail-stack" style="gap: 12px;">
+      <span class={result_summary_badge_class(@summary.kind)} style="font-size: 11px; align-self: flex-start; line-height: 1.4;"><%= @summary.preview %></span>
+
+      <%= if @summary.fields != [] do %>
+        <div style="display: grid; gap: 8px;">
+          <%= for field <- @summary.fields do %>
+            <div class="detail-stack" style="gap: 2px;">
+              <span class="muted" style="font-size: 10px; text-transform: uppercase; letter-spacing: .06em;"><%= field.label %></span>
+              <span class="mono" style="font-size: 12px; white-space: pre-wrap; word-break: break-word;"><%= field.value %></span>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+
+      <%= if @summary.pretty do %>
+        <details style="margin-top: 4px;">
+          <summary class="muted" style="cursor: pointer;">Raw JSON</summary>
+          <div style="display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap;">
+            <button
+              type="button"
+              class="subtle-button"
+              data-label="Copy raw"
+              data-copy={@summary.copy_text}
+              onclick="event.stopPropagation(); navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);"
+            >
+              Copy raw
+            </button>
+          </div>
+          <pre class="mono" style="margin-top: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-word; background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: 12px; padding: 10px;"><%= @summary.pretty %></pre>
+        </details>
+      <% else %>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <button
+            type="button"
+            class="subtle-button"
+            data-label="Copy text"
+            data-copy={@summary.copy_text}
+            onclick="event.stopPropagation(); navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);"
+          >
+            Copy text
+          </button>
+        </div>
+        <pre class="mono" style="margin-top: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-word; background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: 12px; padding: 10px;"><%= @summary.raw %></pre>
       <% end %>
     </div>
     """
