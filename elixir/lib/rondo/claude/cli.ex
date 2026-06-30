@@ -5,7 +5,7 @@ defmodule Rondo.Claude.CLI do
 
   require Logger
   alias Rondo.Claude.StreamParser
-  alias Rondo.{Config, PathSafety}
+  alias Rondo.{Config, PathSafety, RemoteShell}
 
   @port_line_bytes 1_048_576
   @max_log_bytes 1_000
@@ -39,7 +39,7 @@ defmodule Rondo.Claude.CLI do
     turn_timeout_ms = Keyword.get(opts, :turn_timeout_ms, Config.claude_turn_timeout_ms())
     stall_timeout_ms = Keyword.get(opts, :stall_timeout_ms, Config.claude_stall_timeout_ms())
 
-    with :ok <- validate_workspace(workspace) do
+    with :ok <- validate_workspace(workspace, opts) do
       command = Config.claude_command()
 
       # Erlang ports cannot read stdout and stderr as separate streams, so we
@@ -54,7 +54,7 @@ defmodule Rondo.Claude.CLI do
       # preserved. safe_port_close/1 sends SIGTERM to the spawned process group
       # via `kill -- -$PID`, preventing orphan Claude processes when Rondo exits
       # or the agent is terminated.
-      with {:ok, spawn_target, spawn_args} <- spawn_invocation(command, args) do
+      with {:ok, spawn_target, spawn_args} <- spawn_invocation(command, args, workspace, opts) do
         port =
           Port.open(
             {:spawn_executable, spawn_target},
@@ -231,32 +231,52 @@ defmodule Rondo.Claude.CLI do
     Enum.reduce(tools, args, fn tool, acc -> acc ++ ["--allowedTools", tool] end)
   end
 
-  defp validate_workspace(workspace) do
+  defp validate_workspace(workspace, opts) do
+    if RemoteShell.enabled?(opts) do
+      validate_remote_workspace(workspace)
+    else
+      validate_local_workspace(workspace)
+    end
+  end
+
+  defp validate_remote_workspace(workspace) do
+    if is_binary(workspace) and String.trim(workspace) != "" do
+      :ok
+    else
+      {:error, {:invalid_workspace_cwd, :not_a_directory}}
+    end
+  end
+
+  defp validate_local_workspace(workspace) do
     expanded = Path.expand(workspace)
     root = Path.expand(Config.workspace_root())
 
     with true <- File.dir?(expanded),
          {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded),
          {:ok, canonical_root} <- PathSafety.canonicalize(root) do
-      canonical_root_prefix = canonical_root <> "/"
-      expanded_root_prefix = root <> "/"
-
-      cond do
-        canonical_workspace == canonical_root ->
-          {:error, {:invalid_workspace_cwd, :workspace_equals_root}}
-
-        String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
-          :ok
-
-        String.starts_with?(expanded <> "/", expanded_root_prefix) ->
-          {:error, {:invalid_workspace_cwd, :symlink_escape}}
-
-        true ->
-          {:error, {:invalid_workspace_cwd, :outside_root}}
-      end
+      validate_workspace_paths(canonical_workspace, canonical_root, expanded, root)
     else
       false -> {:error, {:invalid_workspace_cwd, :not_a_directory}}
       {:error, {:path_canonicalize_failed, _path, reason}} -> {:error, {:invalid_workspace_cwd, reason}}
+    end
+  end
+
+  defp validate_workspace_paths(canonical_workspace, canonical_root, expanded, root) do
+    canonical_root_prefix = canonical_root <> "/"
+    expanded_root_prefix = root <> "/"
+
+    cond do
+      canonical_workspace == canonical_root ->
+        {:error, {:invalid_workspace_cwd, :workspace_equals_root}}
+
+      String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
+        :ok
+
+      String.starts_with?(expanded <> "/", expanded_root_prefix) ->
+        {:error, {:invalid_workspace_cwd, :symlink_escape}}
+
+      true ->
+        {:error, {:invalid_workspace_cwd, :outside_root}}
     end
   end
 
@@ -285,7 +305,7 @@ defmodule Rondo.Claude.CLI do
     :error, :badarg -> :ok
   end
 
-  defp spawn_invocation(command, args) do
+  defp spawn_invocation(command, args, workspace, opts) do
     case :os.type() do
       {:win32, _} ->
         # Windows shell-command support is tracked separately in #9. Do not
@@ -295,8 +315,14 @@ defmodule Rondo.Claude.CLI do
         {:error, {:unsupported_platform, :windows_shell_command}}
 
       _ ->
-        {spawn_target, spawn_args} = unix_shell_invocation(build_wrapper_script(command, args))
-        {:ok, spawn_target, spawn_args}
+        if RemoteShell.enabled?(opts) do
+          remote_command = RemoteShell.command_line_in_workspace(build_wrapper_script(command, args), workspace, opts)
+          {spawn_target, spawn_args} = unix_shell_invocation(remote_command)
+          {:ok, spawn_target, spawn_args}
+        else
+          {spawn_target, spawn_args} = unix_shell_invocation(build_wrapper_script(command, args))
+          {:ok, spawn_target, spawn_args}
+        end
     end
   end
 

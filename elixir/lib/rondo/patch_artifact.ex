@@ -62,7 +62,10 @@ defmodule Rondo.PatchArtifact do
     now = Keyword.get(opts, :now, DateTime.utc_now())
 
     cond do
-      !is_binary(workspace) or !File.dir?(workspace) ->
+      !is_binary(workspace) ->
+        {:ok, ledger, :skipped_missing_workspace}
+
+      !File.dir?(workspace) ->
         {:ok, ledger, :skipped_missing_workspace}
 
       !git_repo?(runner, workspace) ->

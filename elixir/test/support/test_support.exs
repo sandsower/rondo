@@ -108,6 +108,8 @@ defmodule Rondo.TestSupport do
           tracker_label_filter: nil,
           poll_interval_ms: 30_000,
           workspace_root: Path.join(System.tmp_dir!(), "rondo_workspaces"),
+          worker_max_concurrent_agents_per_host: 10,
+          worker_ssh_hosts: [],
           max_concurrent_agents: 10,
           agent_adapter: "claude_code",
           max_turns: 20,
@@ -185,6 +187,8 @@ defmodule Rondo.TestSupport do
     tracker_label_filter = Keyword.get(config, :tracker_label_filter)
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
+    worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
+    worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     agent_adapter = Keyword.get(config, :agent_adapter)
     max_turns = Keyword.get(config, :max_turns)
@@ -282,6 +286,7 @@ defmodule Rondo.TestSupport do
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
+        worker_yaml(worker_max_concurrent_agents_per_host, worker_ssh_hosts),
         "agent:",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
         "  adapter: #{yaml_value(agent_adapter)}",
@@ -505,6 +510,18 @@ defmodule Rondo.TestSupport do
 
   defp release_loop_closeout_line(_key, nil), do: nil
   defp release_loop_closeout_line(key, value), do: "      #{key}: #{yaml_value(value)}"
+
+  defp worker_yaml(nil, []), do: nil
+  defp worker_yaml(nil, nil), do: nil
+
+  defp worker_yaml(max_concurrent_agents_per_host, ssh_hosts) do
+    [
+      "worker:",
+      "  max_concurrent_agents_per_host: #{yaml_value(max_concurrent_agents_per_host)}",
+      "  ssh_hosts: #{yaml_value(ssh_hosts || [])}"
+    ]
+    |> Enum.join("\n")
+  end
 
   defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
 

@@ -24,9 +24,10 @@ defmodule Rondo.Config do
   """
   @default_poll_interval_ms 30_000
   @default_workspace_root Path.join(System.tmp_dir!(), "rondo_workspaces")
+  @default_max_concurrent_agents 10
+  @default_worker_max_concurrent_agents_per_host @default_max_concurrent_agents
   @default_hook_timeout_ms 60_000
   @default_gate_timeout_ms 60_000
-  @default_max_concurrent_agents 10
   @default_agent_adapter "claude_code"
   @default_agent_max_turns 20
   @default_max_retry_backoff_ms 300_000
@@ -101,6 +102,20 @@ defmodule Rondo.Config do
                                default: %{},
                                keys: [
                                  root: [type: {:or, [:string, nil]}, default: @default_workspace_root]
+                               ]
+                             ],
+                             worker: [
+                               type: :map,
+                               default: %{},
+                               keys: [
+                                 max_concurrent_agents_per_host: [
+                                   type: :integer,
+                                   default: @default_worker_max_concurrent_agents_per_host
+                                 ],
+                                 ssh_hosts: [
+                                   type: {:list, :map},
+                                   default: []
+                                 ]
                                ]
                              ],
                              agent: [
@@ -435,6 +450,16 @@ defmodule Rondo.Config do
     validated_workflow_options()
     |> get_in([:workspace, :root])
     |> resolve_path_value(@default_workspace_root)
+  end
+
+  @spec worker_max_concurrent_agents_per_host() :: pos_integer()
+  def worker_max_concurrent_agents_per_host do
+    get_in(validated_workflow_options(), [:worker, :max_concurrent_agents_per_host])
+  end
+
+  @spec worker_ssh_hosts() :: [map()]
+  def worker_ssh_hosts do
+    get_in(validated_workflow_options(), [:worker, :ssh_hosts]) || []
   end
 
   @spec workspace_hooks() :: workspace_hooks()
@@ -1077,6 +1102,7 @@ defmodule Rondo.Config do
       tracker: extract_tracker_options(section_map(config, "tracker")),
       polling: extract_polling_options(section_map(config, "polling")),
       workspace: extract_workspace_options(section_map(config, "workspace")),
+      worker: extract_worker_options(section_map(config, "worker")),
       agent: extract_agent_options(section_map(config, "agent")),
       claude: extract_claude_options(section_map(config, "claude")),
       pi: extract_pi_options(section_map(config, "pi")),
@@ -1116,6 +1142,15 @@ defmodule Rondo.Config do
   defp extract_workspace_options(section) do
     %{}
     |> put_if_present(:root, binary_value(Map.get(section, "root")))
+  end
+
+  defp extract_worker_options(section) do
+    %{}
+    |> put_if_present(
+      :max_concurrent_agents_per_host,
+      positive_integer_value(Map.get(section, "max_concurrent_agents_per_host"))
+    )
+    |> put_if_present(:ssh_hosts, worker_hosts_value(Map.get(section, "ssh_hosts")))
   end
 
   defp extract_agent_options(section) do
@@ -1371,6 +1406,26 @@ defmodule Rondo.Config do
 
   defp tier_list_value(_value), do: :omit
 
+  defp worker_hosts_value(values) when is_list(values) do
+    Enum.map(values, &worker_host_value/1)
+  end
+
+  defp worker_hosts_value(_value), do: :omit
+
+  defp worker_host_value(host) when is_map(host) do
+    %{}
+    |> put_if_present(:name, scalar_string_value(Map.get(host, "name")))
+    |> put_if_present(:host, scalar_string_value(Map.get(host, "host")))
+    |> put_if_present(:user, scalar_string_value(Map.get(host, "user")))
+    |> put_if_present(:port, positive_integer_value(Map.get(host, "port")))
+    |> put_if_present(
+      :max_concurrent_agents,
+      positive_integer_value(Map.get(host, "max_concurrent_agents"))
+    )
+  end
+
+  defp worker_host_value(_host), do: %{}
+
   defp extract_hooks_options(section) do
     %{}
     |> put_if_present(:after_create, hook_command_value(Map.get(section, "after_create")))
@@ -1429,6 +1484,7 @@ defmodule Rondo.Config do
     tracker = section_map(config, "tracker")
     polling = section_map(config, "polling")
     workspace = section_map(config, "workspace")
+    worker = section_map(config, "worker")
     agent = section_map(config, "agent")
     claude = section_map(config, "claude")
     pi = section_map(config, "pi")
@@ -1450,6 +1506,7 @@ defmodule Rondo.Config do
       validate_section_map(config, "tracker"),
       validate_section_map(config, "polling"),
       validate_section_map(config, "workspace"),
+      validate_section_map(config, "worker"),
       validate_section_map(config, "agent"),
       validate_section_map(config, "claude"),
       validate_section_map(config, "pi"),
@@ -1488,6 +1545,8 @@ defmodule Rondo.Config do
       validate_string_or_string_list_field(tracker, "tracker.label_filter"),
       validate_positive_integer_field(polling, "polling.interval_ms"),
       validate_string_field(workspace, "workspace.root"),
+      validate_positive_integer_field(worker, "worker.max_concurrent_agents_per_host"),
+      validate_worker_ssh_hosts_field(worker),
       validate_positive_integer_field(agent, "agent.max_concurrent_agents"),
       validate_non_empty_string_field(agent, "agent.adapter"),
       validate_positive_integer_field(agent, "agent.max_turns"),
@@ -1754,6 +1813,57 @@ defmodule Rondo.Config do
       {:ok, gates} -> validate_gates_field(gates, "clean_eval.gates")
       :error -> []
     end
+  end
+
+  defp validate_worker_ssh_hosts_field(worker) do
+    case Map.fetch(worker, "ssh_hosts") do
+      {:ok, hosts} -> validate_worker_host_list(hosts, "worker.ssh_hosts")
+      :error -> []
+    end
+  end
+
+  defp validate_worker_host_list(nil, _field_path), do: []
+
+  defp validate_worker_host_list(hosts, field_path) when is_list(hosts) do
+    hosts
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {host, index} -> validate_worker_host_entry(host, index, field_path) end)
+  end
+
+  defp validate_worker_host_list(hosts, field_path), do: [config_error(field_path, hosts, "must be a list of host maps")]
+
+  defp validate_worker_host_entry(host, index, field_path) when is_map(host) do
+    path = "#{field_path}.#{index}"
+
+    [
+      validate_required_string_field(host, "#{path}.host", "host"),
+      validate_optional_string_field(host, "#{path}.name", "name"),
+      validate_optional_string_field(host, "#{path}.user", "user"),
+      validate_optional_positive_integer_field(host, "#{path}.port", "port"),
+      validate_optional_positive_integer_field(host, "#{path}.max_concurrent_agents", "max_concurrent_agents")
+    ]
+    |> List.flatten()
+  end
+
+  defp validate_worker_host_entry(host, index, field_path), do: [config_error("#{field_path}.#{index}", host, "must be a map")]
+
+  defp validate_optional_string_field(section, path, _key) do
+    validate_present_value(section, path, fn value ->
+      cond do
+        is_binary(value) and String.trim(value) != "" -> []
+        is_binary(value) -> [config_error(path, value, "must be a non-empty string")]
+        true -> [config_error(path, value, "must be a string")]
+      end
+    end)
+  end
+
+  defp validate_optional_positive_integer_field(section, path, _key) do
+    validate_present_value(section, path, fn value ->
+      case parse_integer(value) do
+        {:ok, parsed} when parsed > 0 -> []
+        _ -> [config_error(path, value, "must be a positive integer")]
+      end
+    end)
   end
 
   defp validate_gates_field(gates, field_path \\ "gates")
