@@ -61,6 +61,16 @@ defmodule Rondo.GitHub.PullRequest do
     end
   end
 
+  @spec ready(String.t() | integer(), keyword()) :: :ok | {:error, term()}
+  def ready(number, opts \\ []) do
+    repo = Keyword.fetch!(opts, :repo)
+
+    case run_gh(opts, ["pr", "ready", to_string(number), "--repo", repo]) do
+      {:ok, _output} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   @spec merge(String.t() | integer(), keyword()) :: :ok | {:error, term()}
   def merge(number, opts \\ []) do
     repo = Keyword.fetch!(opts, :repo)
