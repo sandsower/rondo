@@ -56,7 +56,12 @@ defmodule Rondo.TestSupport do
 
   def write_workflow_file!(path, overrides \\ []) do
     workflow = workflow_content(overrides)
-    File.write!(path, workflow)
+    dir = Path.dirname(path)
+    tmp_path = Path.join(dir, ".#{Path.basename(path)}.#{System.unique_integer([:positive, :monotonic])}.tmp")
+
+    File.mkdir_p!(dir)
+    File.write!(tmp_path, workflow)
+    File.rename!(tmp_path, path)
 
     if Process.whereis(Rondo.WorkflowStore) do
       Rondo.WorkflowStore.force_reload()
