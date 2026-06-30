@@ -10,6 +10,9 @@ tracker:
     - In Progress
     - Merging
     - Rework
+  review_states:
+    - In Review
+    - Human Review
   terminal_states:
     - Closed
     - Cancelled

@@ -142,6 +142,8 @@ Minimal example:
 tracker:
   kind: linear
   project_slug: "..."
+  review_states:
+    - In Review
 workspace:
   root: ~/code/workspaces
 hooks:
@@ -211,6 +213,11 @@ GitHub `open`/`closed` state is used as an outer filter; label state is Rondo's 
 truth. Candidate and cleanup listing uses `gh issue list --limit 1000`; repos with more matching
 issues should narrow `label_filter` until a paginated adapter lands. See
 [`examples/github-WORKFLOW.md`](examples/github-WORKFLOW.md) for a fuller prompt.
+
+For Linear-backed workflows, `tracker.review_states` lets you declare PR babysit states such as
+`In Review` or `Human Review`. When `release_loop.enabled: true`, those states stay on the PR
+lifecycle path so Rondo can watch checks, respond to review feedback, and merge only when the
+configured policy allows it.
 
 Notes:
 

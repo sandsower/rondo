@@ -5,6 +5,8 @@ defmodule RondoWeb.Presenter do
 
   alias Rondo.{Config, ModelUsage, Orchestrator, RunLedger, RunTimeline}
 
+  @dialyzer {:nowarn_function, archived_cost: 1}
+
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
     generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
@@ -176,13 +178,15 @@ defmodule RondoWeb.Presenter do
   end
 
   defp retry_entry_payload(entry) do
-    %{
+    payload = %{
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       attempt: entry.attempt,
       due_at: due_at_iso8601(entry.due_in_ms),
       error: entry.error
     }
+
+    maybe_put_release_loop(payload, entry_value(entry, :release_loop))
   end
 
   defp paused_entry_payload(entry) do
@@ -282,11 +286,64 @@ defmodule RondoWeb.Presenter do
   end
 
   defp retry_issue_payload(retry) do
-    %{
+    payload = %{
       attempt: retry.attempt,
       due_at: due_at_iso8601(retry.due_in_ms),
       error: retry.error
     }
+
+    maybe_put_release_loop(payload, entry_value(retry, :release_loop))
+  end
+
+  defp maybe_put_release_loop(payload, release_loop) do
+    case release_loop_retry_payload(release_loop) do
+      nil -> payload
+      release_loop_payload -> Map.put(payload, :release_loop, release_loop_payload)
+    end
+  end
+
+  defp release_loop_retry_payload(nil), do: nil
+
+  defp release_loop_retry_payload(release_loop) when is_map(release_loop) do
+    %{
+      phase: release_loop_value(release_loop, :phase),
+      action: release_loop_value(release_loop, :action),
+      blocked_reason: release_loop_value(release_loop, :blocked_reason),
+      wait_interval_seconds: release_loop_value(release_loop, :wait_interval_seconds),
+      recovery_kind: release_loop_value(release_loop, :recovery_kind),
+      closeout_state: release_loop_value(release_loop, :closeout_state),
+      feedback_count: release_loop_value(release_loop, :feedback_count),
+      feedback_comment_ids: release_loop_value(release_loop, :feedback_comment_ids),
+      mergeable: release_loop_value(release_loop, :mergeable),
+      merge_state_status: release_loop_value(release_loop, :merge_state_status),
+      pr: release_loop_pr_payload(release_loop_value(release_loop, :pr)),
+      checks: normalize_payload_map(release_loop_value(release_loop, :checks))
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp release_loop_retry_payload(_release_loop), do: nil
+
+  defp release_loop_pr_payload(nil), do: nil
+
+  defp release_loop_pr_payload(pr) when is_map(pr) do
+    %{
+      number: release_loop_value(pr, :number),
+      url: release_loop_value(pr, :url),
+      title: release_loop_value(pr, :title),
+      head_ref_name: release_loop_value(pr, :head_ref_name),
+      base_ref_name: release_loop_value(pr, :base_ref_name),
+      is_draft: release_loop_value(pr, :is_draft)
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp release_loop_pr_payload(_pr), do: nil
+
+  defp release_loop_value(map, key) when is_map(map) and is_atom(key) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
   end
 
   defp paused_issue_payload(paused) do
@@ -944,15 +1001,17 @@ defmodule RondoWeb.Presenter do
     end
   end
 
-  defp archived_cost(entry) when is_map(entry) do
-    cond do
-      Map.has_key?(entry, :cost) -> normalize_explicit_cost(Map.get(entry, :cost))
-      Map.has_key?(entry, "cost") -> normalize_explicit_cost(Map.get(entry, "cost"))
-      true -> nil
+  defp archived_cost(entry) do
+    if is_map(entry) do
+      cond do
+        Map.has_key?(entry, :cost) -> normalize_explicit_cost(Map.get(entry, :cost))
+        Map.has_key?(entry, "cost") -> normalize_explicit_cost(Map.get(entry, "cost"))
+        true -> nil
+      end
+    else
+      nil
     end
   end
-
-  defp archived_cost(_entry), do: nil
 
   defp normalize_explicit_cost(cost) when is_number(cost), do: Float.round(cost / 1.0, 6)
 
