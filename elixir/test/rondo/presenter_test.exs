@@ -229,6 +229,29 @@ defmodule Rondo.PresenterTest do
     assert issue_payload.paused.interrupt.blocked_side_effect.label == "Tracker update"
   end
 
+  test "format_event_log_public preserves token deltas and model change metadata" do
+    log = [
+      %{
+        at: ~U[2026-06-29 10:05:00Z],
+        event: :warning,
+        message: "model changed: openrouter/openrouter/moonshotai/kimi-k2.7-code",
+        tokens: %{input_tokens: 4, output_tokens: 5, total_tokens: 11, cache_read_tokens: 2}
+      },
+      %{
+        at: ~U[2026-06-29 10:00:00Z],
+        event: :assistant,
+        message: "Turn 1 complete",
+        tokens: %{input_tokens: 1, output_tokens: 2, total_tokens: 3}
+      }
+    ]
+
+    assert [turn, model_change] = RondoWeb.Presenter.format_event_log_public(log)
+    assert turn.message == "Turn 1 complete"
+    assert turn.tokens == %{input_tokens: 1, output_tokens: 2, total_tokens: 3, cache_read_tokens: 0, cache_write_tokens: 0, cached_tokens: 0, cost: nil}
+    assert model_change.model_change == %{provider: "openrouter", model: "openrouter/moonshotai/kimi-k2.7-code"}
+    assert model_change.tokens == %{input_tokens: 4, output_tokens: 5, total_tokens: 11, cache_read_tokens: 2, cache_write_tokens: 0, cached_tokens: 2, cost: nil}
+  end
+
   test "state API tolerates disk-reconstructed paused entries with missing or string keys" do
     snapshot = %{
       running: [],

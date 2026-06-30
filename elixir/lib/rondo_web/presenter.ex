@@ -464,11 +464,83 @@ defmodule RondoWeb.Presenter do
       message = summarize_message(entry[:message])
       event = refine_event_from_message(entry[:event], message)
 
-      %{at: iso8601(entry[:at]), event: event, message: message}
+      %{
+        at: iso8601(entry[:at]),
+        event: event,
+        message: message,
+        tokens: normalize_event_tokens(Map.get(entry, :tokens)),
+        model_change: model_change_from_message(message)
+      }
     end)
   end
 
   defp format_event_log(_), do: []
+
+  defp normalize_event_tokens(nil), do: nil
+
+  defp normalize_event_tokens(tokens) when is_map(tokens) do
+    cache_read_tokens = normalize_token_integer(tokens, [:cache_read_tokens, "cache_read_tokens", :cached_input_tokens, "cached_input_tokens"])
+    cache_write_tokens = normalize_token_integer(tokens, [:cache_write_tokens, "cache_write_tokens"])
+
+    %{
+      input_tokens: normalize_token_integer(tokens, [:input_tokens, "input_tokens"]) || 0,
+      output_tokens: normalize_token_integer(tokens, [:output_tokens, "output_tokens"]) || 0,
+      total_tokens: normalize_token_integer(tokens, [:total_tokens, "total_tokens"]) || 0,
+      cache_read_tokens: cache_read_tokens || 0,
+      cache_write_tokens: cache_write_tokens || 0,
+      cached_tokens: (cache_read_tokens || 0) + (cache_write_tokens || 0),
+      cost: normalize_token_number(tokens, [:cost, "cost"])
+    }
+  end
+
+  defp normalize_event_tokens(_tokens), do: nil
+
+  defp normalize_token_integer(tokens, keys) when is_map(tokens) and is_list(keys) do
+    keys
+    |> Enum.find_value(&Map.get(tokens, &1))
+    |> normalize_integer_value()
+  end
+
+  defp normalize_token_integer(_tokens, _keys), do: nil
+
+  defp normalize_token_number(tokens, keys) when is_map(tokens) and is_list(keys) do
+    keys
+    |> Enum.find_value(&Map.get(tokens, &1))
+    |> normalize_number_value()
+  end
+
+  defp normalize_token_number(_tokens, _keys), do: nil
+
+  defp normalize_integer_value(value) when is_integer(value), do: value
+
+  defp normalize_integer_value(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {parsed, ""} -> parsed
+      _ -> nil
+    end
+  end
+
+  defp normalize_integer_value(_value), do: nil
+
+  defp normalize_number_value(value) when is_number(value), do: value
+
+  defp normalize_number_value(value) when is_binary(value) do
+    case Float.parse(value) do
+      {parsed, ""} -> parsed
+      _ -> nil
+    end
+  end
+
+  defp normalize_number_value(_value), do: nil
+
+  defp model_change_from_message(message) when is_binary(message) do
+    case Regex.run(~r/^model changed:\s*([^\/]+)\/(.+)$/i, message) do
+      [_, provider, model] -> %{provider: String.trim(provider), model: String.trim(model)}
+      _ -> nil
+    end
+  end
+
+  defp model_change_from_message(_message), do: nil
 
   defp refine_event_from_message(event, message)
        when event in [:assistant, "assistant"] and is_binary(message) do
