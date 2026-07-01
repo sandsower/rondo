@@ -357,16 +357,7 @@ defmodule Rondo.ExtensionsTest do
     orchestrator_name = Module.concat(__MODULE__, :HttpOrchestrator)
     {:ok, orchestrator_pid} = Orchestrator.start_link(name: orchestrator_name)
 
-    stop_endpoint()
-
-    {:ok, _server_pid} =
-      HttpServer.start_link(
-        port: 0,
-        orchestrator: orchestrator_name,
-        snapshot_timeout_ms: 1_000
-      )
-
-    unlink_endpoint()
+    port = start_test_http_server!(orchestrator: orchestrator_name, snapshot_timeout_ms: 1_000)
 
     on_exit(fn ->
       if Process.alive?(orchestrator_pid), do: Process.exit(orchestrator_pid, :normal)
@@ -427,7 +418,6 @@ defmodule Rondo.ExtensionsTest do
       }
     end)
 
-    port = wait_for_bound_port()
     assert HttpServer.bound_port() == port
 
     {status, headers, body} = http_request(port, "GET", "/")
@@ -435,17 +425,23 @@ defmodule Rondo.ExtensionsTest do
     assert Map.fetch!(headers, "content-type") =~ "text/html"
     assert body =~ "Rondo Observability"
     assert body =~ "Blocks dispatch: paused_claim"
-    assert body =~ "stale: policy_revalidation_failed"
 
     {status, headers, body} = http_request(port, "GET", "/api/v1/state")
     assert status == 200
     assert Map.fetch!(headers, "content-type") =~ "application/json"
 
+    state_payload = Jason.decode!(body)
+
     assert %{
              "counts" => %{"running" => 1, "retrying" => 1},
              "running" => [%{"issue_identifier" => "MT-HTTP", "last_message" => "rendered", "turn_count" => 7}],
              "retrying" => [%{"issue_identifier" => "MT-RETRY", "error" => "boom"}]
-           } = Jason.decode!(body)
+           } = state_payload
+
+    assert %{
+             "blocks_dispatch" => true,
+             "stale_reason" => "policy_revalidation_failed: :invalid_paused_side_effect"
+           } = Enum.find(state_payload["paused"], &(&1["issue_identifier"] == "MT-PAUSED"))
 
     :sys.replace_state(orchestrator_pid, fn state ->
       update_in(state.running["issue-http"].last_claude_message, fn _ -> %{message: "structured"} end)
@@ -479,16 +475,7 @@ defmodule Rondo.ExtensionsTest do
     orchestrator_name = Module.concat(__MODULE__, :EscapingHttpOrchestrator)
     {:ok, orchestrator_pid} = Orchestrator.start_link(name: orchestrator_name)
 
-    stop_endpoint()
-
-    {:ok, _server_pid} =
-      HttpServer.start_link(
-        port: 0,
-        orchestrator: orchestrator_name,
-        snapshot_timeout_ms: 1_000
-      )
-
-    unlink_endpoint()
+    port = start_test_http_server!(orchestrator: orchestrator_name, snapshot_timeout_ms: 1_000)
 
     on_exit(fn ->
       if Process.alive?(orchestrator_pid), do: Process.exit(orchestrator_pid, :normal)
@@ -515,7 +502,6 @@ defmodule Rondo.ExtensionsTest do
       %{state | running: %{"issue-html" => running_entry}, retry_attempts: %{}}
     end)
 
-    port = wait_for_bound_port()
     {status, _headers, body} = http_request(port, "GET", "/")
     assert status == 200
     refute String.contains?(body, "<script>window.xssed=1</script>")
@@ -526,18 +512,7 @@ defmodule Rondo.ExtensionsTest do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     unavailable_orchestrator = Module.concat(__MODULE__, :UnavailableOrchestrator)
 
-    stop_endpoint()
-
-    {:ok, _server_pid} =
-      HttpServer.start_link(
-        port: 0,
-        orchestrator: unavailable_orchestrator,
-        snapshot_timeout_ms: 5
-      )
-
-    unlink_endpoint()
-
-    port = wait_for_bound_port()
+    port = start_test_http_server!(orchestrator: unavailable_orchestrator, snapshot_timeout_ms: 5)
 
     # POST /api/v1/state — router accepts POST, so returns 200
     {status, _headers, _body} = http_request(port, "POST", "/api/v1/state", "")
@@ -563,22 +538,12 @@ defmodule Rondo.ExtensionsTest do
     timeout_orchestrator = Module.concat(__MODULE__, :TimeoutOrchestrator)
     {:ok, timeout_pid} = SlowOrchestrator.start_link(name: timeout_orchestrator)
 
-    stop_endpoint()
-
-    {:ok, _timeout_server_pid} =
-      HttpServer.start_link(
-        port: 0,
-        orchestrator: timeout_orchestrator,
-        snapshot_timeout_ms: 1
-      )
-
-    unlink_endpoint()
+    timeout_port = start_test_http_server!(orchestrator: timeout_orchestrator, snapshot_timeout_ms: 1)
 
     on_exit(fn ->
       if Process.alive?(timeout_pid), do: Process.exit(timeout_pid, :normal)
     end)
 
-    timeout_port = wait_for_bound_port()
     {status, _headers, body} = http_request(timeout_port, "GET", "/api/v1/state")
     assert status == 200
     assert %{"error" => %{"code" => "snapshot_timeout"}} = Jason.decode!(body)
@@ -641,22 +606,11 @@ defmodule Rondo.ExtensionsTest do
         refresh: %{queued: true, coalesced: true, requested_at: DateTime.utc_now(), operations: ["poll"]}
       )
 
-    stop_endpoint()
-
-    {:ok, _server_pid} =
-      HttpServer.start_link(
-        port: 0,
-        orchestrator: orchestrator_name,
-        snapshot_timeout_ms: 50
-      )
-
-    unlink_endpoint()
+    port = start_test_http_server!(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     on_exit(fn ->
       if Process.alive?(orchestrator_pid), do: Process.exit(orchestrator_pid, :normal)
     end)
-
-    port = wait_for_bound_port()
 
     {status, _headers, body} = http_request(port, "GET", "/api/v1/state")
 
@@ -674,25 +628,38 @@ defmodule Rondo.ExtensionsTest do
     {:ok, unexpected_orchestrator_pid} =
       StaticOrchestrator.start_link(name: unexpected_orchestrator, snapshot: :unexpected)
 
-    stop_endpoint()
-
-    {:ok, _unexpected_server_pid} =
-      HttpServer.start_link(
-        port: 0,
-        orchestrator: unexpected_orchestrator,
-        snapshot_timeout_ms: 50
-      )
-
-    unlink_endpoint()
+    unexpected_port = start_test_http_server!(orchestrator: unexpected_orchestrator, snapshot_timeout_ms: 50)
 
     on_exit(fn ->
       if Process.alive?(unexpected_orchestrator_pid), do: Process.exit(unexpected_orchestrator_pid, :normal)
     end)
 
-    unexpected_port = wait_for_bound_port()
     {status, _headers, body} = http_request(unexpected_port, "GET", "/api/v1/MT-BOTH")
     assert status == 404
     assert %{"error" => %{"code" => "issue_not_found"}} = Jason.decode!(body)
+  end
+
+  test "http server teardown clears bound_port across repeated port-0 restarts" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    for iteration <- 1..3 do
+      orchestrator_name =
+        Module.concat(__MODULE__, String.to_atom("LifecycleHttpOrchestrator#{iteration}"))
+
+      {:ok, orchestrator_pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        if Process.alive?(orchestrator_pid), do: GenServer.stop(orchestrator_pid, :normal)
+      end)
+
+      port = start_test_http_server!(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+      assert HttpServer.bound_port() == port
+
+      stop_test_http_server()
+      assert :ok = GenServer.stop(orchestrator_pid, :normal)
+      assert_eventually(fn -> is_nil(HttpServer.bound_port()) end)
+      assert HttpServer.bound_port() == nil
+    end
   end
 
   defp wait_for_bound_port do
@@ -709,8 +676,8 @@ defmodule Rondo.ExtensionsTest do
     assert_eventually(fn -> tcp_accept_ready?(port) end)
 
     # Under load the Bandit acceptor can accept TCP connections before
-    # it's ready to process HTTP requests.  Send a real HTTP request
-    # and verify we get a response (not just an open socket).
+    # it's ready to process HTTP requests.  Send a real static-asset request
+    # and verify we get a response without depending on orchestrator snapshots.
     assert_eventually(fn -> http_ready?(port) end)
 
     port
@@ -730,7 +697,7 @@ defmodule Rondo.ExtensionsTest do
   defp http_ready?(port) do
     case :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 500) do
       {:ok, socket} ->
-        :ok = :gen_tcp.send(socket, "GET / HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n\r\n")
+        :ok = :gen_tcp.send(socket, "GET /dashboard.css HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n\r\n")
 
         ready? =
           case :gen_tcp.recv(socket, 0, 500) do
@@ -746,6 +713,20 @@ defmodule Rondo.ExtensionsTest do
     end
   end
 
+  defp start_test_http_server!(opts) do
+    stop_test_http_server()
+
+    {:ok, _server_pid} = HttpServer.start_link(Keyword.merge([port: 0], opts))
+    unlink_endpoint()
+    on_exit(&stop_test_http_server/0)
+
+    wait_for_bound_port()
+  end
+
+  defp stop_test_http_server do
+    Rondo.TestSupport.stop_default_http_server()
+  end
+
   defp unlink_endpoint do
     case Process.whereis(RondoWeb.Endpoint) do
       pid when is_pid(pid) -> Process.unlink(pid)
@@ -754,53 +735,7 @@ defmodule Rondo.ExtensionsTest do
   end
 
   defp stop_endpoint do
-    # Trap exits to avoid test process crashing from linked endpoint shutdown
-    was_trapping = Process.flag(:trap_exit, true)
-
-    try do
-      # Terminate the supervisor child (prevents restart by Rondo.Supervisor)
-      try do
-        Supervisor.terminate_child(Rondo.Supervisor, Rondo.HttpServer)
-      catch
-        :exit, _ -> :ok
-      end
-
-      case Process.whereis(RondoWeb.Endpoint) do
-        pid when is_pid(pid) ->
-          Process.unlink(pid)
-
-          try do
-            Supervisor.stop(pid, :shutdown, 2_000)
-          catch
-            :exit, _ -> :ok
-          end
-
-          # Wait for the process to terminate
-          ref = Process.monitor(pid)
-
-          receive do
-            {:DOWN, ^ref, :process, ^pid, _} -> :ok
-          after
-            2_000 -> :ok
-          end
-
-        _ ->
-          :ok
-      end
-
-      # Drain any EXIT messages from linked processes
-      drain_exits()
-    after
-      Process.flag(:trap_exit, was_trapping)
-    end
-  end
-
-  defp drain_exits do
-    receive do
-      {:EXIT, _pid, _reason} -> drain_exits()
-    after
-      50 -> :ok
-    end
+    stop_test_http_server()
   end
 
   defp http_request(port, method, path, body \\ nil, extra_headers \\ []) do
@@ -876,9 +811,9 @@ defmodule Rondo.ExtensionsTest do
     |> IO.iodata_to_binary()
   end
 
-  defp recv_all(socket, acc) do
-    case :gen_tcp.recv(socket, 0, 1_000) do
-      {:ok, chunk} -> recv_all(socket, acc <> chunk)
+  defp recv_all(socket, acc, timeout \\ 30_000) do
+    case :gen_tcp.recv(socket, 0, timeout) do
+      {:ok, chunk} -> recv_all(socket, acc <> chunk, 100)
       {:error, :closed} -> acc
       {:error, :timeout} -> acc
     end

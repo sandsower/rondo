@@ -52,6 +52,8 @@ If `workspace.root` points at a temporary directory, ledgers are ephemeral with 
 
 Checkpoint and built-in artifact paths are relative to `run_dir`. Archive links may point at the existing archive location outside the ledger.
 
+Artifact references are interpreted through the run evidence artifact catalog in code. The catalog treats each `{kind, path}` pair as the artifact identity, derives `status: "present"` or `"missing"` from the path when status is not explicit, and preserves explicit statuses such as `"tracked"`, `"skipped"`, and `"failed"`. `exportable: false` marks artifacts that must stay local, such as byte-exact patches that failed the secret scan. Re-linking the same `{kind, path}` updates that reference instead of appending a duplicate; distinct paths for the same kind remain separate evidence links.
+
 For `run-once --manifest` runs, `source_contract` records manifest provenance and planning metadata such as `schema`, `slice_id`, absolute manifest `path`, `sha256`, `parent_contract`, `repo`, `allowed_actions`, `process_provider`, `memory_provider`, and `output_expectations`. The manifest prompt/body is rendered into the issue description snapshot; the source contract block stays metadata-focused.
 
 A paused manifest includes an `interrupt` object with a stable reason, state, exact question, options, recommendation, gate evidence, and resume seeds such as run ID/path, workspace path, session ID, run reference when available, retry attempt, and gate artifact paths. Paused runs are discovered at orchestrator startup by scanning `.rondo_runs/*/*/manifest.json` for `status: "paused"` so they remain excluded from redispatch without relying on chat/session context.
@@ -132,6 +134,8 @@ Runs classified as `patch_contains_secret` do not emit a delivery artifact; the 
 ## Gate artifacts
 
 When workflow gates are configured, Rondo stores structured gate summaries and raw command output under `artifacts/gates/`. Agent-turn gate runs are namespaced by turn, for example `artifacts/gates/turn-0001/results.json`, so later continuation turns do not overwrite earlier evidence.
+
+Each `results.json` includes the ProcessProvider gate-selection envelope when available. For changed-file-aware providers this envelope records `changed_files`, selected/skipped explanations, unmatched-path warnings, and selector/provider metadata alongside the gates that actually ran. Changed paths are collected from the git workspace before post-turn gates using the run-start base commit when available, plus committed, staged, unstaged, and untracked paths.
 
 Gate artifact links use these kinds in the manifest:
 

@@ -3,7 +3,10 @@ defmodule RondoWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias Rondo.{Config, ModelUsage, Orchestrator, RunTimeline}
+  alias Rondo.{Config, ModelUsage, Orchestrator, RunLedger, RunOutcome, RunTimeline}
+  alias RondoWeb.ResultSummary
+
+  @dialyzer {:nowarn_function, archived_cost: 1}
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
@@ -17,6 +20,7 @@ defmodule RondoWeb.Presenter do
         paused = Map.get(snapshot, :paused, [])
         dispatch_blockers = Map.get(snapshot, :dispatch_blockers, [])
         needs_guidance = Enum.filter(paused, &guidance_entry?/1)
+        archived_table = archived_runs_table(archived)
 
         %{
           generated_at: generated_at,
@@ -32,8 +36,14 @@ defmodule RondoWeb.Presenter do
           needs_guidance: Enum.map(needs_guidance, &needs_guidance_entry_payload/1),
           paused: Enum.map(paused, &paused_entry_payload/1),
           dispatch_blockers: Enum.map(dispatch_blockers, &dispatch_blocker_payload/1),
-          archived: group_archived_by_ticket(archived),
-          run_timelines: RunTimeline.project(running, archived, archived_loader: &Orchestrator.load_archived_run/2),
+          archived: group_archived_by_ticket(archived_table),
+          archived_table: archived_table,
+          run_timelines:
+            RunTimeline.project(
+              running,
+              timeline_archived_runs(archived),
+              archived_loader: &Orchestrator.load_archived_run/2
+            ),
           model_usage: ModelUsage.aggregate(running, archived),
           claude_totals: Map.get(snapshot, :claude_totals, %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}),
           rate_limits: Map.get(snapshot, :rate_limits)
@@ -150,8 +160,12 @@ defmodule RondoWeb.Presenter do
       turn_count: Map.get(entry, :turn_count, 0),
       last_event: entry.last_claude_event,
       last_message: summarize_message(entry.last_claude_message),
+      last_result_payload: result_payload(entry),
+      final_report: Map.get(entry, :final_report),
       started_at: iso8601(entry.started_at),
       last_event_at: iso8601(entry.last_claude_timestamp),
+      run_id: Map.get(entry, :run_id),
+      run_dir: Map.get(entry, :run_dir),
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       model_routing: Map.get(entry, :model_routing),
       model_fallback: Map.get(entry, :model_fallback),
@@ -166,18 +180,21 @@ defmodule RondoWeb.Presenter do
         total_tokens: entry.claude_total_tokens
       },
       adapter: Map.get(entry, :adapter),
+      links: entry_links(entry),
       event_log: format_event_log(Map.get(entry, :event_log, []))
     }
   end
 
   defp retry_entry_payload(entry) do
-    %{
+    payload = %{
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       attempt: entry.attempt,
       due_at: due_at_iso8601(entry.due_in_ms),
       error: entry.error
     }
+
+    maybe_put_release_loop(payload, entry_value(entry, :release_loop))
   end
 
   defp dispatch_blocker_payload(entry) do
@@ -218,6 +235,9 @@ defmodule RondoWeb.Presenter do
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
       model_routing: Map.get(entry, :model_routing),
       model_fallback: Map.get(entry, :model_fallback),
+      final_report: Map.get(entry, :final_report),
+      last_result_payload: result_payload(entry),
+      links: entry_links(entry),
       suggested_responses: guidance_responses_from_interrupt(interrupt),
       upcoming_transitions: Map.get(interrupt, :upcoming_transitions, %{}),
       interrupt: interrupt,
@@ -254,7 +274,10 @@ defmodule RondoWeb.Presenter do
       :stale_reason,
       :revalidated_at,
       :tokens,
-      :event_log
+      :links,
+      :event_log,
+      :final_report,
+      :last_result_payload
     ])
     |> Map.merge(%{
       guidance_severity: Map.get(interrupt, :guidance_severity),
@@ -273,10 +296,13 @@ defmodule RondoWeb.Presenter do
       started_at: iso8601(running.started_at),
       last_event: running.last_claude_event,
       last_message: summarize_message(running.last_claude_message),
+      last_result_payload: result_payload(running),
+      final_report: Map.get(running, :final_report),
       last_event_at: iso8601(running.last_claude_timestamp),
       latest_gate: gate_payload(Map.get(running, :latest_gate)),
       model_routing: Map.get(running, :model_routing),
       model_fallback: Map.get(running, :model_fallback),
+      links: entry_links(running),
       tokens: %{
         input_tokens: running.claude_input_tokens,
         output_tokens: running.claude_output_tokens,
@@ -286,11 +312,64 @@ defmodule RondoWeb.Presenter do
   end
 
   defp retry_issue_payload(retry) do
-    %{
+    payload = %{
       attempt: retry.attempt,
       due_at: due_at_iso8601(retry.due_in_ms),
       error: retry.error
     }
+
+    maybe_put_release_loop(payload, entry_value(retry, :release_loop))
+  end
+
+  defp maybe_put_release_loop(payload, release_loop) do
+    case release_loop_retry_payload(release_loop) do
+      nil -> payload
+      release_loop_payload -> Map.put(payload, :release_loop, release_loop_payload)
+    end
+  end
+
+  defp release_loop_retry_payload(nil), do: nil
+
+  defp release_loop_retry_payload(release_loop) when is_map(release_loop) do
+    %{
+      phase: release_loop_value(release_loop, :phase),
+      action: release_loop_value(release_loop, :action),
+      blocked_reason: release_loop_value(release_loop, :blocked_reason),
+      wait_interval_seconds: release_loop_value(release_loop, :wait_interval_seconds),
+      recovery_kind: release_loop_value(release_loop, :recovery_kind),
+      closeout_state: release_loop_value(release_loop, :closeout_state),
+      feedback_count: release_loop_value(release_loop, :feedback_count),
+      feedback_comment_ids: release_loop_value(release_loop, :feedback_comment_ids),
+      mergeable: release_loop_value(release_loop, :mergeable),
+      merge_state_status: release_loop_value(release_loop, :merge_state_status),
+      pr: release_loop_pr_payload(release_loop_value(release_loop, :pr)),
+      checks: normalize_payload_map(release_loop_value(release_loop, :checks))
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp release_loop_retry_payload(_release_loop), do: nil
+
+  defp release_loop_pr_payload(nil), do: nil
+
+  defp release_loop_pr_payload(pr) when is_map(pr) do
+    %{
+      number: release_loop_value(pr, :number),
+      url: release_loop_value(pr, :url),
+      title: release_loop_value(pr, :title),
+      head_ref_name: release_loop_value(pr, :head_ref_name),
+      base_ref_name: release_loop_value(pr, :base_ref_name),
+      is_draft: release_loop_value(pr, :is_draft)
+    }
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp release_loop_pr_payload(_pr), do: nil
+
+  defp release_loop_value(map, key) when is_map(map) and is_atom(key) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
   end
 
   defp paused_issue_payload(paused) do
@@ -302,6 +381,221 @@ defmodule RondoWeb.Presenter do
   defp entry_value(entry, key) when is_map(entry) and is_atom(key) do
     Map.get(entry, key) || Map.get(entry, Atom.to_string(key))
   end
+
+  defp entry_links(entry) do
+    manifest = entry_manifest(entry)
+    issue_links = issue_links(entry, manifest)
+    review_links = review_links(entry, manifest)
+
+    %{
+      tracker: issue_links,
+      review: review_links
+    }
+  end
+
+  defp entry_manifest(%{ledger: %RunLedger{manifest: manifest}}) when is_map(manifest), do: manifest
+
+  defp entry_manifest(entry) do
+    case entry_value(entry, :run_dir) do
+      run_dir when is_binary(run_dir) and run_dir != "" ->
+        case RunLedger.load_manifest(run_dir) do
+          {:ok, manifest} when is_map(manifest) -> manifest
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp issue_links(entry, manifest) do
+    issue_urls =
+      [
+        entry_value(entry, :issue_url),
+        entry_issue_url(entry),
+        get_in(manifest || %{}, ["issue", "url"]),
+        get_in(manifest || %{}, ["source_contract", "issue", "url"]),
+        get_in(manifest || %{}, ["source_contract", "source_issue_url"]),
+        get_in(manifest || %{}, ["issue", "source_issue_url"]),
+        get_in(manifest || %{}, ["issue", "source_url"]),
+        get_in(manifest || %{}, ["source_issue", "url"])
+      ]
+      |> Enum.reject(&blank?/1)
+      |> Enum.uniq()
+
+    available =
+      issue_urls
+      |> Enum.map(&issue_link_item/1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq_by(& &1.url)
+
+    %{
+      available: available,
+      unavailable: issue_link_unavailable_items(available)
+    }
+  end
+
+  defp issue_link_unavailable_items(available) do
+    kinds = MapSet.new(Enum.map(available, & &1.kind))
+
+    cond do
+      MapSet.member?(kinds, :linear_issue) and MapSet.member?(kinds, :github_issue) ->
+        []
+
+      MapSet.member?(kinds, :linear_issue) ->
+        []
+
+      MapSet.member?(kinds, :github_issue) ->
+        []
+
+      available == [] ->
+        [%{kind: :issue, label: "Issue", icon: "?", url: nil, reason: "tracker metadata unavailable"}]
+
+      true ->
+        []
+    end
+  end
+
+  defp issue_link_item(url) when is_binary(url) do
+    case link_kind_for_url(url) do
+      {:linear_issue, label} -> %{kind: :linear_issue, label: label, icon: "L", url: url}
+      {:github_issue, label} -> %{kind: :github_issue, label: label, icon: "GH", url: url}
+      {:generic_issue, label} -> %{kind: :issue, label: label, icon: "↗", url: url}
+    end
+  end
+
+  defp issue_link_item(_url), do: nil
+
+  defp review_links(entry, manifest) do
+    pr = get_in(manifest || %{}, ["agent", "pr"]) || %{}
+    pr_url = pr_url(pr)
+    branch_name = branch_name(entry, manifest)
+    final_report_path = final_report_path(manifest)
+
+    candidates =
+      [
+        pr_link_item(pr),
+        branch_link_item(branch_name, manifest),
+        final_report_link_item(entry, final_report_path)
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    {available, unavailable} = Enum.split_with(candidates, &link_available?/1)
+
+    available = Enum.uniq_by(available, &{&1.kind, &1.url})
+    unavailable = Enum.reject(unavailable, &is_nil/1)
+
+    unavailable =
+      if available == [] and unavailable == [] do
+        [
+          %{
+            kind: :review,
+            label: "PR / review",
+            icon: "PR",
+            url: nil,
+            reason: review_unavailable_reason(branch_name, pr_url, final_report_path, entry, manifest)
+          }
+        ]
+      else
+        unavailable
+      end
+
+    %{available: available, unavailable: unavailable}
+  end
+
+  defp pr_link_item(%{} = pr) do
+    case pr_url(pr) do
+      url when is_binary(url) and url != "" ->
+        number = Map.get(pr, "number") || Map.get(pr, :number)
+        label = if is_integer(number) or is_binary(number), do: "PR ##{number}", else: "PR"
+        %{kind: :pull_request, label: label, icon: "PR", url: url}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp branch_link_item(nil, _manifest), do: nil
+
+  defp branch_link_item(branch_name, _manifest) when is_binary(branch_name) do
+    case Config.tracker_repo() do
+      repo when is_binary(repo) and repo != "" ->
+        %{kind: :branch, label: "Branch #{branch_name}", icon: "BR", url: "https://github.com/#{repo}/tree/#{URI.encode(branch_name)}"}
+
+      _ ->
+        %{kind: :branch, label: "Branch #{branch_name}", icon: "BR", url: nil, reason: "tracker repo unavailable"}
+    end
+  end
+
+  defp final_report_link_item(entry, final_report_path) when is_binary(final_report_path) and final_report_path != "" do
+    case entry_value(entry, :run_dir) do
+      run_dir when is_binary(run_dir) and run_dir != "" ->
+        absolute_path = Path.join(run_dir, final_report_path)
+
+        if File.exists?(absolute_path) do
+          %{kind: :final_report, label: "Final report", icon: "FR", url: "file://#{absolute_path}"}
+        else
+          %{kind: :final_report, label: "Final report", icon: "FR", url: nil, reason: "final report artifact missing"}
+        end
+
+      _ ->
+        %{kind: :final_report, label: "Final report", icon: "FR", url: nil, reason: "run directory unavailable"}
+    end
+  end
+
+  defp final_report_link_item(_entry, _final_report_path), do: nil
+
+  defp review_unavailable_reason(_branch_name, pr_url, _final_report_path, _entry, _manifest) do
+    if is_binary(pr_url) and pr_url != "" do
+      nil
+    else
+      "no branch, PR attachment, GitHub URL, or final report link"
+    end
+  end
+
+  defp link_available?(item) do
+    is_binary(Map.get(item, :url)) and Map.get(item, :url) != ""
+  end
+
+  defp branch_name(entry, manifest) do
+    entry_branch_name(entry) ||
+      get_in(manifest || %{}, ["agent", "pr", "head_ref_name"]) ||
+      get_in(manifest || %{}, ["agent", "branch_name"])
+  end
+
+  defp entry_branch_name(entry) do
+    case entry_value(entry, :issue) do
+      %{} = issue -> Map.get(issue, :branch_name) || Map.get(issue, "branch_name")
+      _ -> entry_value(entry, :branch_name)
+    end
+  end
+
+  defp final_report_path(manifest) do
+    get_in(manifest || %{}, ["final_report", "path"])
+  end
+
+  defp pr_url(%{} = pr) do
+    Map.get(pr, :url) || Map.get(pr, "url")
+  end
+
+  defp entry_issue_url(entry) do
+    case entry_value(entry, :issue) do
+      %{} = issue -> Map.get(issue, :url) || Map.get(issue, "url")
+      _ -> nil
+    end
+  end
+
+  defp link_kind_for_url(url) when is_binary(url) do
+    cond do
+      String.contains?(url, "linear.app") -> {:linear_issue, "Linear issue"}
+      String.contains?(url, "github.com") -> {:github_issue, "GitHub issue"}
+      true -> {:generic_issue, "Issue"}
+    end
+  end
+
+  defp blank?(value) when is_binary(value), do: String.trim(value) == ""
+  defp blank?(nil), do: true
+  defp blank?(_), do: false
 
   defp interrupt_payload(nil), do: nil
 
@@ -411,9 +705,47 @@ defmodule RondoWeb.Presenter do
     |> Enum.reject(&is_nil(&1.at))
   end
 
-  defp group_archived_by_ticket(archived) do
+  @timeline_recent_limit 10
+  @timeline_failure_limit 10
+  @archived_table_recent_limit 500
+  @archived_table_failure_limit 100
+
+  defp timeline_archived_runs(archived) do
+    recent = Enum.take(archived, @timeline_recent_limit)
+
+    failures =
+      archived
+      |> Enum.filter(&(RunOutcome.kind(&1) == :failed))
+      |> Enum.take(@timeline_failure_limit)
+
+    (recent ++ failures)
+    |> Enum.uniq_by(&{Map.get(&1, :identifier), Map.get(&1, :started_at)})
+  end
+
+  @spec archived_runs_table([map()]) :: [map()]
+  def archived_runs_table(archived) when is_list(archived) do
+    defaults = %{project: Config.linear_project_slug(), repo: Config.tracker_repo()}
+
     archived
-    |> Enum.map(&archived_entry_payload/1)
+    |> archived_table_window()
+    |> Enum.map(&archived_entry_payload(&1, defaults))
+    |> Enum.sort_by(&(&1.finished_at || &1.started_at || ""), :desc)
+  end
+
+  defp archived_table_window(archived) do
+    recent = Enum.take(archived, @archived_table_recent_limit)
+
+    failures =
+      archived
+      |> Enum.filter(&(RunOutcome.kind(&1) == :failed))
+      |> Enum.take(@archived_table_failure_limit)
+
+    (recent ++ failures)
+    |> Enum.uniq_by(&{Map.get(&1, :identifier), Map.get(&1, :started_at)})
+  end
+
+  defp group_archived_by_ticket(archived_rows) do
+    archived_rows
     |> Enum.group_by(& &1.issue_identifier)
     |> Enum.map(fn {identifier, runs} ->
       sorted_runs = Enum.sort_by(runs, & &1.started_at, :asc)
@@ -421,39 +753,102 @@ defmodule RondoWeb.Presenter do
 
       %{
         issue_identifier: identifier,
+        issue_title: latest.issue_title,
         latest_result: latest.exit_reason,
+        latest_result_payload: Map.get(latest, :final_report),
+        latest_outcome: Map.get(latest, :outcome_display) || RunOutcome.display(latest),
         latest_finished_at: latest.finished_at,
-        total_tokens: Enum.reduce(runs, 0, fn r, acc -> acc + r.tokens.total_tokens end),
+        total_tokens: Enum.reduce(runs, 0, fn r, acc -> acc + total_tokens(r) end),
         run_count: length(runs),
+        links: Map.get(latest, :links),
         runs: sorted_runs
       }
     end)
     |> Enum.sort_by(& &1.latest_finished_at, :desc)
   end
 
-  defp archived_entry_payload(entry) do
-    started_at = iso8601(entry.started_at) || to_string(entry.started_at)
+  defp archived_entry_payload(entry, defaults) do
+    started_value = Map.get(entry, :started_at)
+    finished_value = Map.get(entry, :finished_at)
+    started_at = timestamp_payload(started_value)
+    finished_at = timestamp_payload(finished_value)
+    outcome = Map.get(entry, :exit_reason)
+    outcome_display = RunOutcome.display(entry)
 
     %{
-      issue_id: entry.issue_id,
-      issue_identifier: entry.identifier,
-      session_id: entry.session_id,
-      state: entry.state,
+      issue_id: Map.get(entry, :issue_id),
+      issue_identifier: Map.get(entry, :identifier),
+      issue_title: Map.get(entry, :issue_title),
+      issue_url: Map.get(entry, :issue_url),
+      linear_url: Map.get(entry, :issue_url),
+      pr_url: Map.get(entry, :pr_url),
+      project: Map.get(entry, :project) || defaults.project,
+      repo: Map.get(entry, :repo) || defaults.repo,
+      workspace: Map.get(entry, :workspace),
+      session_id: Map.get(entry, :session_id),
+      state: Map.get(entry, :state),
+      status: outcome_display.label,
+      outcome: outcome,
+      outcome_display: outcome_display,
       started_at: started_at,
-      finished_at: iso8601(entry.finished_at) || to_string(entry.finished_at),
-      exit_reason: entry.exit_reason,
+      finished_at: finished_at,
+      duration_ms: duration_ms(started_value, finished_value),
+      exit_reason: outcome,
       non_active_state: Map.get(entry, :non_active_state),
-      turn_count: entry.turn_count,
+      turn_count: Map.get(entry, :turn_count),
+      run_id: Map.get(entry, :run_id),
+      run_dir: Map.get(entry, :run_dir),
       latest_gate: gate_payload(Map.get(entry, :latest_gate)),
-      tokens: entry.tokens,
-      model_routing: Map.get(entry, :model_routing),
+      tokens: normalize_tokens(Map.get(entry, :tokens, %{})),
+      cost: archived_cost_or_log(entry),
       model: display_model(entry),
       provider: provider_from_entry(entry),
-      cost: log_cost(entry),
+      model_routing: Map.get(entry, :model_routing),
       adapter: Map.get(entry, :adapter),
-      filename: run_filename(entry.started_at)
+      final_report: Map.get(entry, :final_report),
+      last_result_payload: Map.get(entry, :final_report),
+      last_meaningful_result: last_meaningful_result(entry, outcome),
+      links: entry_links(entry),
+      filename: run_filename(Map.get(entry, :started_at))
     }
   end
+
+  defp normalize_tokens(tokens) when is_map(tokens) do
+    %{
+      input_tokens: Map.get(tokens, :input_tokens) || Map.get(tokens, "input_tokens") || 0,
+      output_tokens: Map.get(tokens, :output_tokens) || Map.get(tokens, "output_tokens") || 0,
+      total_tokens: Map.get(tokens, :total_tokens) || Map.get(tokens, "total_tokens") || 0
+    }
+  end
+
+  defp normalize_tokens(_tokens), do: %{input_tokens: 0, output_tokens: 0, total_tokens: 0}
+
+  defp total_tokens(run), do: get_in(run, [:tokens, :total_tokens]) || 0
+
+  defp last_meaningful_result(entry, outcome) do
+    latest_gate = Map.get(entry, :latest_gate) || %{}
+
+    cond do
+      gate_status = Map.get(latest_gate, :status) || Map.get(latest_gate, "status") -> "gates #{gate_status}"
+      is_binary(outcome) -> outcome
+      true -> "n/a"
+    end
+  end
+
+  defp duration_ms(%DateTime{} = started_at, %DateTime{} = finished_at) do
+    max(DateTime.diff(finished_at, started_at, :millisecond), 0)
+  end
+
+  defp duration_ms(started_at, finished_at) when is_binary(started_at) and is_binary(finished_at) do
+    with {:ok, started, _} <- DateTime.from_iso8601(started_at),
+         {:ok, finished, _} <- DateTime.from_iso8601(finished_at) do
+      max(DateTime.diff(finished, started, :millisecond), 0)
+    else
+      _ -> nil
+    end
+  end
+
+  defp duration_ms(_started_at, _finished_at), do: nil
 
   defp run_filename(%DateTime{} = dt) do
     dt
@@ -488,11 +883,83 @@ defmodule RondoWeb.Presenter do
       message = summarize_message(entry[:message])
       event = refine_event_from_message(entry[:event], message)
 
-      %{at: iso8601(entry[:at]), event: event, message: message, tokens: normalized_log_tokens(entry[:tokens])}
+      %{
+        at: iso8601(entry[:at]),
+        event: event,
+        message: message,
+        tokens: normalize_event_tokens(Map.get(entry, :tokens)),
+        model_change: model_change_from_message(message)
+      }
     end)
   end
 
   defp format_event_log(_), do: []
+
+  defp normalize_event_tokens(nil), do: nil
+
+  defp normalize_event_tokens(tokens) when is_map(tokens) do
+    cache_read_tokens = normalize_token_integer(tokens, [:cache_read_tokens, "cache_read_tokens", :cached_input_tokens, "cached_input_tokens"])
+    cache_write_tokens = normalize_token_integer(tokens, [:cache_write_tokens, "cache_write_tokens"])
+
+    %{
+      input_tokens: normalize_token_integer(tokens, [:input_tokens, "input_tokens"]) || 0,
+      output_tokens: normalize_token_integer(tokens, [:output_tokens, "output_tokens"]) || 0,
+      total_tokens: normalize_token_integer(tokens, [:total_tokens, "total_tokens"]) || 0,
+      cache_read_tokens: cache_read_tokens || 0,
+      cache_write_tokens: cache_write_tokens || 0,
+      cached_tokens: (cache_read_tokens || 0) + (cache_write_tokens || 0),
+      cost: normalize_token_number(tokens, [:cost, "cost"])
+    }
+  end
+
+  defp normalize_event_tokens(_tokens), do: nil
+
+  defp normalize_token_integer(tokens, keys) when is_map(tokens) and is_list(keys) do
+    keys
+    |> Enum.find_value(&Map.get(tokens, &1))
+    |> normalize_integer_value()
+  end
+
+  defp normalize_token_integer(_tokens, _keys), do: nil
+
+  defp normalize_token_number(tokens, keys) when is_map(tokens) and is_list(keys) do
+    keys
+    |> Enum.find_value(&Map.get(tokens, &1))
+    |> normalize_number_value()
+  end
+
+  defp normalize_token_number(_tokens, _keys), do: nil
+
+  defp normalize_integer_value(value) when is_integer(value), do: value
+
+  defp normalize_integer_value(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {parsed, ""} -> parsed
+      _ -> nil
+    end
+  end
+
+  defp normalize_integer_value(_value), do: nil
+
+  defp normalize_number_value(value) when is_number(value), do: value
+
+  defp normalize_number_value(value) when is_binary(value) do
+    case Float.parse(value) do
+      {parsed, ""} -> parsed
+      _ -> nil
+    end
+  end
+
+  defp normalize_number_value(_value), do: nil
+
+  defp model_change_from_message(message) when is_binary(message) do
+    case Regex.run(~r/^model changed:\s*([^\/]+)\/(.+)$/i, message) do
+      [_, provider, model] -> %{provider: String.trim(provider), model: String.trim(model)}
+      _ -> nil
+    end
+  end
+
+  defp model_change_from_message(_message), do: nil
 
   defp refine_event_from_message(event, message)
        when event in [:assistant, "assistant"] and is_binary(message) do
@@ -505,17 +972,6 @@ defmodule RondoWeb.Presenter do
   end
 
   defp refine_event_from_message(event, _message), do: event
-
-  defp normalized_log_tokens(tokens) when is_map(tokens) do
-    %{
-      input_tokens: Map.get(tokens, :input_tokens) || Map.get(tokens, "input_tokens") || 0,
-      output_tokens: Map.get(tokens, :output_tokens) || Map.get(tokens, "output_tokens") || 0,
-      total_tokens: Map.get(tokens, :total_tokens) || Map.get(tokens, "total_tokens") || 0,
-      cost: Map.get(tokens, :cost) || Map.get(tokens, "cost")
-    }
-  end
-
-  defp normalized_log_tokens(_tokens), do: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, cost: nil}
 
   defp linear_message?(message), do: String.contains?(message, "linear") or String.contains?(message, "Linear")
 
@@ -540,8 +996,8 @@ defmodule RondoWeb.Presenter do
     ]
   end
 
-  defp summarize_message(%{message: message}) when is_binary(message), do: message
-  defp summarize_message(message) when is_binary(message), do: message
+  defp summarize_message(%{message: message}), do: ResultSummary.preview(message)
+  defp summarize_message(message) when is_binary(message), do: ResultSummary.preview(message)
   defp summarize_message(_message), do: nil
 
   defp display_model(entry) when is_map(entry) do
@@ -559,6 +1015,36 @@ defmodule RondoWeb.Presenter do
     display_model(entry)
     |> ModelUsage.provider_from_model()
   end
+
+  defp archived_cost_or_log(entry) do
+    case archived_cost(entry) do
+      nil -> log_cost(entry)
+      cost -> cost
+    end
+  end
+
+  defp archived_cost(entry) do
+    if is_map(entry) do
+      cond do
+        Map.has_key?(entry, :cost) -> normalize_explicit_cost(Map.get(entry, :cost))
+        Map.has_key?(entry, "cost") -> normalize_explicit_cost(Map.get(entry, "cost"))
+        true -> nil
+      end
+    else
+      nil
+    end
+  end
+
+  defp normalize_explicit_cost(cost) when is_number(cost), do: Float.round(cost / 1.0, 6)
+
+  defp normalize_explicit_cost(cost) when is_binary(cost) do
+    case Float.parse(cost) do
+      {parsed, ""} -> Float.round(parsed, 6)
+      _ -> nil
+    end
+  end
+
+  defp normalize_explicit_cost(_cost), do: nil
 
   defp log_cost(entry) when is_map(entry) do
     entry
@@ -600,6 +1086,16 @@ defmodule RondoWeb.Presenter do
   end
 
   defp guidance_responses_from_interrupt(_interrupt), do: []
+
+  defp result_payload(entry) when is_map(entry) do
+    Map.get(entry, :final_report) ||
+      Map.get(entry, "final_report") ||
+      case Map.get(entry, :last_claude_message) || Map.get(entry, "last_claude_message") do
+        %{message: message} -> message
+        %{"message" => message} -> message
+        _ -> nil
+      end
+  end
 
   defp state_mismatch?(paused_state, tracker_state) when is_binary(paused_state) and is_binary(tracker_state),
     do: paused_state != tracker_state
@@ -663,11 +1159,16 @@ defmodule RondoWeb.Presenter do
     %{
       labels: Enum.map(archived_groups, & &1.issue_identifier),
       values: Enum.map(archived_groups, & &1.total_tokens),
-      colors: Enum.map(archived_groups, & &1.latest_result)
+      colors: Enum.map(archived_groups, &archived_outcome_kind/1)
     }
   end
 
   def run_outcomes(_), do: %{labels: [], values: [], colors: []}
+
+  defp archived_outcome_kind(%{latest_outcome: %{kind: kind}}) when is_binary(kind), do: kind
+  defp archived_outcome_kind(%{latest_outcome: %{kind: kind}}), do: to_string(kind)
+  defp archived_outcome_kind(%{latest_result: result}) when is_binary(result), do: result
+  defp archived_outcome_kind(_), do: "terminated"
 
   @spec run_token_comparison(list()) :: map()
   def run_token_comparison(runs) when is_list(runs) do

@@ -142,6 +142,8 @@ Minimal example:
 tracker:
   kind: linear
   project_slug: "..."
+  review_states:
+    - In Review
 workspace:
   root: ~/code/workspaces
 hooks:
@@ -212,6 +214,11 @@ truth. Candidate and cleanup listing uses `gh issue list --limit 1000`; repos wi
 issues should narrow `label_filter` until a paginated adapter lands. See
 [`examples/github-WORKFLOW.md`](examples/github-WORKFLOW.md) for a fuller prompt.
 
+For Linear-backed workflows, `tracker.review_states` lets you declare PR babysit states such as
+`In Review` or `Human Review`. When `release_loop.enabled: true`, those states stay on the PR
+lifecycle path so Rondo can watch checks, respond to review feedback, and merge only when the
+configured policy allows it.
+
 Notes:
 
 - If a value is omitted or set to `null`, defaults are used. Explicit malformed values fail
@@ -266,8 +273,11 @@ Notes:
   values are `native` and fixture-backed `beislid`. The native provider preserves standalone
   `WORKFLOW.md` behavior for flat gates, prompts, action-policy evaluation, model hints, and run
   metadata. The Beislið provider consumes an explicit approved process artifact and maps its gate,
-  guide/proof metadata, prompt context, and fixture action-policy decision onto the same boundary;
-  it does not run a Beislið exporter/runtime or make Beislið required for Rondo.
+  guide/proof metadata, prompt context, and fixture action-policy decision onto the same boundary.
+  Artifacts can declare changed-file `gate_sets`; Rondo passes changed paths collected from the git
+  workspace before post-turn gates, and the provider returns a deterministic de-duplicated union of
+  matching gates with unmatched-path warnings. It does not run a Beislið exporter/runtime or make
+  Beislið required for Rondo.
 - `process_provider.artifact_path` optionally points at an approved Beislið process artifact JSON
   when `kind: beislid`. For manifest runs, `source_contract.process_provider.artifact_path` takes
   precedence; `source_contract.path` is used only when that file is explicitly a Beislið process
@@ -285,8 +295,13 @@ Notes:
   `sonnet`, `opus`, and `opus`. A repo floor such as `floor: {tier: standard, mode: require}` raises
   lower requested tiers to the floor and records status `fallback` with an explanatory reason. Rondo
   re-evaluates routing at turn/phase boundaries, and selector values normalize hyphens/underscores so
-  `context-discovery` and `context_discovery` match deterministically. Resolved routing is passed to
-  adapters per run and persisted under `agent.model_routing` in the run ledger.
+  `context-discovery` and `context_discovery` match deterministically. When a workflow defines concrete
+  `frontier` and `standard` tier candidates, native Rondo separates fresh ticket runs into a generic
+  planning phase followed by an implementation phase: planning defaults to `frontier`, writes a
+  `planning_completed` checkpoint, and the implementation continuation defaults to `standard` unless
+  the planning final report recommends `recommended_implementation_tier: "heavy"`. These phases are
+  provider-neutral (`planning` / `implementation`) and do not require Beislið skill names. Resolved
+  routing is passed to adapters per run and persisted under `agent.model_routing` in the run ledger.
 - `agent.max_turns` caps how many back-to-back agent turns Rondo will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Rondo uses a default prompt template that includes the issue
@@ -297,7 +312,8 @@ Notes:
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - Use top-level `gates` for deterministic validation commands Rondo runs after each successful
   agent turn. Gates run in the issue workspace and persist stdout/stderr plus `results.json` under
-  the run ledger. The first gate failure, error, or timeout causes the run to fail/retry with gate
+  the run ledger. `results.json` includes the provider gate-selection envelope, including changed
+  files, selected/skipped reasons, warnings, and selector/provider metadata when available. The first gate failure, error, or timeout causes the run to fail/retry with gate
   evidence preserved; a repeated gate-failed retry pauses the run with a durable human interrupt
   instead of continuing automatic retries. When `gate_reuse.enabled: true` (default), Rondo also
   records a workspace identity plus gate signature and can reuse the prior passing gate result on an
@@ -309,15 +325,17 @@ Notes:
 - Opt into post-run clean evaluation with `clean_eval.enabled: true`. After a successful run-once
   run, Rondo re-applies the run's `rondo.patch/v0` patch artifact on a pristine detached git
   worktree of the recorded base ref (created under `<workspace.root>/.rondo_clean_eval/<run_id>`
-  and always removed afterwards), runs evaluator gates there, and records the outcome in the run
-  ledger (`clean_eval/result.json`, gate logs under `clean_eval/gates/`, a `clean_eval_completed`
-  checkpoint, and a manifest `clean_eval` pass/fail block). Patch apply failures are recorded as
-  evaluator failures; runs without a patch artifact record `skipped`. Optional keys:
-  `clean_eval.base_ref` overrides the patch metadata base ref, and `clean_eval.gates` (same shape
-  as top-level `gates`) overrides which gates run during clean evaluation. When `clean_eval.gates`
-  is absent the top-level `gates` run; an explicit `clean_eval.gates: []` means apply-only
-  evaluation (pass if the patch applies cleanly). Gate timeouts are recorded as environment
-  errors, not evaluator failures.
+  and always removed afterwards), asks the configured `process_provider` for its `pre_pr` gate
+  selection, runs those evaluator gates there, and records the outcome in the run ledger
+  (`clean_eval/result.json`, gate logs under `clean_eval/gates/`, a `clean_eval_completed`
+  checkpoint, and a manifest `clean_eval` pass/fail block). Clean-eval `fail` and `error` outcomes
+  block run-once completion; `pass` and no-patch `skipped` outcomes are non-blocking. Patch apply
+  failures are recorded as evaluator failures. Optional keys: `clean_eval.base_ref` overrides the
+  patch metadata base ref. For the native process provider, `clean_eval.gates` (same shape as
+  top-level `gates`) overrides which gates run during pre-PR clean evaluation; when absent the
+  top-level `gates` run, and an explicit `clean_eval.gates: []` means apply-only evaluation (pass
+  if the patch applies cleanly). Beislið process artifacts should provide staged `pre_pr` gates.
+  Gate timeouts are recorded as environment errors, not evaluator failures.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
 - `tracker.repo` is required for `tracker.kind: github` and uses `owner/repo` syntax.
 - `tracker.state_label_prefix` defaults to `status:` for GitHub label-emulated workflow states.

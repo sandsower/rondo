@@ -13,6 +13,7 @@ defmodule Rondo.RunLedger do
   """
 
   alias Rondo.{Config, DeliveryArtifact, FinalReport, Linear.Issue, ProcessProvider, Redaction, RemoteShell}
+  alias Rondo.RunEvidence.ArtifactCatalog
 
   @schema_version 1
   @events_schema "rondo.events/v0"
@@ -344,7 +345,7 @@ defmodule Rondo.RunLedger do
   defp do_link_artifacts(%__MODULE__{} = ledger, artifacts) when is_list(artifacts) do
     normalized_artifacts =
       artifacts
-      |> Enum.filter(&valid_artifact?/1)
+      |> Enum.filter(&ArtifactCatalog.valid?/1)
       |> Enum.map(&normalize_artifact(&1, ledger.run_dir))
 
     if normalized_artifacts == [] do
@@ -996,30 +997,12 @@ defmodule Rondo.RunLedger do
   defp terminal_checkpoint_kind("terminated"), do: :terminated
   defp terminal_checkpoint_kind(_status), do: :failed
 
-  defp upsert_artifact(artifacts, artifact) when is_list(artifacts) do
-    if Enum.any?(artifacts, &(&1 == artifact)), do: artifacts, else: artifacts ++ [artifact]
-  end
-
-  defp upsert_artifact(_artifacts, artifact), do: [artifact]
-
-  defp valid_artifact?(%{"kind" => kind, "path" => path}) when is_binary(kind) and is_binary(path), do: true
-  defp valid_artifact?(%{kind: kind, path: path}) when is_binary(kind) and is_binary(path), do: true
-  defp valid_artifact?(_artifact), do: false
+  defp upsert_artifact(artifacts, artifact), do: ArtifactCatalog.upsert(artifacts, artifact)
 
   defp normalize_artifact(artifact, run_dir) do
-    artifact = sanitize_value(artifact)
-    status = artifact["status"] || artifact_status(artifact, run_dir)
-    Map.put(artifact, "status", status)
-  end
-
-  defp artifact_status(%{"path" => path}, run_dir) when is_binary(path) do
-    full_path = if Path.type(path) == :relative, do: Path.join(run_dir, path), else: path
-
-    if File.exists?(full_path) do
-      "present"
-    else
-      "missing"
-    end
+    artifact
+    |> sanitize_value()
+    |> ArtifactCatalog.normalize(run_dir)
   end
 
   defp issue_identifier(issue), do: issue_value(issue, :identifier) || issue_value(issue, :id) || "issue"

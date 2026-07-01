@@ -18,6 +18,7 @@ defmodule Rondo.ProcessProviderTest do
   test "native provider exposes current workflow gates and unsupported rich features" do
     write_workflow_file!(Workflow.workflow_file_path(),
       gates: [%{name: "unit", command: "mix test", timeout_ms: 120_000}],
+      clean_eval_gates: [%{name: "clean-eval", command: "mix test --list", timeout_ms: 30_000}],
       claude_model: "claude-test",
       claude_allowed_tools: ["Read", "Bash"]
     )
@@ -35,6 +36,15 @@ defmodule Rondo.ProcessProviderTest do
             }} = Native.select_gates()
 
     assert reason =~ "WORKFLOW.md"
+
+    assert {:ok,
+            %{
+              gates: [%{name: "clean-eval", command: "mix test --list", timeout_ms: 30_000, action_classes: ["read"]}],
+              selected: [%{name: "clean-eval", reason: pre_pr_reason}],
+              metadata: %{stage: "pre_pr"}
+            }} = Native.select_gates(stage: "pre_pr")
+
+    assert pre_pr_reason =~ "pre-PR"
 
     assert {:ok, []} = Native.select_guides()
     assert {:ok, []} = Native.proof_requirements()
@@ -113,6 +123,221 @@ defmodule Rondo.ProcessProviderTest do
                 stage: :post_turn
               }
             }} = Beislid.select_gates(stage: :post_turn)
+  end
+
+  test "beislid provider filters staged gates for pre-PR selection" do
+    temp_dir = Path.join(System.tmp_dir!(), "rondo-beislid-provider-stages-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(temp_dir)
+    on_exit(fn -> File.rm_rf(temp_dir) end)
+
+    artifact_path =
+      write_json!(temp_dir, "staged.json", %{
+        "schema" => "beislid-process-artifact-v1",
+        "id" => "staged-fixture",
+        "status" => "approved",
+        "gates" => [
+          %{"name" => "turn", "command" => "true", "stage" => "post_turn"},
+          %{"name" => "pre-pr", "command" => "true", "stage" => "pre_pr"},
+          %{"name" => "shared", "command" => "true", "stage" => "shared"},
+          %{"name" => "unstaged", "command" => "true"}
+        ]
+      })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      process_provider_kind: "beislid",
+      process_provider_artifact_path: artifact_path
+    )
+
+    assert {:ok, %{gates: pre_pr_gates, metadata: %{stage: :pre_pr}}} = Beislid.select_gates(stage: :pre_pr)
+    assert Enum.map(pre_pr_gates, & &1.name) == ["pre-pr", "shared", "unstaged"]
+
+    assert {:ok, %{gates: post_turn_gates}} = Beislid.select_gates(stage: :post_turn)
+    assert Enum.map(post_turn_gates, & &1.name) == ["turn", "shared", "unstaged"]
+  end
+
+  test "beislid provider selects deterministic gate union from changed-file selectors" do
+    temp_dir = Path.join(System.tmp_dir!(), "rondo-beislid-provider-selectors-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(temp_dir)
+    on_exit(fn -> File.rm_rf(temp_dir) end)
+
+    artifact_path =
+      write_json!(temp_dir, "selectors.json", %{
+        "schema" => "beislid-process-artifact-v1",
+        "id" => "selector-artifact",
+        "status" => "approved",
+        "gate_sets" => [
+          %{
+            "id" => "runtime",
+            "paths" => ["lib/**/*.ex"],
+            "gates" => [
+              %{"name" => "compile", "command" => "mix compile", "reason" => "runtime compile proof"},
+              %{"name" => "unit", "command" => "mix test", "reason" => "runtime unit proof"}
+            ]
+          },
+          %{
+            "id" => "tests",
+            "paths" => ["test/**/*.exs"],
+            "gates" => [
+              %{"name" => "unit", "command" => "mix test", "reason" => "test unit proof"},
+              %{"name" => "coverage", "command" => "mix test --cover", "reason" => "test coverage proof"}
+            ]
+          }
+        ],
+        "action_policy" => %{"decision" => "allow"}
+      })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      process_provider_kind: "beislid",
+      process_provider_artifact_path: artifact_path
+    )
+
+    assert {:ok,
+            %{
+              gates: [%{name: "compile"}, %{name: "unit"}, %{name: "coverage"}],
+              selected: selected,
+              skipped: skipped,
+              warnings: warnings,
+              changed_files: ["docs/usage.md", "lib/rondo/gates.ex", "test/rondo/gates_test.exs"],
+              metadata: %{selector_mode: "changed_files", matched_selectors: ["runtime", "tests"]}
+            }} =
+             Beislid.select_gates(
+               changed_files: ["test/rondo/gates_test.exs", "docs/usage.md", "lib/rondo/gates.ex"],
+               stage: :post_turn
+             )
+
+    assert Enum.map(selected, & &1.name) == ["compile", "unit", "coverage"]
+    assert Enum.any?(List.wrap(skipped), &(&1.name == "runtime" and &1.reason =~ "matched")) == false
+    assert [%{message: warning, path: "docs/usage.md"}] = warnings
+    assert warning =~ "no provider gate selector matched"
+  end
+
+  test "beislid provider reports selectors that match paths but no gates for selected stage" do
+    temp_dir = Path.join(System.tmp_dir!(), "rondo-beislid-provider-stage-empty-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(temp_dir)
+    on_exit(fn -> File.rm_rf(temp_dir) end)
+
+    artifact_path =
+      write_json!(temp_dir, "stage-empty.json", %{
+        "schema" => "beislid-process-artifact-v1",
+        "id" => "stage-empty-artifact",
+        "status" => "approved",
+        "gate_sets" => [
+          %{
+            "id" => "runtime",
+            "paths" => ["lib/**/*.ex"],
+            "gates" => [
+              %{"name" => "post-turn-only", "command" => "mix test", "stage" => "post_turn"}
+            ]
+          }
+        ]
+      })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      process_provider_kind: "beislid",
+      process_provider_artifact_path: artifact_path
+    )
+
+    assert {:ok,
+            %{
+              gates: [],
+              selected: [],
+              skipped: [%{name: "runtime", reason: reason}],
+              warnings: [%{selector: "runtime", stage: "pre_pr"}],
+              metadata: %{matched_selectors: [], stage_empty_selectors: ["runtime"]}
+            }} = Beislid.select_gates(changed_files: ["lib/rondo/gates.ex"], stage: :pre_pr)
+
+    assert reason =~ "no gates matched stage pre_pr"
+
+    any_stage_path =
+      write_json!(temp_dir, "any-stage-empty.json", %{
+        "schema" => "beislid-process-artifact-v1",
+        "id" => "any-stage-empty-artifact",
+        "status" => "approved",
+        "gate_sets" => [
+          %{
+            "id" => "runtime",
+            "paths" => ["lib/**/*.ex"],
+            "gates" => []
+          }
+        ]
+      })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      process_provider_kind: "beislid",
+      process_provider_artifact_path: any_stage_path
+    )
+
+    assert {:ok, %{skipped: [%{reason: any_stage_reason}]}} = Beislid.select_gates(changed_files: ["lib/rondo/gates.ex"])
+    assert any_stage_reason =~ "no gates matched stage any"
+  end
+
+  test "beislid provider matches trailing slash and prefix selectors deterministically" do
+    temp_dir = Path.join(System.tmp_dir!(), "rondo-beislid-provider-selector-paths-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(temp_dir)
+    on_exit(fn -> File.rm_rf(temp_dir) end)
+
+    artifact_path =
+      write_json!(temp_dir, "selector-paths.json", %{
+        "schema" => "beislid-process-artifact-v1",
+        "id" => "selector-paths-artifact",
+        "status" => "approved",
+        "gate_sets" => [
+          %{
+            "id" => "docs-root",
+            "paths" => ["docs/"],
+            "gates" => [
+              %{"name" => "docs-root", "command" => "mix test docs-root", "reason" => "docs tree proof"}
+            ]
+          },
+          %{
+            "id" => "docs-changelog",
+            "paths" => ["docs/changelog"],
+            "gates" => [
+              %{"name" => "docs-changelog", "command" => "mix test docs-changelog", "reason" => "docs changelog proof"}
+            ]
+          },
+          %{
+            "id" => "docs-usage",
+            "paths" => ["docs/usage.md"],
+            "gates" => [
+              %{"name" => "docs-usage", "command" => "mix test docs-usage", "reason" => "docs usage proof"}
+            ]
+          }
+        ],
+        "action_policy" => %{"decision" => "allow"}
+      })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      process_provider_kind: "beislid",
+      process_provider_artifact_path: artifact_path
+    )
+
+    assert %{status: :ok, checks: %{changed_file_selectors: :ok}} = Beislid.probe([])
+
+    assert {:ok,
+            %{
+              gates: [%{name: "docs-root"}, %{name: "docs-changelog"}, %{name: "docs-usage"}],
+              selected: selected,
+              skipped: skipped,
+              changed_files: ["docs/changelog/file.txt", "docs/notes/todo.md", "docs/usage.md"],
+              metadata: %{selector_mode: "changed_files", matched_selectors: ["docs-root", "docs-changelog", "docs-usage"]}
+            }} =
+             Beislid.select_gates(
+               changed_files: ["docs/notes/todo.md", "docs/changelog/file.txt", "docs/usage.md"],
+               stage: :post_turn
+             )
+
+    assert Enum.map(selected, & &1.name) == ["docs-root", "docs-changelog", "docs-usage"]
+    assert Enum.map(skipped, & &1.name) == []
+
+    assert {:ok,
+            %{
+              gates: [],
+              selected: [],
+              skipped: [%{name: "docs-root"}, %{name: "docs-changelog"}, %{name: "docs-usage"}],
+              changed_files: []
+            }} =
+             Beislid.select_gates(changed_files: :unexpected, stage: :post_turn)
   end
 
   test "beislid provider augments native prompt and evaluates fixture action policy" do
@@ -342,6 +567,8 @@ defmodule Rondo.ProcessProviderTest do
           {"invalid.json", [], :invalid_artifact},
           {"missing-id.json", approved_payload(%{"id" => nil}), :invalid_artifact_id},
           {"bad-gates.json", approved_payload(%{"gates" => "bad"}), {:invalid_artifact_field, "gates"}},
+          {"bad-gate-sets.json", approved_payload(%{"gate_sets" => "bad"}), {:invalid_artifact_field, "gate_sets"}},
+          {"bad-gate-set-entry.json", approved_payload(%{"gate_sets" => [123]}), {:invalid_artifact_field, "gate_sets"}},
           {"bad-gate.json", approved_payload(%{"gates" => [%{"name" => "missing-command"}]}), {:invalid_artifact_field, "gates"}},
           {"blank-gate.json", approved_payload(%{"gates" => [%{"name" => " ", "command" => "true"}]}), {:invalid_artifact_field, "gates"}},
           {"bad-skipped.json", approved_payload(%{"skipped" => "bad"}), {:invalid_artifact_field, "skipped"}},

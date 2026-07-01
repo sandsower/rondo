@@ -716,6 +716,7 @@ defmodule Rondo.StatusDashboard do
     attempt = retry_entry.attempt || 0
     due_in_ms = retry_entry.due_in_ms || 0
     error = format_retry_error(retry_entry.error)
+    release_loop = format_release_loop_retry(retry_entry)
 
     "│  #{colorize("↻", @ansi_orange)} " <>
       colorize("#{identifier}", @ansi_red) <>
@@ -723,8 +724,49 @@ defmodule Rondo.StatusDashboard do
       colorize("attempt=#{attempt}", @ansi_yellow) <>
       colorize(" in ", @ansi_dim) <>
       colorize(next_in_words(due_in_ms), @ansi_cyan) <>
-      error
+      error <>
+      release_loop
   end
+
+  defp format_release_loop_retry(%{release_loop: release_loop}) when is_map(release_loop) do
+    summary =
+      []
+      |> maybe_add_release_loop_summary("action", release_loop_value(release_loop, :action))
+      |> maybe_add_release_loop_summary("phase", release_loop_value(release_loop, :phase))
+      |> maybe_add_release_loop_summary("pr", release_loop_pr_label(release_loop))
+      |> maybe_add_release_loop_summary("blocked", release_loop_value(release_loop, :blocked_reason))
+      |> Enum.join(" ")
+
+    if summary == "" do
+      ""
+    else
+      " " <> colorize(summary, @ansi_dim)
+    end
+  end
+
+  defp format_release_loop_retry(_retry_entry), do: ""
+
+  defp maybe_add_release_loop_summary(parts, _label, nil), do: parts
+
+  defp maybe_add_release_loop_summary(parts, label, value) do
+    parts ++ ["#{label}=#{release_loop_text(value)}"]
+  end
+
+  defp release_loop_pr_label(%{pr: pr}) when is_map(pr) do
+    case release_loop_value(pr, :number) do
+      nil -> nil
+      number -> "##{release_loop_text(number)}"
+    end
+  end
+
+  defp release_loop_pr_label(_release_loop), do: nil
+
+  defp release_loop_value(map, key) when is_map(map) and is_atom(key) do
+    Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  end
+
+  defp release_loop_text(value) when is_atom(value), do: Atom.to_string(value)
+  defp release_loop_text(value), do: to_string(value)
 
   defp next_in_words(due_in_ms) when is_integer(due_in_ms) do
     secs = div(due_in_ms, 1000)
@@ -784,10 +826,16 @@ defmodule Rondo.StatusDashboard do
   defp format_dispatch_blocker_detail(nil), do: ""
 
   defp format_dispatch_blocker_detail(detail) when is_binary(detail) do
-    " " <> colorize(truncate(detail, 96), @ansi_dim)
+    sanitized = sanitize_display_text(detail)
+
+    if sanitized == "" do
+      ""
+    else
+      " " <> colorize(truncate(sanitized, 96), @ansi_dim)
+    end
   end
 
-  defp format_dispatch_blocker_detail(detail), do: " " <> colorize(truncate(inspect(detail), 96), @ansi_dim)
+  defp format_dispatch_blocker_detail(detail), do: " " <> colorize(truncate(detail |> inspect() |> sanitize_display_text(), 96), @ansi_dim)
 
   defp format_runtime_seconds(seconds) when is_integer(seconds) do
     mins = div(seconds, 60)
@@ -1209,6 +1257,19 @@ defmodule Rondo.StatusDashboard do
     |> inspect(pretty: true, limit: 20)
     |> String.replace("\n", " ")
     |> sanitize_ansi_and_control_bytes()
+    |> String.trim()
+  end
+
+  defp sanitize_display_text(value) when is_binary(value) do
+    value
+    |> String.replace("\\r\\n", " ")
+    |> String.replace("\\r", " ")
+    |> String.replace("\\n", " ")
+    |> String.replace("\r\n", " ")
+    |> String.replace("\r", " ")
+    |> String.replace("\n", " ")
+    |> sanitize_ansi_and_control_bytes()
+    |> String.replace(~r/\s+/, " ")
     |> String.trim()
   end
 

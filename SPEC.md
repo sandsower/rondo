@@ -420,7 +420,9 @@ Each entry contains:
 
 Gate stdout/stderr and a structured `results.json` are persisted under the run ledger. `results.json`
 also includes the ProcessProvider gate-selection envelope for the turn when available, including
-selected/skipped explanations, warnings, and provider metadata. When `gate_reuse.enabled` is on,
+changed files, selected/skipped explanations, warnings, and provider metadata. For post-turn gate
+selection, Rondo collects changed paths from the git workspace against the run-start base commit when
+available, plus committed, staged, unstaged, and untracked paths. When `gate_reuse.enabled` is on,
 Rondo also records a workspace identity plus gate signature in `state.json` and may reuse a prior
 passing result on an unchanged continuation turn, emitting a distinct reused gate status instead of
 rerunning the same command set. Any gate failure, error, or timeout makes the current run attempt
@@ -449,13 +451,16 @@ Fields:
 The process provider is the boundary for process/work-contract inputs: gate selection, guide
 selection, action-policy evaluation, model-routing hints, proof requirement resolution, and
 capability/probe metadata. Gate selection returns an envelope containing the runnable gates plus
-selected/skipped explanations, warnings, and provider metadata; Rondo persists that envelope with gate
+selected/skipped explanations, warnings, changed files, and provider metadata; Rondo persists that envelope with gate
 artifacts. The native provider preserves Rondo's existing standalone `WORKFLOW.md` behavior: flat gates
 come from top-level `gates`, prompts come from the Markdown body, action-policy evaluation delegates
 to the configured Beislið evaluator, model hints come from adapter config, and richer provider
 features degrade to unsupported/empty results unless a future provider marks them required. The
 fixture-backed Beislið provider consumes explicit approved JSON artifacts with schema
-`beislid-process-artifact-v1`; it can augment the native prompt, select gates, expose guide/proof
+`beislid-process-artifact-v1`; in addition to flat `gates`, artifacts may declare `gate_sets` with
+changed-file path selectors. Rondo asks the provider with the current changed paths, and the provider
+returns a deterministic union of matching gates, de-duplicated by gate name, with unmatched changed
+paths surfaced as warnings. It can augment the native prompt, select gates, expose guide/proof
 metadata through probe/gate-selection metadata, and return fixture action-policy decisions, but it
 does not implement or require the real Beislið exporter/runtime. Rondo owns execution, proof
 artifacts, and run state; external systems such as Beislið own richer work-contract semantics.
@@ -746,6 +751,15 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `process_provider.kind`: string, default `native`; supports `native` and fixture-backed `beislid`
 - `process_provider.required`: boolean, default `false`
 - `process_provider.artifact_path`: string or null, optional Beislið process artifact path
+- `clean_eval.enabled`: boolean, default `false`; when true, successful run-once executions re-apply
+  the recorded patch in a detached clean worktree, select `pre_pr` gates through the configured
+  process provider, and block completion on clean-eval `fail` or `error` outcomes
+- `clean_eval.base_ref`: string or null, optional override for the patch metadata base ref
+- `clean_eval.gates`: list of gate maps or null; native-provider override for pre-PR clean-eval
+  gates, where null falls back to top-level `gates` and `[]` means apply-only evaluation
+- Clean eval asks the configured `process_provider` for `pre_pr` gates. If provider selection
+  fails and `process_provider.required` is false, Rondo falls back to native gate selection;
+  invalid Beislið artifacts and required-provider failures fail closed instead of falling back.
 - `server.port` (extension): integer, optional; enables the optional HTTP server, `0` may be used
   for ephemeral local bind, and CLI `--port` overrides it
 
@@ -1397,6 +1411,9 @@ Rondo does not require first-class tracker write APIs in the orchestrator.
 
 - Ticket mutations (state transitions, comments, PR metadata) are typically handled by the coding
   agent using tools defined by the workflow prompt.
+- When a workflow explicitly configures PR review/babysit states, the orchestrator may own the
+  review/merge/Done handoff and should keep those tickets on the PR lifecycle path until the merge
+  succeeds.
 - The service remains a scheduler/runner and tracker reader.
 - Workflow-specific success often means "reached the next handoff state" (for example
   `Human Review`) rather than tracker terminal state `Done`.
@@ -1595,6 +1612,8 @@ Minimum endpoints:
       "counts": {
         "running": 2,
         "retrying": 1,
+        "paused": 0,
+        "needs_guidance": 0,
         "dispatch_blockers": 3
       },
       "running": [
@@ -1635,6 +1654,8 @@ Minimum endpoints:
           "issue_id": "ghi789",
           "issue_identifier": "MT-651",
           "state": "Todo",
+          "blocks_dispatch": true,
+          "blocked_at": "2026-02-24T20:15:30Z",
           "blocked_dispatch_reason": "claimed",
           "blocked_dispatch_detail": "issue already claimed by a pending run"
         }

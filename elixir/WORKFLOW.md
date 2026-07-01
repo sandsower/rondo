@@ -10,6 +10,9 @@ tracker:
     - In Progress
     - Merging
     - Rework
+  review_states:
+    - In Review
+    - Human Review
   terminal_states:
     - Closed
     - Cancelled
@@ -50,6 +53,15 @@ model_routing:
   defaults:
     tier: standard
     mode: prefer
+  step_hints:
+    initial_spawn:
+      phase: planning
+      tier: frontier
+      mode: prefer
+    phases:
+      - phase: implementation
+        tier: standard
+        mode: prefer
   profiles:
     bulk_implementation:
       tier: light

@@ -15,13 +15,25 @@ defmodule Rondo.GitHub.Client do
   def fetch_candidate_issues(opts \\ []) do
     with {:ok, context} <- context(opts),
          {:ok, raw_issues} <- list_issues(context, "open") do
-      active_states = normalize_states(Keyword.get_lazy(opts, :active_states, &Config.tracker_active_states/0))
+      review_states =
+        if Config.release_loop_enabled?() do
+          Keyword.get_lazy(opts, :review_states, &Config.tracker_review_states/0)
+        else
+          []
+        end
+
+      candidate_states =
+        (List.wrap(Keyword.get_lazy(opts, :active_states, &Config.tracker_active_states/0)) ++
+           List.wrap(review_states))
+        |> Enum.map(&normalize_state/1)
+        |> Enum.reject(&(&1 == ""))
+        |> Enum.uniq()
 
       issues =
         raw_issues
         |> Enum.map(&normalize_issue(&1, context.repo, context.state_label_prefix))
         |> Enum.reject(&is_nil/1)
-        |> Enum.filter(fn %Issue{state: state} -> MapSet.member?(active_states, normalize_state(state)) end)
+        |> Enum.filter(fn %Issue{state: state} -> normalize_state(state) in candidate_states end)
 
       {:ok, issues}
     end

@@ -887,6 +887,11 @@ defmodule Rondo.WorkspaceAndConfigTest do
       assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.active_states"}]}} = Config.validate!()
     end
 
+    for invalid_review_states <- ["", ",", [], [""]] do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_review_states: invalid_review_states)
+      assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.review_states"}]}} = Config.validate!()
+    end
+
     write_workflow_file!(Workflow.workflow_file_path(), tracker_terminal_states: ",")
     assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.terminal_states"}]}} = Config.validate!()
 

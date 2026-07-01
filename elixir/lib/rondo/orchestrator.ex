@@ -330,13 +330,13 @@ defmodule Rondo.Orchestrator do
 
   defp handle_dispatch_config_error(%State{} = state, reason) do
     message = dispatch_error_message(reason, :config)
-    Logger.error(message)
+    Logger.error("#{message} issue_id=n/a issue_identifier=n/a session_id=n/a")
     %{state | dispatch_blockers: [dispatch_blocker(nil, "config_invalid", message)]}
   end
 
   defp handle_dispatch_tracker_error(%State{} = state, reason) do
     message = dispatch_error_message(reason, :tracker)
-    Logger.error(message)
+    Logger.error("#{message} issue_id=n/a issue_identifier=n/a session_id=n/a")
     %{state | dispatch_blockers: [dispatch_blocker(nil, "tracker_fetch_failed", message)]}
   end
 
@@ -772,14 +772,14 @@ defmodule Rondo.Orchestrator do
   defp terminate_task(_pid), do: :ok
 
   defp choose_issues(issues, state) do
-    active_states = active_state_set()
     terminal_states = terminal_state_set()
+    candidate_states = candidate_state_set()
 
     {state, dispatch_blockers} =
       issues
       |> sort_issues_for_dispatch()
       |> Enum.reduce({state, []}, fn issue, {state_acc, blockers_acc} ->
-        case dispatch_blocker_for_issue(issue, state_acc, active_states, terminal_states) do
+        case dispatch_blocker_for_issue(issue, state_acc, candidate_states, terminal_states) do
           nil ->
             {dispatch_issue(state_acc, issue), blockers_acc}
 
@@ -796,6 +796,8 @@ defmodule Rondo.Orchestrator do
       issue_id: issue.id,
       issue_identifier: issue.identifier,
       state: issue.state,
+      blocks_dispatch: true,
+      blocked_at: DateTime.utc_now() |> DateTime.truncate(:second),
       blocked_dispatch_reason: reason,
       blocked_dispatch_detail: detail
     }
@@ -806,6 +808,8 @@ defmodule Rondo.Orchestrator do
       issue_id: nil,
       issue_identifier: nil,
       state: nil,
+      blocks_dispatch: true,
+      blocked_at: DateTime.utc_now() |> DateTime.truncate(:second),
       blocked_dispatch_reason: reason,
       blocked_dispatch_detail: detail
     }
@@ -848,7 +852,8 @@ defmodule Rondo.Orchestrator do
        ) do
     cond do
       !candidate_issue?(issue, active_states, terminal_states) ->
-        dispatch_blocker_for_non_candidate(issue, active_states, terminal_states)
+        dispatch_blocker_for_non_candidate(issue, active_states, terminal_states) ||
+          dispatch_blocker(issue, "invalid_issue", "issue is missing required tracker fields")
 
       todo_issue_blocked_by_non_terminal?(issue, terminal_states) ->
         dispatch_blocker(issue, "blocked_by_non_terminal", "waiting on non-terminal blockers")
@@ -859,6 +864,17 @@ defmodule Rondo.Orchestrator do
       Map.has_key?(running, issue.id) ->
         dispatch_blocker(issue, "running", "issue already running")
 
+      true ->
+        dispatch_capacity_blocker(issue, state, running)
+    end
+  end
+
+  defp dispatch_blocker_for_issue(_issue, _state, _active_states, _terminal_states) do
+    dispatch_blocker(nil, "invalid_issue", "tracker returned malformed issue")
+  end
+
+  defp dispatch_capacity_blocker(%Issue{} = issue, %State{} = state, running) do
+    cond do
       available_slots(state) == 0 ->
         capacity_exhausted_dispatch_blocker(state, issue)
 
@@ -987,11 +1003,25 @@ defmodule Rondo.Orchestrator do
     |> MapSet.new()
   end
 
-  defp active_state_set do
+  defp active_state_list do
     Config.tracker_active_states()
     |> Enum.map(&normalize_issue_state/1)
     |> Enum.filter(&(&1 != ""))
+  end
+
+  defp active_state_set do
+    active_state_list()
     |> MapSet.new()
+  end
+
+  defp review_state_list do
+    if Config.release_loop_enabled?() do
+      Config.tracker_review_states()
+      |> Enum.map(&normalize_issue_state/1)
+      |> Enum.filter(&(&1 != ""))
+    else
+      []
+    end
   end
 
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil) do
@@ -1054,6 +1084,8 @@ defmodule Rondo.Orchestrator do
   end
 
   defp maybe_dispatch_release_loop(%State{} = state, issue, attempt, attempt_metadata, recipient, ledger, worker_host) do
+    review_mode = review_babysit_issue_state?(issue.state)
+
     case ReleaseLoop.inspect(issue,
            ledger: ledger,
            workspace: expected_workspace_for_issue(issue),
@@ -1063,28 +1095,74 @@ defmodule Rondo.Orchestrator do
       {:ok, decision, ledger} ->
         handle_release_loop_dispatch(state, issue, attempt, attempt_metadata, recipient, ledger, decision, worker_host)
 
-      {:skip, :disabled, ledger} ->
-        start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger, worker_host: worker_host)
+      {:skip, reason, ledger} ->
+        dispatch_context = %{
+          attempt: attempt,
+          attempt_metadata: attempt_metadata,
+          recipient: recipient,
+          worker_host: worker_host
+        }
 
-      {:skip, :missing_branch, ledger} ->
-        start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger, worker_host: worker_host)
-
-      {:skip, :no_pr, ledger} ->
-        start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger, worker_host: worker_host)
-
-      {:skip, {:risk_above_threshold, assessment}, ledger} ->
-        handle_release_loop_manual_review(state, issue, ledger, assessment, :risk_above_threshold)
-
-      {:skip, {:risk_gate_unavailable, reason}, ledger} ->
-        handle_release_loop_manual_review(state, issue, ledger, %{reason: reason}, :risk_gate_unavailable)
-
-      {:skip, _reason, ledger} ->
-        start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger, worker_host: worker_host)
+        handle_release_loop_skip(state, issue, ledger, reason, review_mode, dispatch_context)
 
       {:error, reason, ledger} ->
         Logger.warning("Release loop inspection failed #{issue_context(issue)} reason=#{inspect(reason)}; continuing normal dispatch")
         start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger, worker_host: worker_host)
     end
+  end
+
+  defp handle_release_loop_skip(state, issue, ledger, :disabled, _review_mode, context) do
+    start_agent_for_issue_from_context(state, issue, ledger, context)
+  end
+
+  defp handle_release_loop_skip(state, issue, ledger, reason, true, context)
+       when reason in [:missing_branch, :no_pr] do
+    handle_release_loop_missing_pr(
+      state,
+      issue,
+      context.attempt,
+      context.attempt_metadata,
+      context.recipient,
+      ledger,
+      reason,
+      context.worker_host
+    )
+  end
+
+  defp handle_release_loop_skip(state, issue, ledger, {:risk_above_threshold, assessment}, _review_mode, _context) do
+    handle_release_loop_manual_review(state, issue, ledger, assessment, :risk_above_threshold)
+  end
+
+  defp handle_release_loop_skip(state, issue, ledger, {:risk_gate_unavailable, reason}, _review_mode, _context) do
+    handle_release_loop_manual_review(state, issue, ledger, %{reason: reason}, :risk_gate_unavailable)
+  end
+
+  defp handle_release_loop_skip(state, issue, ledger, _reason, true, context) do
+    handle_release_loop_waiting_for_pr(
+      state,
+      issue,
+      context.attempt,
+      context.attempt_metadata,
+      context.recipient,
+      ledger,
+      context.worker_host
+    )
+  end
+
+  defp handle_release_loop_skip(state, issue, ledger, _reason, false, context) do
+    start_agent_for_issue_from_context(state, issue, ledger, context)
+  end
+
+  defp start_agent_for_issue_from_context(state, issue, ledger, context) do
+    start_agent_for_issue(
+      state,
+      issue,
+      context.attempt,
+      context.attempt_metadata,
+      context.recipient,
+      ledger,
+      worker_host: context.worker_host
+    )
   end
 
   defp handle_release_loop_dispatch(%State{} = state, %Issue{} = issue, attempt, attempt_metadata, recipient, ledger, %{action: :fix} = decision, worker_host) do
@@ -1111,17 +1189,80 @@ defmodule Rondo.Orchestrator do
 
   defp handle_release_loop_dispatch(%State{} = state, %Issue{} = issue, _attempt, _attempt_metadata, _recipient, ledger, %{action: :wait} = decision, _worker_host) do
     issue = transition_issue_to_release_state(issue, release_loop_review_state())
-    ledger = write_run_ledger_checkpoint(ledger, :release_loop_action_selected, %{action: "wait", wait_interval_seconds: Map.get(decision, :wait_interval_seconds)})
-    _ledger = complete_run_ledger(ledger, :completed, %{phase: "release_loop_wait", wait_interval_seconds: Map.get(decision, :wait_interval_seconds)})
+
+    ledger =
+      write_run_ledger_checkpoint(ledger, :release_loop_action_selected, %{
+        action: "wait",
+        wait_interval_seconds: Map.get(decision, :wait_interval_seconds),
+        blocked_reason: Map.get(decision, :blocked_reason)
+      })
+
+    _ledger =
+      complete_run_ledger(ledger, :completed, %{phase: "release_loop_wait", wait_interval_seconds: Map.get(decision, :wait_interval_seconds), blocked_reason: Map.get(decision, :blocked_reason)})
 
     state =
       schedule_issue_retry(state, issue.id, nil, %{
         identifier: issue.identifier,
         delay_type: :release_loop_wait,
-        error: "release loop waiting for PR checks or mergeability"
+        error: release_loop_retry_error(decision),
+        release_loop: release_loop_retry_metadata(decision, :wait)
       })
 
     %{state | claimed: MapSet.put(state.claimed, issue.id)}
+  end
+
+  defp handle_release_loop_dispatch(%State{} = state, %Issue{} = issue, _attempt, _attempt_metadata, _recipient, ledger, %{action: :ready} = decision, _worker_host) do
+    issue = transition_issue_to_release_state(issue, release_loop_review_state())
+
+    case ReleaseLoop.execute_ready(issue, decision,
+           ledger: ledger,
+           workspace: expected_workspace_for_issue(issue),
+           repo: tracker_repo()
+         ) do
+      {:ok, _result, ledger} ->
+        ledger =
+          write_run_ledger_checkpoint(ledger, :release_loop_action_selected, %{action: "ready", closeout_state: Map.get(decision, :closeout_state), blocked_reason: Map.get(decision, :blocked_reason)})
+
+        _ledger = complete_run_ledger(ledger, :completed, %{phase: "release_loop_ready", action: "ready", closeout_state: Map.get(decision, :closeout_state)})
+
+        state =
+          schedule_issue_retry(state, issue.id, nil, %{
+            identifier: issue.identifier,
+            delay_type: :release_loop_ready,
+            error: release_loop_retry_error(decision),
+            release_loop: release_loop_retry_metadata(decision, :ready)
+          })
+
+        %{state | claimed: MapSet.put(state.claimed, issue.id)}
+
+      {:skip, reason, ledger} ->
+        ledger = write_run_ledger_checkpoint(ledger, :release_loop_action_selected, %{action: "ready", blocked_reason: Map.get(decision, :blocked_reason), reason: inspect(reason)})
+        _ledger = complete_run_ledger(ledger, :failed, %{phase: "release_loop_ready", reason: inspect(reason)})
+
+        state =
+          schedule_issue_retry(state, issue.id, nil, %{
+            identifier: issue.identifier,
+            delay_type: :release_loop_ready,
+            error: "release loop ready skipped: #{inspect(reason)}",
+            release_loop: release_loop_retry_metadata(decision, :ready)
+          })
+
+        %{state | claimed: MapSet.put(state.claimed, issue.id)}
+
+      {:error, reason, ledger} ->
+        ledger = write_run_ledger_checkpoint(ledger, :release_loop_action_selected, %{action: "ready", blocked_reason: Map.get(decision, :blocked_reason), reason: inspect(reason)})
+        _ledger = complete_run_ledger(ledger, :failed, %{phase: "release_loop_ready", reason: inspect(reason)})
+
+        state =
+          schedule_issue_retry(state, issue.id, nil, %{
+            identifier: issue.identifier,
+            delay_type: :release_loop_ready,
+            error: "release loop ready failed: #{inspect(reason)}",
+            release_loop: release_loop_retry_metadata(decision, :ready)
+          })
+
+        %{state | claimed: MapSet.put(state.claimed, issue.id)}
+    end
   end
 
   defp handle_release_loop_dispatch(
@@ -1147,23 +1288,27 @@ defmodule Rondo.Orchestrator do
         %{state | completed: MapSet.put(state.completed, issue.id)}
 
       {:skip, reason, ledger} ->
+        issue = transition_issue_to_release_state(issue, release_loop_review_state())
         _ledger = complete_run_ledger(ledger, :failed, %{phase: "release_loop_closeout", reason: inspect(reason)})
 
         state =
           schedule_issue_retry(state, issue.id, nil, %{
             identifier: issue.identifier,
-            error: "release loop closeout skipped: #{inspect(reason)}"
+            error: "release loop closeout skipped: #{inspect(reason)}",
+            release_loop: release_loop_retry_metadata(decision, :merge)
           })
 
         %{state | claimed: MapSet.put(state.claimed, issue.id)}
 
       {:error, reason, ledger} ->
+        issue = transition_issue_to_release_state(issue, release_loop_review_state())
         _ledger = complete_run_ledger(ledger, :failed, %{phase: "release_loop_closeout", reason: inspect(reason)})
 
         state =
           schedule_issue_retry(state, issue.id, nil, %{
             identifier: issue.identifier,
-            error: "release loop closeout failed: #{inspect(reason)}"
+            error: "release loop closeout failed: #{inspect(reason)}",
+            release_loop: release_loop_retry_metadata(decision, :merge)
           })
 
         %{state | claimed: MapSet.put(state.claimed, issue.id)}
@@ -1197,6 +1342,81 @@ defmodule Rondo.Orchestrator do
 
     %{state | completed: MapSet.put(state.completed, issue.id)}
   end
+
+  defp handle_release_loop_waiting_for_pr(%State{} = state, %Issue{} = issue, attempt, attempt_metadata, recipient, ledger, worker_host) do
+    handle_release_loop_dispatch(
+      state,
+      issue,
+      attempt,
+      attempt_metadata,
+      recipient,
+      ledger,
+      %{action: :wait, wait_interval_seconds: Config.release_loop_wait_interval_seconds()},
+      worker_host
+    )
+  end
+
+  defp handle_release_loop_missing_pr(%State{} = state, %Issue{} = issue, attempt, attempt_metadata, recipient, ledger, reason, worker_host) do
+    issue = transition_issue_to_release_state(issue, release_loop_rework_state())
+
+    ledger =
+      write_run_ledger_checkpoint(ledger, :release_loop_action_selected, %{
+        action: "rework",
+        reason: inspect(reason)
+      })
+
+    _ledger = complete_run_ledger(ledger, :completed, %{phase: "release_loop_missing_pr", action: "rework", reason: inspect(reason)})
+
+    start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger, worker_host: worker_host)
+  end
+
+  defp release_loop_retry_error(%{blocked_reason: :checks_pending}), do: "release loop waiting for PR checks"
+  defp release_loop_retry_error(%{blocked_reason: :mergeability_unknown}), do: "release loop waiting for PR mergeability"
+  defp release_loop_retry_error(%{blocked_reason: :not_ready}), do: "release loop waiting for PR lifecycle"
+
+  defp release_loop_retry_error(%{blocked_reason: blocked_reason}) when is_binary(blocked_reason) do
+    case blocked_reason do
+      <<"merge_mode_blocked:", mode::binary>> -> "release loop waiting for PR merge policy #{mode}"
+      _ -> "release loop waiting"
+    end
+  end
+
+  defp release_loop_retry_error(%{action: :ready}), do: "release loop waiting after PR was marked ready"
+  defp release_loop_retry_error(_decision), do: "release loop waiting"
+
+  defp release_loop_retry_metadata(decision, phase) do
+    %{
+      phase: phase,
+      action: Map.get(decision, :action),
+      blocked_reason: Map.get(decision, :blocked_reason),
+      pr: release_loop_pr_metadata(Map.get(decision, :pr, %{})),
+      checks: Map.get(decision, :checks, %{}),
+      mergeable: Map.get(decision, :mergeable),
+      merge_state_status: Map.get(decision, :merge_state_status),
+      feedback_count: length(Map.get(decision, :feedback_queue, [])),
+      feedback_comment_ids: Map.get(decision, :feedback_comment_ids, []),
+      recovery_kind: Map.get(decision, :recovery_kind),
+      closeout_state: Map.get(decision, :closeout_state),
+      wait_interval_seconds: Map.get(decision, :wait_interval_seconds)
+    }
+    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+    |> Map.new()
+  end
+
+  defp release_loop_pr_metadata(%{} = pr) do
+    %{
+      number: Map.get(pr, :number),
+      url: Map.get(pr, :url),
+      title: Map.get(pr, :title),
+      head_ref_name: Map.get(pr, :head_ref_name),
+      base_ref_name: Map.get(pr, :base_ref_name),
+      is_draft: Map.get(pr, :is_draft)
+    }
+    |> Enum.reject(fn {_k, v} -> is_nil(v) end)
+    |> Map.new()
+  end
+
+  defp release_loop_pr_metadata(_pr), do: %{}
 
   defp start_agent_for_issue(%State{} = state, issue, attempt, attempt_metadata, recipient, ledger, agent_opts \\ []) do
     merged_opts = Keyword.merge(escalation_agent_opts(attempt_metadata), agent_opts)
@@ -1771,6 +1991,7 @@ defmodule Rondo.Orchestrator do
       turn_count: Map.get(running_entry, :turn_count, 0),
       continuation_count: get_in(interrupt, ["final_report", "continuation_count"]) || 0,
       latest_gate: Map.get(running_entry, :latest_gate),
+      final_report: Map.get(running_entry, :final_report),
       model_routing_context: Map.get(running_entry, :model_routing_context) || get_in(interrupt, ["resume", "model_routing_context"]),
       interrupt: interrupt,
       tracker_visibility: "known",
@@ -2092,7 +2313,8 @@ defmodule Rondo.Orchestrator do
             evidence_prompt: Map.get(metadata, :evidence_prompt),
             fresh_workspace: Map.get(metadata, :fresh_workspace),
             max_turns: Map.get(metadata, :max_turns),
-            attempt_chain: Map.get(metadata, :attempt_chain)
+            attempt_chain: Map.get(metadata, :attempt_chain),
+            release_loop: Map.get(metadata, :release_loop)
           })
     }
   end
@@ -2106,7 +2328,8 @@ defmodule Rondo.Orchestrator do
     :evidence_prompt,
     :fresh_workspace,
     :max_turns,
-    :attempt_chain
+    :attempt_chain,
+    :release_loop
   ]
 
   defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
@@ -2237,6 +2460,9 @@ defmodule Rondo.Orchestrator do
   defp retry_delay(_attempt, %{delay_type: :slot_wait}), do: @slot_wait_delay_ms
 
   defp retry_delay(_attempt, %{delay_type: :release_loop_wait}),
+    do: Config.release_loop_wait_interval_seconds() * 1_000
+
+  defp retry_delay(_attempt, %{delay_type: :release_loop_ready}),
     do: Config.release_loop_wait_interval_seconds() * 1_000
 
   defp retry_delay(attempt, _metadata) when is_integer(attempt) and attempt > 0,
@@ -2468,7 +2694,9 @@ defmodule Rondo.Orchestrator do
           attempt: attempt,
           due_in_ms: max(0, due_at_ms - now_ms),
           identifier: Map.get(retry, :identifier),
-          error: Map.get(retry, :error)
+          error: Map.get(retry, :error),
+          delay_type: Map.get(retry, :delay_type),
+          release_loop: Map.get(retry, :release_loop)
         }
       end)
 
@@ -3020,6 +3248,11 @@ defmodule Rondo.Orchestrator do
       %{
         issue_id: issue && issue.id,
         identifier: identifier,
+        issue_title: issue && issue.title,
+        issue_url: issue && issue.url,
+        project: Config.linear_project_slug(),
+        repo: tracker_repo(),
+        workspace: Map.get(running_entry, :workspace),
         run_id: Map.get(running_entry, :run_id),
         run_dir: Map.get(running_entry, :run_dir),
         session_id: Map.get(running_entry, :session_id),
@@ -3035,7 +3268,9 @@ defmodule Rondo.Orchestrator do
           output_tokens: Map.get(running_entry, :claude_output_tokens, 0),
           total_tokens: Map.get(running_entry, :claude_total_tokens, 0)
         },
+        cost: Map.get(running_entry, :claude_last_reported_cost, 0),
         latest_gate: Map.get(running_entry, :latest_gate),
+        final_report: Map.get(running_entry, :final_report),
         event_log: Map.get(running_entry, :event_log, [])
       }
       |> maybe_put_non_active_state(reason, issue)
@@ -3354,7 +3589,7 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  @archive_keys ~w(issue_id identifier run_id run_dir session_id state started_at finished_at exit_reason non_active_state turn_count tokens latest_gate event_log model_routing adapter)
+  @archive_keys ~w(issue_id identifier issue_title issue_url project repo workspace pr_url run_id run_dir session_id state started_at finished_at exit_reason non_active_state turn_count tokens cost latest_gate event_log model_routing adapter final_report)
   @token_keys ~w(input_tokens output_tokens total_tokens)
   @event_keys ~w(at event message tokens)
 
@@ -3510,6 +3745,13 @@ defmodule Rondo.Orchestrator do
 
   defp release_loop_rework_state, do: Config.release_loop_rework_state()
   defp release_loop_review_state, do: Config.release_loop_review_state()
+
+  defp review_babysit_issue_state?(state_name) when is_binary(state_name) do
+    normalize_issue_state(state_name) in review_state_list()
+  end
+
+  defp review_babysit_issue_state?(_state_name), do: false
+
   defp release_loop_recovery_phase(%{recovery_kind: recovery_kind}) when recovery_kind in [:conflict, :conflict_and_feedback], do: "rebase"
   defp release_loop_recovery_phase(_), do: "review"
   defp release_loop_merge_state, do: Config.release_loop_merge_state()
@@ -3645,8 +3887,12 @@ defmodule Rondo.Orchestrator do
   end
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
-    candidate_issue?(issue, active_state_set(), terminal_states) and
+    candidate_issue?(issue, candidate_state_set(), terminal_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states)
+  end
+
+  defp candidate_state_set do
+    MapSet.new(active_state_list() ++ review_state_list())
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do

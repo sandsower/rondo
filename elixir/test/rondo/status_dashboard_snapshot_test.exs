@@ -243,6 +243,38 @@ defmodule Rondo.StatusDashboardSnapshotTest do
     assert rendered =~ "tracker.kind"
   end
 
+  test "retry summary exposes release-loop metadata" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [
+           retry_entry(%{
+             identifier: "MT-REVIEW-LOOP",
+             attempt: 5,
+             due_in_ms: 2_000,
+             error: "release loop waiting for PR checks",
+             release_loop: %{
+               action: :wait,
+               phase: :wait,
+               blocked_reason: :checks_pending,
+               pr: %{number: 15}
+             }
+           })
+         ],
+         claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = render_snapshot(snapshot_data, 0.0)
+
+    assert rendered =~ "MT-REVIEW-LOOP"
+    assert rendered =~ "action=wait"
+    assert rendered =~ "phase=wait"
+    assert rendered =~ "pr=#15"
+    assert rendered =~ "blocked=checks_pending"
+  end
+
   test "running summary exposes fallback model state" do
     summary =
       StatusDashboard.format_running_summary_for_test(
