@@ -3849,13 +3849,13 @@ defmodule Rondo.OrchestratorStatusTest do
     }
 
     workspace = Path.join(workspace_root, issue.identifier)
-    File.mkdir_p!(workspace)
 
     Application.put_env(:rondo, :memory_tracker_issues, [issue])
     Application.put_env(:rondo, :memory_tracker_recipient, self())
 
     orchestrator_name = Module.concat(__MODULE__, :RetryTerminalOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    File.mkdir_p!(workspace)
 
     on_exit(fn ->
       Application.delete_env(:rondo, :memory_tracker_recipient)

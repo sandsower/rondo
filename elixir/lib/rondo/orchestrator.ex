@@ -1035,12 +1035,14 @@ defmodule Rondo.Orchestrator do
         state
 
       {:skip, %Issue{} = refreshed_issue} ->
-        Logger.info("Skipping stale dispatch after issue refresh: #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)}")
+        Logger.info(
+          "Skipping stale dispatch after issue refresh: #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)}"
+        )
 
         state
 
       {:error, reason} ->
-        Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
+        Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)} session_id=n/a: #{inspect(reason)}")
         state
     end
   end
@@ -1068,7 +1070,7 @@ defmodule Rondo.Orchestrator do
 
             _ledger = ledger
 
-            Logger.warning("Skipping dispatch; tracker state became terminal #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+            Logger.warning("Skipping dispatch; tracker state became terminal #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
             state
 
           {:paused, interrupt, ledger} ->
@@ -1078,7 +1080,7 @@ defmodule Rondo.Orchestrator do
             ledger = complete_run_ledger(ledger, :failed, %{phase: "action_policy", reason: inspect(reason)})
             _ledger = ledger
 
-            Logger.warning("Skipping dispatch; action policy blocked #{issue_context(issue)} reason=#{inspect(reason)}")
+            Logger.warning("Skipping dispatch; action policy blocked #{issue_context(issue)} session_id=n/a reason=#{inspect(reason)}")
 
             schedule_issue_retry(state, issue.id, nil, %{
               identifier: issue.identifier,
@@ -1087,7 +1089,7 @@ defmodule Rondo.Orchestrator do
         end
 
       {:wait, reason} ->
-        Logger.debug("No available worker hosts for #{issue_context(issue)} reason=#{inspect(reason)}")
+        Logger.debug("No available worker hosts for #{issue_context(issue)} session_id=n/a reason=#{inspect(reason)}")
 
         schedule_issue_retry(state, issue.id, nil, %{
           identifier: issue.identifier,
@@ -1120,7 +1122,7 @@ defmodule Rondo.Orchestrator do
         handle_release_loop_skip(state, issue, ledger, reason, review_mode, dispatch_context)
 
       {:error, reason, ledger} ->
-        Logger.warning("Release loop inspection failed #{issue_context(issue)} reason=#{inspect(reason)}; continuing normal dispatch")
+        Logger.warning("Release loop inspection failed #{issue_context(issue)} session_id=n/a reason=#{inspect(reason)}; continuing normal dispatch")
         start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger, worker_host: worker_host)
     end
   end
@@ -1202,18 +1204,18 @@ defmodule Rondo.Orchestrator do
         start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger, agent_opts)
 
       {:terminal, refreshed_issue, ledger} ->
-        Logger.warning("Skipping release-loop fix dispatch; tracker state became terminal #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+        Logger.warning("Skipping release-loop fix dispatch; tracker state became terminal #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
         _ledger = ledger
         state
 
       {:missing, refreshed_issue, ledger} ->
-        Logger.warning("Skipping release-loop fix dispatch; tracker state became missing #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+        Logger.warning("Skipping release-loop fix dispatch; tracker state became missing #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
         _ledger = ledger
         state
 
       {:blocked, reason, ledger} ->
         _ledger = complete_run_ledger(ledger, :failed, %{phase: "release_loop_fix", reason: inspect(reason)})
-        Logger.warning("Skipping release-loop fix dispatch #{issue_context(issue)} reason=#{inspect(reason)}")
+        Logger.warning("Skipping release-loop fix dispatch #{issue_context(issue)} session_id=n/a reason=#{inspect(reason)}")
         state
     end
   end
@@ -1242,18 +1244,18 @@ defmodule Rondo.Orchestrator do
         %{state | claimed: MapSet.put(state.claimed, issue.id)}
 
       {:terminal, refreshed_issue, ledger} ->
-        Logger.warning("Skipping release-loop wait dispatch; tracker state became terminal #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+        Logger.warning("Skipping release-loop wait dispatch; tracker state became terminal #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
         _ledger = ledger
         state
 
       {:missing, refreshed_issue, ledger} ->
-        Logger.warning("Skipping release-loop wait dispatch; tracker state became missing #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+        Logger.warning("Skipping release-loop wait dispatch; tracker state became missing #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
         _ledger = ledger
         state
 
       {:blocked, reason, ledger} ->
         _ledger = complete_run_ledger(ledger, :failed, %{phase: "release_loop_wait", reason: inspect(reason)})
-        Logger.warning("Skipping release-loop wait dispatch #{issue_context(issue)} reason=#{inspect(reason)}")
+        Logger.warning("Skipping release-loop wait dispatch #{issue_context(issue)} session_id=n/a reason=#{inspect(reason)}")
         state
     end
   end
@@ -1316,18 +1318,18 @@ defmodule Rondo.Orchestrator do
         end
 
       {:terminal, refreshed_issue, ledger} ->
-        Logger.warning("Skipping release-loop ready dispatch; tracker state became terminal #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+        Logger.warning("Skipping release-loop ready dispatch; tracker state became terminal #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
         _ledger = ledger
         state
 
       {:missing, refreshed_issue, ledger} ->
-        Logger.warning("Skipping release-loop ready dispatch; tracker state became missing #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+        Logger.warning("Skipping release-loop ready dispatch; tracker state became missing #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
         _ledger = ledger
         state
 
       {:blocked, reason, ledger} ->
         _ledger = complete_run_ledger(ledger, :failed, %{phase: "release_loop_ready", reason: inspect(reason)})
-        Logger.warning("Skipping release-loop ready dispatch #{issue_context(issue)} reason=#{inspect(reason)}")
+        Logger.warning("Skipping release-loop ready dispatch #{issue_context(issue)} session_id=n/a reason=#{inspect(reason)}")
         state
     end
   end
@@ -1374,18 +1376,18 @@ defmodule Rondo.Orchestrator do
                 %{state | claimed: MapSet.put(state.claimed, issue.id)}
 
               {:terminal, refreshed_issue, ledger} ->
-                Logger.warning("Skipping release-loop closeout recovery; tracker state became terminal #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+                Logger.warning("Skipping release-loop closeout recovery; tracker state became terminal #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
                 _ledger = ledger
                 state
 
               {:missing, refreshed_issue, ledger} ->
-                Logger.warning("Skipping release-loop closeout recovery; tracker state became missing #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+                Logger.warning("Skipping release-loop closeout recovery; tracker state became missing #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
                 _ledger = ledger
                 state
 
               {:blocked, reason, ledger} ->
                 _ledger = complete_run_ledger(ledger, :failed, %{phase: "release_loop_closeout", reason: inspect(reason)})
-                Logger.warning("Skipping release-loop closeout recovery #{issue_context(issue)} reason=#{inspect(reason)}")
+                Logger.warning("Skipping release-loop closeout recovery #{issue_context(issue)} session_id=n/a reason=#{inspect(reason)}")
                 state
             end
 
@@ -1405,35 +1407,35 @@ defmodule Rondo.Orchestrator do
                 %{state | claimed: MapSet.put(state.claimed, issue.id)}
 
               {:terminal, refreshed_issue, ledger} ->
-                Logger.warning("Skipping release-loop closeout recovery; tracker state became terminal #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+                Logger.warning("Skipping release-loop closeout recovery; tracker state became terminal #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
                 _ledger = ledger
                 state
 
               {:missing, refreshed_issue, ledger} ->
-                Logger.warning("Skipping release-loop closeout recovery; tracker state became missing #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+                Logger.warning("Skipping release-loop closeout recovery; tracker state became missing #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
                 _ledger = ledger
                 state
 
               {:blocked, reason, ledger} ->
                 _ledger = complete_run_ledger(ledger, :failed, %{phase: "release_loop_closeout", reason: inspect(reason)})
-                Logger.warning("Skipping release-loop closeout recovery #{issue_context(issue)} reason=#{inspect(reason)}")
+                Logger.warning("Skipping release-loop closeout recovery #{issue_context(issue)} session_id=n/a reason=#{inspect(reason)}")
                 state
             end
         end
 
       {:terminal, refreshed_issue, ledger} ->
-        Logger.warning("Skipping release-loop merge dispatch; tracker state became terminal #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+        Logger.warning("Skipping release-loop merge dispatch; tracker state became terminal #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
         _ledger = ledger
         state
 
       {:missing, refreshed_issue, ledger} ->
-        Logger.warning("Skipping release-loop merge dispatch; tracker state became missing #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+        Logger.warning("Skipping release-loop merge dispatch; tracker state became missing #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
         _ledger = ledger
         state
 
       {:blocked, reason, ledger} ->
         _ledger = complete_run_ledger(ledger, :failed, %{phase: "release_loop_merge", reason: inspect(reason)})
-        Logger.warning("Skipping release-loop merge dispatch #{issue_context(issue)} reason=#{inspect(reason)}")
+        Logger.warning("Skipping release-loop merge dispatch #{issue_context(issue)} session_id=n/a reason=#{inspect(reason)}")
         state
     end
   end
@@ -1466,18 +1468,18 @@ defmodule Rondo.Orchestrator do
         %{state | completed: MapSet.put(state.completed, issue.id)}
 
       {:terminal, refreshed_issue, ledger} ->
-        Logger.warning("Skipping release-loop manual review; tracker state became terminal #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+        Logger.warning("Skipping release-loop manual review; tracker state became terminal #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
         _ledger = ledger
         state
 
       {:missing, refreshed_issue, ledger} ->
-        Logger.warning("Skipping release-loop manual review; tracker state became missing #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+        Logger.warning("Skipping release-loop manual review; tracker state became missing #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
         _ledger = ledger
         state
 
       {:blocked, reason, ledger} ->
         _ledger = complete_run_ledger(ledger, :failed, %{phase: "release_loop_manual_review", reason: inspect(reason)})
-        Logger.warning("Skipping release-loop manual review #{issue_context(issue)} reason=#{inspect(reason)}")
+        Logger.warning("Skipping release-loop manual review #{issue_context(issue)} session_id=n/a reason=#{inspect(reason)}")
         state
     end
   end
@@ -1509,18 +1511,18 @@ defmodule Rondo.Orchestrator do
         start_agent_for_issue(state, issue, attempt, attempt_metadata, recipient, ledger, worker_host: worker_host)
 
       {:terminal, refreshed_issue, ledger} ->
-        Logger.warning("Skipping release-loop missing-PR rework; tracker state became terminal #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+        Logger.warning("Skipping release-loop missing-PR rework; tracker state became terminal #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
         _ledger = ledger
         state
 
       {:missing, refreshed_issue, ledger} ->
-        Logger.warning("Skipping release-loop missing-PR rework; tracker state became missing #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)}")
+        Logger.warning("Skipping release-loop missing-PR rework; tracker state became missing #{issue_context(refreshed_issue)} session_id=n/a state=#{inspect(refreshed_issue.state)}")
         _ledger = ledger
         state
 
       {:blocked, reason, ledger} ->
         _ledger = complete_run_ledger(ledger, :failed, %{phase: "release_loop_missing_pr", reason: inspect(reason)})
-        Logger.warning("Skipping release-loop missing-PR rework #{issue_context(issue)} reason=#{inspect(reason)}")
+        Logger.warning("Skipping release-loop missing-PR rework #{issue_context(issue)} session_id=n/a reason=#{inspect(reason)}")
         state
     end
   end
@@ -1694,7 +1696,10 @@ defmodule Rondo.Orchestrator do
 
       tracker_state_stop_exit?(reason) ->
         Logger.warning("Agent task stopped for issue_id=#{issue_id} session_id=#{session_id} reason=tracker_state_stop")
-        archive_running_entry(state, running_entry, reason)
+
+        state
+        |> archive_running_entry(running_entry, reason)
+        |> release_claim(issue_id)
 
       not escalation_enabled? ->
         handle_non_escalation_exit(state, issue_id, running_entry, reason, session_id, has_ledger?)
@@ -1703,6 +1708,10 @@ defmodule Rondo.Orchestrator do
         Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; evaluating escalation policy")
         evaluate_escalation(state, issue_id, running_entry, reason)
     end
+  end
+
+  defp release_claim(%State{claimed: claimed} = state, issue_id) do
+    %{state | claimed: MapSet.delete(claimed, issue_id)}
   end
 
   defp handle_normal_completion(%State{} = state, issue_id, running_entry, session_id, _has_ledger?) do
@@ -1845,7 +1854,7 @@ defmodule Rondo.Orchestrator do
         {ledger, payload}
 
       {:error, reason} ->
-        Logger.warning("Run ledger create failed for #{issue_context(issue)} reason=#{inspect(reason)}")
+        Logger.warning("Run ledger create failed for #{issue_context(issue)} session_id=n/a reason=#{inspect(reason)}")
         {nil, payload}
     end
   end
@@ -3876,7 +3885,7 @@ defmodule Rondo.Orchestrator do
             do_transition_issue_to_in_progress(refreshed_issue, Map.get(decision, :ledger, ledger))
 
           {:inactive, refreshed_issue} ->
-            do_transition_issue_to_in_progress(refreshed_issue, Map.get(decision, :ledger, ledger))
+            {:blocked, {:issue_inactive, Map.get(refreshed_issue, :state)}, Map.get(decision, :ledger, ledger)}
 
           {:terminal, refreshed_issue} ->
             {:terminal, refreshed_issue, Map.get(decision, :ledger, ledger)}
@@ -3933,31 +3942,42 @@ defmodule Rondo.Orchestrator do
 
   defp transition_issue_to_release_state(%Issue{state: current_state} = issue, target_state) when is_binary(target_state) do
     if normalize_state(current_state) == normalize_state(target_state) do
-      issue
+      {:ok, issue}
     else
       case Tracker.update_issue_state(issue.id, target_state) do
         :ok ->
           Logger.info("Transitioned #{issue_context(issue)} to #{target_state}")
-          %{issue | state: target_state}
+          {:ok, %{issue | state: target_state}}
 
         {:error, reason} ->
-          Logger.warning("Failed to transition #{issue_context(issue)} to #{target_state}: #{inspect(reason)}")
-          issue
+          Logger.warning("Failed to transition #{issue_context(issue)} to #{target_state} session_id=n/a: #{inspect(reason)}")
+          {:blocked, {:issue_transition_failed, reason}}
       end
     end
   end
 
-  defp transition_issue_to_release_state(issue, _target_state), do: issue
+  defp transition_issue_to_release_state(issue, _target_state), do: {:ok, issue}
+
+  defp transition_issue_to_release_state_result(%Issue{} = issue, target_state, ledger) do
+    case transition_issue_to_release_state(issue, target_state) do
+      {:ok, transitioned_issue} -> {:ok, transitioned_issue, ledger}
+      {:blocked, reason} -> {:blocked, reason, ledger}
+    end
+  end
 
   # credo:disable-for-next-line
   defp transition_issue_to_release_state_with_guard(%Issue{} = issue, target_state, ledger, phase)
        when is_binary(target_state) do
     case guard_issue_for_transition(issue) do
       {:active, refreshed_issue} ->
-        {:ok, transition_issue_to_release_state(refreshed_issue, target_state), ledger}
+        transition_issue_to_release_state_result(refreshed_issue, target_state, ledger)
 
       {:inactive, refreshed_issue} ->
-        {:ok, transition_issue_to_release_state(refreshed_issue, target_state), ledger}
+        if release_loop_transitionable_issue?(refreshed_issue) do
+          transition_issue_to_release_state_result(refreshed_issue, target_state, ledger)
+        else
+          {:blocked, {:issue_inactive, Map.get(refreshed_issue, :state)}, ledger}
+        end
 
       {:terminal, refreshed_issue} ->
         ledger =
@@ -3986,6 +4006,8 @@ defmodule Rondo.Orchestrator do
 
   defp release_loop_rework_state, do: Config.release_loop_rework_state()
   defp release_loop_review_state, do: Config.release_loop_review_state()
+
+  defp release_loop_transitionable_issue?(%Issue{state: state_name}), do: review_babysit_issue_state?(state_name)
 
   defp review_babysit_issue_state?(state_name) when is_binary(state_name) do
     normalize_issue_state(state_name) in review_state_list()

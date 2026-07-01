@@ -36,28 +36,18 @@ defmodule Rondo.Tracker.TerminalState do
   def refresh_issue_state(issue, _issue_fetcher, _active_states, _terminal_states), do: {:missing, issue}
 
   defp classify_issue_state(%Issue{} = issue, active_states, terminal_states) do
+    normalized_state = normalize_state(issue.state)
+
     cond do
-      terminal_state?(issue.state, terminal_states) ->
+      state_match?(normalized_state, terminal_states) ->
         {:terminal, issue}
 
-      active_state?(issue.state, active_states) ->
+      state_match?(normalized_state, active_states) ->
         {:active, issue}
 
       true ->
         {:inactive, issue}
     end
-  end
-
-  defp terminal_state?(state_name, terminal_states) do
-    state_name
-    |> normalize_state()
-    |> state_match?(terminal_states)
-  end
-
-  defp active_state?(state_name, active_states) do
-    state_name
-    |> normalize_state()
-    |> state_match?(active_states)
   end
 
   defp state_match?(normalized_state, states) do

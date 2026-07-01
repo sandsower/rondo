@@ -955,6 +955,29 @@ defmodule Rondo.AgentRunner do
 
   # credo:disable-for-next-line
   defp do_run_agent_turns(context, issue, turn_number, run_ref, previous_final_report_fingerprint \\ nil) do
+    case maybe_continue_with_live_update(context, issue, :continue) do
+      {:continue, refreshed_issue, next_context} ->
+        run_active_agent_turn(next_context, refreshed_issue, turn_number, run_ref, previous_final_report_fingerprint)
+
+      {:terminal, refreshed_issue, next_context} ->
+        stop_for_tracker_state(next_context, refreshed_issue, turn_number, run_ref, :terminal, :pre_turn)
+
+      {:inactive, refreshed_issue, next_context} ->
+        stop_for_tracker_state(next_context, refreshed_issue, turn_number, run_ref, :inactive, :pre_turn)
+
+      {:missing, refreshed_issue, next_context} ->
+        # credo:disable-for-next-line
+        stop_for_tracker_state(next_context, refreshed_issue, turn_number, run_ref, :missing, :pre_turn)
+
+      {:pause, interrupt, _next_context} ->
+        {:pause, interrupt}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp run_active_agent_turn(context, issue, turn_number, run_ref, previous_final_report_fingerprint) do
     with {:ok, turn_opts} <-
            model_routing_opts(
              context.process_provider,
@@ -971,41 +994,19 @@ defmodule Rondo.AgentRunner do
              context.claude_update_recipient,
              turn_opts,
              turn_number
-           ) do
-      turn_context = %{context | opts: turn_opts}
-
-      case maybe_continue_with_live_update(turn_context, issue, :continue) do
-        {:continue, refreshed_issue, next_context} ->
-          # credo:disable-for-next-line
-          with {:ok, turn_context, completion_observed?, invocation_result} <-
-                 invoke_turn_with_model_fallback(next_context, refreshed_issue, turn_number, run_ref) do
-            handle_invocation_result(
-              turn_context,
-              refreshed_issue,
-              turn_number,
-              run_ref,
-              previous_final_report_fingerprint,
-              completion_observed?,
-              invocation_result
-            )
-          end
-
-        {:terminal, refreshed_issue, next_context} ->
-          stop_for_tracker_state(next_context, refreshed_issue, turn_number, run_ref, :terminal, :pre_turn)
-
-        {:inactive, refreshed_issue, next_context} ->
-          stop_for_tracker_state(next_context, refreshed_issue, turn_number, run_ref, :inactive, :pre_turn)
-
-        {:missing, refreshed_issue, next_context} ->
-          # credo:disable-for-next-line
-          stop_for_tracker_state(next_context, refreshed_issue, turn_number, run_ref, :missing, :pre_turn)
-
-        {:pause, interrupt, _next_context} ->
-          {:pause, interrupt}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+           ),
+         turn_context = %{context | opts: turn_opts},
+         {:ok, turn_context, completion_observed?, invocation_result} <-
+           invoke_turn_with_model_fallback(turn_context, issue, turn_number, run_ref) do
+      handle_invocation_result(
+        turn_context,
+        issue,
+        turn_number,
+        run_ref,
+        previous_final_report_fingerprint,
+        completion_observed?,
+        invocation_result
+      )
     end
   end
 
