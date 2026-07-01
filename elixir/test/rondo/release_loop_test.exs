@@ -801,6 +801,64 @@ defmodule Rondo.ReleaseLoopTest do
     assert Enum.any?(assessment.evidence.changed_paths, &String.contains?(&1, "release_loop.ex"))
   end
 
+  test "uses configured review policy path rules when classifying PR risk" do
+    pr = pr_map(9, "feature/configured-risk", "Configured risk", review_decision: "APPROVED", mergeable: "MERGEABLE", merge_state_status: "CLEAN")
+
+    source_json =
+      review_snapshot_json(pr,
+        reviews: [%{state: "APPROVED", body: "Looks good.", author: %{login: "reviewer"}}],
+        comments: [],
+        inline_comments: [],
+        checks: %{state: "SUCCESS", conclusion: "SUCCESS", entries: [%{name: "ci", state: "SUCCESS", conclusion: "SUCCESS"}]}
+      )
+
+    workspace_root = tmp_dir("release-loop-configured-risk")
+    workspace = Path.join(workspace_root, "MT-CONFIGURED-RISK")
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      release_loop_enabled: true,
+      release_loop_max_pr_risk_level: "low",
+      release_loop_review_policy: %{
+        high_risk_paths: ["elixir/lib/rondo/release_loop.ex"],
+        high_risk_file_count: 99,
+        high_risk_total_changes: 10_000,
+        low_risk_file_count: 99,
+        low_risk_total_changes: 10_000
+      },
+      release_loop_pr_review_source: shell_print_json(source_json)
+    )
+
+    issue = %Issue{
+      id: "issue-configured-risk",
+      identifier: "MT-CONFIGURED-RISK",
+      title: "Configured risk",
+      state: "In Progress",
+      branch_name: "feature/configured-risk"
+    }
+
+    runner =
+      release_loop_runner(Jason.encode!([pr]), source_json,
+        git: %{
+          :rev_parse_head => {"head-sha", 0},
+          :merge_base => {"", 1},
+          :head_parent => {"base-sha", 0},
+          {:name_only, "base-sha", "head-sha"} => {"elixir/lib/rondo/release_loop.ex\n", 0},
+          {:numstat, "base-sha", "head-sha"} => {"1\t1\telixir/lib/rondo/release_loop.ex\n", 0}
+        }
+      )
+
+    assert {:skip, {:risk_above_threshold, assessment}, _ledger} =
+             ReleaseLoop.inspect(issue, repo: "sandsower/rondo", workspace: workspace, runner: runner)
+
+    assert assessment.level == "high"
+    assert assessment.threshold == "low"
+    assert assessment.evidence.review_policy.high_risk_paths == ["elixir/lib/rondo/release_loop.ex"]
+  end
+
   test "runs configured gates before closeout and fails when a gate fails" do
     pr = pr_map(9, "feature/gate-failure", "Gate failure", review_decision: "APPROVED", mergeable: "MERGEABLE", merge_state_status: "CLEAN")
 

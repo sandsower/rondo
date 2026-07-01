@@ -53,6 +53,35 @@ defmodule Rondo.Config do
   @valid_process_provider_kinds ["native", "beislid"]
   @default_release_loop_max_pr_risk_level "low"
   @valid_release_loop_pr_risk_levels ["low", "medium", "high"]
+  @default_release_loop_review_policy_high_risk_paths [
+    "**/config/**",
+    "elixir/config/**",
+    "**/priv/repo/migrations/**",
+    "elixir/priv/repo/migrations/**",
+    "**/*_web/**",
+    "**/security/**",
+    "**/auth/**",
+    "**/crypto/**",
+    "**/billing/**",
+    "**/payment/**",
+    "mix.lock"
+  ]
+  @default_release_loop_review_policy_low_risk_paths [
+    "docs/**",
+    "test/**",
+    "elixir/test/**",
+    "elixir/test/support/**",
+    "**/*.md",
+    "**/*.markdown",
+    "**/*.mdx",
+    "**/*.rst",
+    "README*",
+    "CHANGELOG.md"
+  ]
+  @default_release_loop_review_policy_high_risk_file_count 12
+  @default_release_loop_review_policy_high_risk_total_changes 500
+  @default_release_loop_review_policy_low_risk_file_count 3
+  @default_release_loop_review_policy_low_risk_total_changes 120
   @default_clean_eval_enabled false
   @default_debug false
   @default_observability_enabled true
@@ -206,6 +235,36 @@ defmodule Rondo.Config do
                                    type: :string,
                                    default: @default_release_loop_max_pr_risk_level
                                  ],
+                                 review_policy: [
+                                   type: :map,
+                                   default: %{},
+                                   keys: [
+                                     high_risk_paths: [
+                                       type: {:list, :string},
+                                       default: @default_release_loop_review_policy_high_risk_paths
+                                     ],
+                                     low_risk_paths: [
+                                       type: {:list, :string},
+                                       default: @default_release_loop_review_policy_low_risk_paths
+                                     ],
+                                     high_risk_file_count: [
+                                       type: :pos_integer,
+                                       default: @default_release_loop_review_policy_high_risk_file_count
+                                     ],
+                                     high_risk_total_changes: [
+                                       type: :pos_integer,
+                                       default: @default_release_loop_review_policy_high_risk_total_changes
+                                     ],
+                                     low_risk_file_count: [
+                                       type: :pos_integer,
+                                       default: @default_release_loop_review_policy_low_risk_file_count
+                                     ],
+                                     low_risk_total_changes: [
+                                       type: :pos_integer,
+                                       default: @default_release_loop_review_policy_low_risk_total_changes
+                                     ]
+                                   ]
+                                 ],
                                  review_state: [type: :string, default: "Human Review"],
                                  rework_state: [type: :string, default: "Rework"],
                                  merge_state: [type: :string, default: "Merging"],
@@ -357,6 +416,14 @@ defmodule Rondo.Config do
   @type release_loop_closeout :: %{
           merge: release_loop_closeout_merge()
         }
+  @type release_loop_review_policy :: %{
+          high_risk_paths: [String.t()],
+          low_risk_paths: [String.t()],
+          high_risk_file_count: pos_integer(),
+          high_risk_total_changes: pos_integer(),
+          low_risk_file_count: pos_integer(),
+          low_risk_total_changes: pos_integer()
+        }
   @type release_loop :: %{
           enabled: boolean(),
           pr_review_source: String.t() | nil,
@@ -364,6 +431,7 @@ defmodule Rondo.Config do
           wait_interval_seconds: pos_integer(),
           run_configured_gates_before_push: boolean(),
           max_pr_risk_level: String.t(),
+          review_policy: release_loop_review_policy(),
           review_state: String.t(),
           rework_state: String.t(),
           merge_state: String.t(),
@@ -674,6 +742,7 @@ defmodule Rondo.Config do
       wait_interval_seconds: Map.get(loop, :wait_interval_seconds),
       run_configured_gates_before_push: Map.get(loop, :run_configured_gates_before_push),
       max_pr_risk_level: Map.get(loop, :max_pr_risk_level),
+      review_policy: Map.get(loop, :review_policy),
       review_state: Map.get(loop, :review_state),
       rework_state: Map.get(loop, :rework_state),
       merge_state: Map.get(loop, :merge_state),
@@ -699,6 +768,9 @@ defmodule Rondo.Config do
 
   @spec release_loop_max_pr_risk_level() :: String.t()
   def release_loop_max_pr_risk_level, do: release_loop().max_pr_risk_level
+
+  @spec release_loop_review_policy() :: release_loop_review_policy()
+  def release_loop_review_policy, do: release_loop().review_policy
 
   @spec release_loop_review_state() :: String.t()
   def release_loop_review_state, do: release_loop().review_state
@@ -1223,6 +1295,7 @@ defmodule Rondo.Config do
     |> put_if_present(:wait_interval_seconds, positive_integer_value(Map.get(section, "wait_interval_seconds")))
     |> put_if_present(:run_configured_gates_before_push, boolean_value(Map.get(section, "run_configured_gates_before_push")))
     |> put_if_present(:max_pr_risk_level, normalized_release_loop_pr_risk_level(Map.get(section, "max_pr_risk_level")))
+    |> put_if_present(:review_policy, extract_release_loop_review_policy_options(section_map(section, "review_policy")))
     |> put_if_present(:review_state, scalar_string_value(Map.get(section, "review_state")))
     |> put_if_present(:rework_state, scalar_string_value(Map.get(section, "rework_state")))
     |> put_if_present(:merge_state, scalar_string_value(Map.get(section, "merge_state")))
@@ -1240,6 +1313,16 @@ defmodule Rondo.Config do
     )
   end
 
+  defp extract_release_loop_review_policy_options(section) do
+    %{}
+    |> put_if_present(:high_risk_paths, path_pattern_list_value(Map.get(section, "high_risk_paths")))
+    |> put_if_present(:low_risk_paths, path_pattern_list_value(Map.get(section, "low_risk_paths")))
+    |> put_if_present(:high_risk_file_count, positive_integer_value(Map.get(section, "high_risk_file_count")))
+    |> put_if_present(:high_risk_total_changes, positive_integer_value(Map.get(section, "high_risk_total_changes")))
+    |> put_if_present(:low_risk_file_count, positive_integer_value(Map.get(section, "low_risk_file_count")))
+    |> put_if_present(:low_risk_total_changes, positive_integer_value(Map.get(section, "low_risk_total_changes")))
+  end
+
   defp normalized_release_loop_pr_risk_level(value) when is_binary(value) do
     case String.trim(value) do
       "" -> :omit
@@ -1248,6 +1331,16 @@ defmodule Rondo.Config do
   end
 
   defp normalized_release_loop_pr_risk_level(_value), do: :omit
+
+  defp path_pattern_list_value(value) when is_list(value) do
+    case csv_value(value) do
+      :omit -> []
+      patterns -> patterns
+    end
+  end
+
+  defp path_pattern_list_value(value) when is_binary(value), do: csv_value(value)
+  defp path_pattern_list_value(_value), do: :omit
 
   defp policy_file_value(value) when is_binary(value) do
     case String.trim(value) do
@@ -1504,6 +1597,7 @@ defmodule Rondo.Config do
     codex = section_map(config, "codex")
     action_policy = section_map(config, "action_policy")
     release_loop = section_map(config, "release_loop")
+    release_loop_review_policy = section_map(release_loop, "review_policy")
     release_loop_closeout = section_map(release_loop, "closeout")
     release_loop_merge = section_map(release_loop_closeout, "merge")
     process_provider = section_map(config, "process_provider")
@@ -1526,6 +1620,7 @@ defmodule Rondo.Config do
       validate_section_map(config, "codex"),
       validate_section_map(config, "action_policy"),
       validate_section_map(config, "release_loop"),
+      validate_section_map(release_loop, "review_policy"),
       validate_section_map(release_loop, "closeout"),
       validate_section_map(release_loop_closeout, "merge"),
       validate_section_map(config, "process_provider"),
@@ -1590,6 +1685,12 @@ defmodule Rondo.Config do
       validate_positive_integer_field(release_loop, "release_loop.wait_interval_seconds"),
       validate_boolean_field(release_loop, "release_loop.run_configured_gates_before_push"),
       validate_inclusion_field(release_loop, "release_loop.max_pr_risk_level", @valid_release_loop_pr_risk_levels),
+      validate_string_or_string_list_field(release_loop_review_policy, "release_loop.review_policy.high_risk_paths"),
+      validate_string_or_string_list_field(release_loop_review_policy, "release_loop.review_policy.low_risk_paths"),
+      validate_positive_integer_field(release_loop_review_policy, "release_loop.review_policy.high_risk_file_count"),
+      validate_positive_integer_field(release_loop_review_policy, "release_loop.review_policy.high_risk_total_changes"),
+      validate_positive_integer_field(release_loop_review_policy, "release_loop.review_policy.low_risk_file_count"),
+      validate_positive_integer_field(release_loop_review_policy, "release_loop.review_policy.low_risk_total_changes"),
       validate_string_field(release_loop, "release_loop.review_state"),
       validate_string_field(release_loop, "release_loop.rework_state"),
       validate_string_field(release_loop, "release_loop.merge_state"),
