@@ -43,6 +43,58 @@ defmodule Rondo.OrchestratorStatusTest do
     assert {:error, :guidance_interrupt_not_found} = Orchestrator.submit_guidance(pid, "missing", "approve_once")
   end
 
+  test "snapshot surfaces process provider failure details for retrying runs" do
+    workspace_root = tmp_dir("orchestrator-process-provider-retry-snapshot")
+
+    issue = %Issue{
+      id: "issue-retry-provider-failure",
+      identifier: "MT-RETRY-FAIL",
+      title: "Retry provider failure",
+      description: "Snapshot should expose structured provider failure details",
+      state: "Todo",
+      url: "https://example.org/issues/MT-RETRY-FAIL"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :RetryProviderFailureOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    retry_entry = %{
+      attempt: 1,
+      retry_token: make_ref(),
+      timer_ref: make_ref(),
+      due_at_ms: System.monotonic_time(:millisecond) + 60_000,
+      identifier: issue.identifier,
+      error: ~s(Required Beislið process provider artifact at artifact_path=/tmp/missing.json could not read artifact_path=/tmp/missing.json: {:read_failed, "/tmp/missing.json", :enoent}),
+      failure_reason: "process_provider_read_failed",
+      process_provider_failure: %{
+        provider_kind: "beislid",
+        phase: "gate_selection",
+        required: true,
+        reason_code: "process_provider_read_failed",
+        reason: ~s({:read_failed, "/tmp/missing.json", :enoent}),
+        raw_reason: ~s({:read_failed, "/tmp/missing.json", :enoent}),
+        artifact_path: "/tmp/missing.json",
+        artifact_source: :config,
+        message: ~s(Required Beislið process provider could not read artifact_path=/tmp/missing.json: {:read_failed, "/tmp/missing.json", :enoent})
+      }
+    }
+
+    :sys.replace_state(pid, fn state ->
+      %{state | retry_attempts: %{issue.id => retry_entry}}
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert [%{process_provider_failure: failure}] = snapshot.retrying
+    assert failure.provider_kind == "beislid"
+    assert failure.reason_code == "process_provider_read_failed"
+    assert failure.artifact_path == "/tmp/missing.json"
+  end
+
   test "dispatch exposes config validation failures as poll-level blockers" do
     workspace_root = tmp_dir("orchestrator-config-blocker")
 
@@ -119,6 +171,96 @@ defmodule Rondo.OrchestratorStatusTest do
 
     assert snapshot.blocked_dispatch_reason == "tracker_fetch_failed"
     assert snapshot.blocked_dispatch_detail =~ "tracker_failure"
+  end
+
+  test "orchestrator retries and snapshots required Beislið process provider failures" do
+    workspace_root = tmp_dir("orchestrator-process-provider-required-failure")
+    claude_bin = fake_claude_script(workspace_root, "process-provider-failure-session", 0)
+    action_policy_bin = fake_action_policy_script(workspace_root, "allow")
+    missing_artifact = Path.join(workspace_root, "missing-beislid-artifact.json")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: claude_bin,
+      action_policy_command: action_policy_bin,
+      max_turns: 1,
+      process_provider_kind: "beislid",
+      process_provider_required: true,
+      process_provider_artifact_path: missing_artifact
+    )
+
+    issue = %Issue{
+      id: "issue-process-provider-required-failure",
+      identifier: "MT-PROVIDER-REQUIRED",
+      title: "Required provider failure retry",
+      description: "Retry after a required Beislið provider failure",
+      state: "Todo",
+      url: "https://example.org/issues/MT-PROVIDER-REQUIRED"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :ProcessProviderRequiredFailureOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    state = :sys.get_state(pid)
+    state = %{state | max_concurrent_agents: 1, poll_interval_ms: 60_000}
+    :sys.replace_state(pid, fn _ -> state end)
+
+    send(pid, {:tick, state.tick_token})
+
+    retry_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).retrying do
+          [entry | _] -> entry
+          _ -> nil
+        end
+      end)
+
+    assert retry_entry.identifier == "MT-PROVIDER-REQUIRED"
+    assert retry_entry.error =~ "Required Beislið process provider"
+    assert retry_entry.error =~ "could not read"
+    assert retry_entry.process_provider_failure.provider_kind == "beislid"
+    assert retry_entry.process_provider_failure.reason_code == "process_provider_read_failed"
+    assert retry_entry.process_provider_failure.artifact_path == missing_artifact
+
+    archived_entry =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).archived do
+          [entry | _] -> entry
+          _ -> nil
+        end
+      end)
+
+    assert archived_entry.exit_reason =~ "process_provider_required_failed"
+    assert archived_entry.process_provider_failure.reason_code == "process_provider_read_failed"
+
+    manifest =
+      [workspace_root, ".rondo_runs", "MT-PROVIDER-REQUIRED", "*", "manifest.json"]
+      |> Path.join()
+      |> Path.wildcard()
+      |> Enum.map(fn path -> path |> File.read!() |> Jason.decode!() end)
+      |> Enum.find(&(&1["status"] == "failed"))
+
+    assert manifest
+    run_decision_checkpoint = Enum.find(manifest["checkpoints"], &(&1["kind"] == "run_decision"))
+    assert run_decision_checkpoint
+
+    run_decision =
+      Path.join(manifest["run_dir"], run_decision_checkpoint["path"])
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert run_decision["payload"]["reason_code"] == "process_provider_read_failed"
+    assert run_decision["payload"]["input_signals"]["process_provider_failure"]["artifact_path"] == missing_artifact
+    assert run_decision["payload"]["evidence"]["process_provider_failure"]["artifact_path"] == missing_artifact
   end
 
   test "guidance can address paused claims by issue identifier" do

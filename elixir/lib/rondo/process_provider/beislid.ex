@@ -15,6 +15,12 @@ defmodule Rondo.ProcessProvider.Beislid do
 
   @artifact_schema "beislid-process-artifact-v1"
 
+  @type artifact_context :: %{
+          provider_kind: String.t(),
+          artifact_path: String.t() | nil,
+          artifact_source: atom() | nil
+        }
+
   @impl true
   def id, do: "beislid"
 
@@ -37,24 +43,42 @@ defmodule Rondo.ProcessProvider.Beislid do
         ProcessProvider.probe_result(:ok, probe_checks(artifact))
 
       {:error, reason} ->
-        ProcessProvider.probe_result(:missing, %{artifact: {:error, reason}})
+        ProcessProvider.probe_result(:missing, %{artifact: {:error, unwrap_artifact_error(reason)}})
+    end
+  end
+
+  @spec artifact_context(keyword()) :: artifact_context()
+  def artifact_context(opts \\ []) do
+    case load_artifact(opts) do
+      {:ok, artifact} ->
+        %{provider_kind: id(), artifact_path: artifact.path, artifact_source: artifact.source}
+
+      {:error, {:artifact_error, source, path, _reason}} ->
+        %{provider_kind: id(), artifact_path: path, artifact_source: source}
+
+      {:error, _reason} ->
+        %{provider_kind: id(), artifact_path: nil, artifact_source: nil}
     end
   end
 
   @impl true
   def select_gates(opts \\ []) do
-    with {:ok, artifact} <- load_artifact(opts) do
-      selection = select_artifact_gates(artifact, opts)
+    case load_artifact(opts) do
+      {:ok, artifact} ->
+        selection = select_artifact_gates(artifact, opts)
 
-      {:ok,
-       ProcessProvider.gate_selection_result(selection.gates,
-         selected: selection.selected,
-         skipped: selection.skipped,
-         warnings: selection.warnings,
-         changed_files: selection.changed_files,
-         diff_source: selection.diff_source,
-         metadata: selection.metadata
-       )}
+        {:ok,
+         ProcessProvider.gate_selection_result(selection.gates,
+           selected: selection.selected,
+           skipped: selection.skipped,
+           warnings: selection.warnings,
+           changed_files: selection.changed_files,
+           diff_source: selection.diff_source,
+           metadata: selection.metadata
+         )}
+
+      {:error, reason} ->
+        {:error, unwrap_artifact_error(reason)}
     end
   end
 
@@ -134,24 +158,45 @@ defmodule Rondo.ProcessProvider.Beislid do
 
   defp load_first_artifact([]), do: {:error, :missing_artifact_path}
 
-  defp load_first_artifact([{:source_contract_path, path} | rest]) do
-    case read_artifact(path) do
-      {:ok, %{"schema" => @artifact_schema} = payload} -> normalize_artifact(payload, path, :source_contract_path)
-      {:ok, _payload} -> load_first_artifact(rest)
-      {:error, _reason} -> load_first_artifact(rest)
-    end
-  end
-
   defp load_first_artifact([{:source_contract_process_provider, path} | _rest]) do
-    with {:ok, payload} <- read_artifact(path) do
-      normalize_artifact(payload, path, :source_contract_process_provider)
+    case load_required_artifact(path, :source_contract_process_provider) do
+      {:ok, artifact} -> {:ok, artifact}
+      {:error, reason} -> {:error, {:artifact_error, :source_contract_process_provider, Path.expand(path), reason}}
     end
   end
 
-  defp load_first_artifact([{source, path} | rest]) do
-    case read_artifact(path) do
-      {:ok, payload} -> normalize_artifact(payload, path, source)
-      {:error, reason} -> if(rest == [], do: {:error, reason}, else: load_first_artifact(rest))
+  defp load_first_artifact([{:source_contract_path, path} | rest]) do
+    case load_optional_artifact(path, :source_contract_path) do
+      {:ok, artifact} -> {:ok, artifact}
+      {:skip, _reason} -> load_first_artifact(rest)
+    end
+  end
+
+  defp load_first_artifact([{:config, path} | _rest]) do
+    case load_required_artifact(path, :config) do
+      {:ok, artifact} -> {:ok, artifact}
+      {:error, reason} -> {:error, {:artifact_error, :config, Path.expand(path), reason}}
+    end
+  end
+
+  defp load_required_artifact(path, source) do
+    with {:ok, payload} <- read_artifact(path),
+         {:ok, artifact} <- normalize_artifact(payload, path, source) do
+      {:ok, artifact}
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp unwrap_artifact_error({:artifact_error, _source, _path, reason}), do: reason
+  defp unwrap_artifact_error(reason), do: reason
+
+  defp load_optional_artifact(path, source) do
+    with {:ok, payload} <- read_artifact(path),
+         {:ok, artifact} <- normalize_artifact(payload, path, source) do
+      {:ok, artifact}
+    else
+      {:error, reason} -> {:skip, reason}
     end
   end
 

@@ -263,6 +263,49 @@ defmodule Rondo.PresenterTest do
     assert issue_payload.retry.release_loop.pr.number == 15
   end
 
+  test "retry payloads expose process provider failure metadata" do
+    snapshot = %{
+      running: [],
+      retrying: [
+        %{
+          issue_id: "issue-process-provider-failure",
+          identifier: "MT-PROVIDER-FAIL",
+          attempt: 2,
+          due_in_ms: 3_000,
+          error: "Required Beislið process provider artifact at artifact_path=/tmp/missing.json could not read artifact_path=/tmp/missing.json: {:read_failed, \"/tmp/missing.json\", :enoent}",
+          process_provider_failure: %{
+            provider_kind: "beislid",
+            phase: "gate_selection",
+            required: true,
+            reason_code: "process_provider_read_failed",
+            reason: "{:read_failed, \"/tmp/missing.json\", :enoent}",
+            raw_reason: "{:read_failed, \"/tmp/missing.json\", :enoent}",
+            artifact_path: "/tmp/missing.json",
+            artifact_source: :config,
+            message: "Required Beislið process provider could not read artifact_path=/tmp/missing.json: {:read_failed, \"/tmp/missing.json\", :enoent}"
+          }
+        }
+      ],
+      archived: [],
+      claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    server_name = Module.concat(__MODULE__, :ProcessProviderFailureSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+    [retry] = payload.retrying
+    assert retry.process_provider_failure.provider_kind == "beislid"
+    assert retry.process_provider_failure.reason_code == "process_provider_read_failed"
+    assert retry.process_provider_failure.artifact_path == "/tmp/missing.json"
+
+    assert {:ok, issue_payload} = RondoWeb.Presenter.issue_payload("MT-PROVIDER-FAIL", server_name, 1_000)
+    assert issue_payload.retry.process_provider_failure.provider_kind == "beislid"
+    assert issue_payload.retry.process_provider_failure.reason_code == "process_provider_read_failed"
+    assert issue_payload.retry.process_provider_failure.message =~ "could not read"
+  end
+
   test "state payload exposes tracker, PR, branch, and final report links" do
     workflow_path = Workflow.workflow_file_path()
     original_workflow = File.read!(workflow_path)

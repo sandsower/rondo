@@ -1572,6 +1572,9 @@ defmodule Rondo.Orchestrator do
         Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
 
         next_attempt = next_retry_attempt_from_running(running_entry)
+        process_provider_failure = process_provider_failure_payload(reason)
+        failure_reason = retry_failure_reason(running_entry, reason)
+        error = retry_error_message(reason, process_provider_failure)
 
         if has_ledger? do
           archive_running_entry(state, running_entry, reason)
@@ -1580,8 +1583,9 @@ defmodule Rondo.Orchestrator do
         end
         |> schedule_issue_retry(issue_id, next_attempt, %{
           identifier: running_entry.identifier,
-          error: "agent exited: #{inspect(reason)}",
-          failure_reason: retry_failure_reason(running_entry, reason)
+          error: error,
+          failure_reason: failure_reason,
+          process_provider_failure: process_provider_failure
         })
     end
   end
@@ -1871,8 +1875,17 @@ defmodule Rondo.Orchestrator do
   defp model_routing_exhausted_exit?(_reason), do: false
 
   defp retry_failure_reason(running_entry, reason) do
-    if gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate)), do: :gate_failed
+    case process_provider_failure_payload(reason) do
+      %{reason_code: reason_code} -> reason_code
+      _ -> if gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate)), do: :gate_failed
+    end
   end
+
+  defp retry_error_message(_reason, %{message: message}) when is_binary(message), do: message
+  defp retry_error_message(reason, _process_provider_failure), do: "agent exited: #{inspect(reason)}"
+
+  defp process_provider_failure_payload({kind, payload}) when kind in [:process_provider_failed, :process_provider_required_failed] and is_map(payload), do: payload
+  defp process_provider_failure_payload(_reason), do: nil
 
   defp gate_failure_reason?(reason), do: reason |> inspect() |> String.contains?("gate_failed")
 
@@ -2314,7 +2327,8 @@ defmodule Rondo.Orchestrator do
             fresh_workspace: Map.get(metadata, :fresh_workspace),
             max_turns: Map.get(metadata, :max_turns),
             attempt_chain: Map.get(metadata, :attempt_chain),
-            release_loop: Map.get(metadata, :release_loop)
+            release_loop: Map.get(metadata, :release_loop),
+            process_provider_failure: Map.get(metadata, :process_provider_failure)
           })
     }
   end
@@ -2329,7 +2343,8 @@ defmodule Rondo.Orchestrator do
     :fresh_workspace,
     :max_turns,
     :attempt_chain,
-    :release_loop
+    :release_loop,
+    :process_provider_failure
   ]
 
   defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
@@ -2696,7 +2711,8 @@ defmodule Rondo.Orchestrator do
           identifier: Map.get(retry, :identifier),
           error: Map.get(retry, :error),
           delay_type: Map.get(retry, :delay_type),
-          release_loop: Map.get(retry, :release_loop)
+          release_loop: Map.get(retry, :release_loop),
+          process_provider_failure: Map.get(retry, :process_provider_failure)
         }
       end)
 
@@ -3238,6 +3254,7 @@ defmodule Rondo.Orchestrator do
     issue = Map.get(running_entry, :issue)
     identifier = Map.get(running_entry, :identifier)
     finished_at = DateTime.utc_now()
+    process_provider_failure = process_provider_failure_payload(reason)
 
     ledger =
       running_entry
@@ -3260,6 +3277,7 @@ defmodule Rondo.Orchestrator do
         started_at: Map.get(running_entry, :started_at),
         finished_at: finished_at,
         exit_reason: archive_exit_reason(reason),
+        process_provider_failure: process_provider_failure,
         turn_count: Map.get(running_entry, :turn_count, 0),
         model_routing: Map.get(running_entry, :model_routing),
         adapter: Map.get(running_entry, :adapter),
@@ -3284,6 +3302,8 @@ defmodule Rondo.Orchestrator do
     |> complete_run_ledger(ledger_status, %{
       exit_reason: archive_exit_reason(reason),
       non_active_state: if(reason == :handoff, do: issue && issue.state, else: nil),
+      process_provider_failure: process_provider_failure,
+      reason_code: process_provider_failure && Map.get(process_provider_failure, :reason_code),
       session_id: Map.get(running_entry, :session_id),
       turn_count: Map.get(running_entry, :turn_count, 0)
     })
@@ -3347,22 +3367,36 @@ defmodule Rondo.Orchestrator do
   end
 
   defp retry_run_decision_reason_code(running_entry, reason) do
-    if reason in [:normal, :handoff, :terminated] do
-      nil
-    else
-      evidence = %{"latest_gate" => Map.get(running_entry, :latest_gate)}
+    case process_provider_failure_payload(reason) do
+      %{reason_code: reason_code} = failure ->
+        evidence = %{"latest_gate" => Map.get(running_entry, :latest_gate), "process_provider_failure" => failure}
 
-      input_signals = %{
-        "failure_reason" => inspect(reason),
-        "retry_attempt" => Map.get(running_entry, :retry_attempt),
-        "gate_status" => Map.get(Map.get(running_entry, :latest_gate) || %{}, :status)
-      }
+        input_signals = %{
+          "failure_reason" => Map.get(failure, :message),
+          "retry_attempt" => Map.get(running_entry, :retry_attempt),
+          "gate_status" => Map.get(Map.get(running_entry, :latest_gate) || %{}, :status),
+          "process_provider_failure" => failure
+        }
 
-      if gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate)) do
-        {"gate_failed", input_signals, evidence}
-      else
-        {"worker_failed", input_signals, evidence}
-      end
+        {reason_code, input_signals, evidence}
+
+      _ when reason in [:normal, :handoff, :terminated] ->
+        nil
+
+      _ ->
+        evidence = %{"latest_gate" => Map.get(running_entry, :latest_gate)}
+
+        input_signals = %{
+          "failure_reason" => inspect(reason),
+          "retry_attempt" => Map.get(running_entry, :retry_attempt),
+          "gate_status" => Map.get(Map.get(running_entry, :latest_gate) || %{}, :status)
+        }
+
+        if gate_failure_reason?(reason) and failed_gate?(Map.get(running_entry, :latest_gate)) do
+          {"gate_failed", input_signals, evidence}
+        else
+          {"worker_failed", input_signals, evidence}
+        end
     end
   end
 

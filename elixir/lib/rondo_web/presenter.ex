@@ -191,7 +191,8 @@ defmodule RondoWeb.Presenter do
       issue_identifier: entry.identifier,
       attempt: entry.attempt,
       due_at: due_at_iso8601(entry.due_in_ms),
-      error: entry.error
+      error: entry.error,
+      process_provider_failure: Map.get(entry, :process_provider_failure)
     }
 
     maybe_put_release_loop(payload, entry_value(entry, :release_loop))
@@ -315,7 +316,8 @@ defmodule RondoWeb.Presenter do
     payload = %{
       attempt: retry.attempt,
       due_at: due_at_iso8601(retry.due_in_ms),
-      error: retry.error
+      error: retry.error,
+      process_provider_failure: Map.get(retry, :process_provider_failure)
     }
 
     maybe_put_release_loop(payload, entry_value(retry, :release_loop))

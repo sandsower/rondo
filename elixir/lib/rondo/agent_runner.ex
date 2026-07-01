@@ -122,6 +122,12 @@ defmodule Rondo.AgentRunner do
     exit({:action_policy_denied, envelope})
   end
 
+  defp handle_agent_run_error(issue, {kind, payload} = reason, _recipient, _opts)
+       when kind in [:process_provider_failed, :process_provider_required_failed] and is_map(payload) do
+    Logger.error("Agent run failed for #{issue_context(issue)}: #{Map.get(payload, :message) || inspect(reason)}")
+    exit(reason)
+  end
+
   defp handle_agent_run_error(issue, {:workspace_not_ready, workspace}, _recipient, _opts) do
     Logger.error("Agent run aborted for #{issue_context(issue)}: workspace not present at spawn boundary: #{workspace}")
 
@@ -1064,25 +1070,25 @@ defmodule Rondo.AgentRunner do
   defp run_selected_gates(%{run_dir: nil}, _issue, _turn_number, _gate_selection), do: {:error, :missing_run_ledger_for_gates}
 
   defp run_selected_gates(context, issue, turn_number, gate_selection) do
-    {action_policy_provider, gate_selection} = action_policy_provider_for_gates(gate_selection, context)
+    with {:ok, action_policy_provider, gate_selection} <- action_policy_provider_for_gates(gate_selection, context) do
+      case Gates.run(gate_selection.gates, context.workspace,
+             run_dir: context.run_dir,
+             execution_id: gate_execution_id(turn_number),
+             gate_selection: Map.drop(gate_selection, [:gates, :action_policy_provider]),
+             action_policy: true,
+             action_policy_evaluator: action_policy_evaluator(action_policy_provider, context.opts)
+           ) do
+        {:ok, summary} ->
+          send_gate_update(context.claude_update_recipient, issue, summary)
+          :ok
 
-    case Gates.run(gate_selection.gates, context.workspace,
-           run_dir: context.run_dir,
-           execution_id: gate_execution_id(turn_number),
-           gate_selection: Map.drop(gate_selection, [:gates, :action_policy_provider]),
-           action_policy: true,
-           action_policy_evaluator: action_policy_evaluator(action_policy_provider, context.opts)
-         ) do
-      {:ok, summary} ->
-        send_gate_update(context.claude_update_recipient, issue, summary)
-        :ok
+        {:error, summary} when is_map(summary) ->
+          send_gate_update(context.claude_update_recipient, issue, summary)
+          process_provider_gate_failure(action_policy_provider, summary, context.opts)
 
-      {:error, summary} when is_map(summary) ->
-        send_gate_update(context.claude_update_recipient, issue, summary)
-        {:error, gate_failure_reason(summary)}
-
-      {:error, reason} ->
-        {:error, {:gate_error, reason}}
+        {:error, reason} ->
+          {:error, {:gate_error, reason}}
+      end
     end
   end
 
@@ -1124,22 +1130,37 @@ defmodule Rondo.AgentRunner do
     end
   end
 
-  defp handle_gate_selection_failure(Native, reason, _opts), do: {:error, {:process_provider_gate_selection_failed, reason}}
-
-  defp handle_gate_selection_failure(_provider, {:invalid_artifact_field, _field} = reason, _opts) do
-    {:error, {:process_provider_gate_selection_failed, reason}}
-  end
+  defp invalid_artifact_reason?({:invalid_artifact_field, _field}), do: true
+  defp invalid_artifact_reason?(:invalid_artifact), do: true
+  defp invalid_artifact_reason?(:invalid_artifact_id), do: true
+  defp invalid_artifact_reason?({:unsupported_artifact_schema, _schema}), do: true
+  defp invalid_artifact_reason?({:artifact_not_approved, _status}), do: true
+  defp invalid_artifact_reason?({:invalid_json, _path, _message}), do: true
+  defp invalid_artifact_reason?(_reason), do: false
 
   defp handle_gate_selection_failure(provider, reason, opts) do
-    if Config.process_provider_required?() do
-      {:error, {:process_provider_gate_selection_failed, reason}}
-    else
-      provider_id = provider_id(provider)
-      Logger.warning("Process provider gate selection failed provider=#{provider_id} reason=#{inspect(reason)}; falling back to native gates")
+    required? = Config.process_provider_required?()
+    payload = process_provider_failure_payload(provider, :gate_selection, reason, opts, required?)
 
-      with {:ok, selection} <- ProcessProvider.select_gate_selection(Native, opts) do
-        {:ok, selection |> annotate_native_fallback(provider_id, reason) |> Map.put(:action_policy_provider, Native)}
-      end
+    cond do
+      required? ->
+        {:error, {:process_provider_required_failed, payload}}
+
+      provider == Native or invalid_artifact_reason?(reason) ->
+        {:error, {:process_provider_failed, payload}}
+
+      true ->
+        provider_id = provider_id(provider)
+        Logger.warning("Process provider gate selection failed provider=#{provider_id} reason=#{inspect(reason)}; falling back to native gates")
+
+        case ProcessProvider.select_gate_selection(Native, opts) do
+          {:ok, selection} ->
+            {:ok, selection |> annotate_native_fallback(provider_id, reason) |> annotate_action_policy_provider(Native)}
+
+          {:error, native_reason} ->
+            native_payload = process_provider_failure_payload(Native, :gate_selection, native_reason, opts, required?)
+            {:error, {:process_provider_failed, native_payload}}
+        end
     end
   end
 
@@ -1159,26 +1180,73 @@ defmodule Rondo.AgentRunner do
   end
 
   defp action_policy_provider_for_gates(%{action_policy_provider: Beislid} = gate_selection, %{opts: opts}) do
-    provider = if Beislid.action_policy_available?(opts), do: Beislid, else: Native
+    required? = Config.process_provider_required?()
 
-    gate_selection =
-      update_in(gate_selection.metadata, fn metadata ->
-        Map.put(metadata, :action_policy_provider, provider_id(provider))
-      end)
-
-    {provider, gate_selection}
+    if Beislid.action_policy_available?(opts) do
+      {:ok, Beislid, annotate_action_policy_provider(gate_selection, Beislid)}
+    else
+      action_policy_provider_missing_beislid_policy(gate_selection, opts, required?)
+    end
   end
 
   defp action_policy_provider_for_gates(gate_selection, context) do
     provider = Map.get(gate_selection, :action_policy_provider, context.process_provider)
-    {provider, gate_selection}
+    {:ok, provider, annotate_action_policy_provider(gate_selection, provider)}
   end
+
+  defp action_policy_provider_missing_beislid_policy(_gate_selection, opts, true) do
+    payload = process_provider_failure_payload(Beislid, :action_policy, :action_policy_unavailable, opts, true)
+    {:error, {:process_provider_required_failed, payload}}
+  end
+
+  defp action_policy_provider_missing_beislid_policy(gate_selection, _opts, false) do
+    provider = Native
+
+    gate_selection =
+      gate_selection
+      |> annotate_native_fallback(provider_id(Beislid), :action_policy_unavailable)
+      |> annotate_action_policy_provider(provider)
+
+    {:ok, provider, gate_selection}
+  end
+
+  defp process_provider_failure_payload(provider, phase, reason, opts, required?) do
+    ProcessProvider.failure_payload(provider, phase, reason, Keyword.put(opts, :required, required?))
+  end
+
+  defp process_provider_failure_tuple(true, payload), do: {:process_provider_required_failed, payload}
+  defp process_provider_failure_tuple(false, payload), do: {:process_provider_failed, payload}
+
+  defp process_provider_gate_failure(Beislid, summary, opts) do
+    case summary_status(summary) do
+      status when status in [:policy_blocked, "policy_blocked", :policy_denied, "policy_denied"] ->
+        if Config.process_provider_required?() do
+          payload = process_provider_failure_payload(Beislid, :action_policy, gate_failure_reason(summary), opts, true)
+          {:error, {:process_provider_required_failed, payload}}
+        else
+          {:error, gate_failure_reason(summary)}
+        end
+
+      _ ->
+        {:error, gate_failure_reason(summary)}
+    end
+  end
+
+  defp process_provider_gate_failure(_provider, summary, _opts), do: {:error, gate_failure_reason(summary)}
+
+  defp summary_status(summary), do: Map.get(summary, :status) || Map.get(summary, "status")
 
   defp maybe_put_source_contract(opts, context_opts) do
     case Keyword.get(context_opts, :source_contract) do
       source_contract when is_map(source_contract) -> Keyword.put(opts, :source_contract, source_contract)
       _other -> opts
     end
+  end
+
+  defp annotate_action_policy_provider(selection, provider) do
+    selection
+    |> Map.put(:action_policy_provider, provider)
+    |> Map.update!(:metadata, &Map.put(&1, :action_policy_provider, provider_id(provider)))
   end
 
   defp annotate_native_fallback(selection, provider_id, reason) do
@@ -2208,13 +2276,16 @@ defmodule Rondo.AgentRunner do
 
   defp preflight_process_provider(Beislid, opts) do
     probe = Beislid.probe(opts)
+    required? = Config.process_provider_required?()
 
     cond do
       blocking_probe?(probe) ->
-        {:error, {:process_provider_preflight_failed, Beislid.id(), probe}}
+        payload = process_provider_failure_payload(Beislid, :preflight, probe, opts, required?)
+        {:error, process_provider_failure_tuple(required?, payload)}
 
-      Config.process_provider_required?() and Map.get(probe, :status) != :ok ->
-        {:error, {:process_provider_preflight_failed, Beislid.id(), probe}}
+      required? and Map.get(probe, :status) != :ok ->
+        payload = process_provider_failure_payload(Beislid, :preflight, probe, opts, true)
+        {:error, {:process_provider_required_failed, payload}}
 
       true ->
         :ok

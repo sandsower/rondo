@@ -3,6 +3,7 @@ defmodule Rondo.ProcessProviderTest do
 
   alias Rondo.ProcessProvider
   alias Rondo.ProcessProvider.Beislid
+  alias Rondo.ProcessProvider.Failure
   alias Rondo.ProcessProvider.Native
 
   defmodule ErrorProvider do
@@ -13,6 +14,9 @@ defmodule Rondo.ProcessProviderTest do
     def select_gates(_opts) do
       {:ok, [%{name: "legacy", command: "mix test", timeout_ms: 1_000, action_classes: ["read"]}]}
     end
+  end
+
+  defmodule NoIdProvider do
   end
 
   test "native provider exposes current workflow gates and unsupported rich features" do
@@ -439,6 +443,7 @@ defmodule Rondo.ProcessProviderTest do
     issue = %Issue{id: "1", identifier: "RON-9", title: "Adapter", state: "In Progress"}
 
     assert %{status: :missing} = Beislid.probe()
+    assert %{provider_kind: "beislid"} = Beislid.artifact_context()
     assert {:error, :missing_artifact_path} = Beislid.select_gates()
     assert {:ok, []} = Beislid.select_guides()
     assert %{} = Beislid.model_routing_hints()
@@ -599,6 +604,363 @@ defmodule Rondo.ProcessProviderTest do
     )
 
     assert {:ok, %{gates: [], metadata: %{provider: "beislid"}}} = Beislid.select_gates()
+  end
+
+  test "process provider failure payload includes provider kind, artifact path, and actionable reason" do
+    temp_dir = Path.join(System.tmp_dir!(), "rondo-process-provider-failure-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(temp_dir)
+    on_exit(fn -> File.rm_rf(temp_dir) end)
+
+    invalid_json_path = Path.join(temp_dir, "invalid.json")
+    File.write!(invalid_json_path, "{")
+
+    source_path = fixture_path("approved.json")
+    request_path = Path.join(temp_dir, "compat-request.json")
+    File.write!(request_path, Jason.encode!(%{"schema" => "rondo-execution-request-v1"}))
+
+    for {phase, reason, expected_code, artifact_path, artifact_source, message_fragment, opts} <- [
+          {
+            :gate_selection,
+            :missing_artifact_path,
+            "process_provider_missing_artifact_path",
+            nil,
+            nil,
+            "no configured artifact path",
+            [process_provider_artifact_path: nil]
+          },
+          {
+            :gate_selection,
+            {:invalid_json, invalid_json_path, "bad json"},
+            "process_provider_invalid_json",
+            invalid_json_path,
+            :config,
+            "invalid JSON",
+            [process_provider_artifact_path: invalid_json_path]
+          },
+          {
+            :gate_selection,
+            {:unsupported_artifact_schema, "future-v1"},
+            "process_provider_unsupported_artifact_schema",
+            source_path,
+            :config,
+            "unsupported schema",
+            [process_provider_artifact_path: source_path]
+          },
+          {
+            :gate_selection,
+            {:artifact_not_approved, "draft"},
+            "process_provider_artifact_not_approved",
+            source_path,
+            :config,
+            "not approved",
+            [
+              process_provider_artifact_path: source_path,
+              source_contract: %{path: request_path}
+            ]
+          },
+          {
+            :action_policy,
+            :action_policy_unavailable,
+            "process_provider_action_policy_unavailable",
+            source_path,
+            :source_contract_process_provider,
+            "no usable action_policy",
+            [
+              process_provider_artifact_path: source_path,
+              source_contract: %{process_provider: %{artifact_path: source_path}}
+            ]
+          },
+          {
+            :action_policy,
+            {:action_policy_requires_approval, %{"decision" => "ask"}},
+            "process_provider_action_policy_requires_approval",
+            source_path,
+            :source_contract_process_provider,
+            "requires approval",
+            [
+              process_provider_artifact_path: source_path,
+              source_contract: %{process_provider: %{artifact_path: source_path}}
+            ]
+          },
+          {
+            :action_policy,
+            {:action_policy_denied, %{"decision" => "deny"}},
+            "process_provider_action_policy_denied",
+            source_path,
+            :source_contract_process_provider,
+            "rejected by action policy",
+            [
+              process_provider_artifact_path: source_path,
+              source_contract: %{process_provider: %{artifact_path: source_path}}
+            ]
+          }
+        ] do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        process_provider_kind: "beislid",
+        process_provider_artifact_path: Keyword.get(opts, :process_provider_artifact_path)
+      )
+
+      payload = ProcessProvider.failure_payload(Beislid, phase, reason, Keyword.put(opts, :required, true))
+
+      assert payload.provider_kind == "beislid"
+      assert payload.phase == Atom.to_string(phase)
+      assert payload.reason_code == expected_code
+      assert payload.required == true
+      assert payload.reason =~ inspect(reason)
+      assert payload.message =~ message_fragment
+      assert Map.get(payload, :artifact_path) == artifact_path
+      assert Map.get(payload, :artifact_source) == artifact_source
+    end
+  end
+
+  test "failure payload fallback branches preserve provider context and wrapped artifact paths" do
+    temp_dir = Path.join(System.tmp_dir!(), "rondo-process-provider-failure-fallback-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(temp_dir)
+    on_exit(fn -> File.rm_rf(temp_dir) end)
+
+    compat_path = Path.join(temp_dir, "compat-request.json")
+    config_path = Path.join(temp_dir, "config.json")
+    File.write!(compat_path, Jason.encode!(%{"schema" => "rondo-execution-request-v1"}))
+    File.write!(config_path, Jason.encode!(%{"schema" => "beislid-process-artifact-v1", "id" => "artifact", "status" => "draft"}))
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      process_provider_kind: "beislid",
+      process_provider_artifact_path: config_path
+    )
+
+    assert %{
+             provider_kind: "legacy",
+             artifact_source: :source_contract_process_provider,
+             artifact_path: ^compat_path,
+             reason_code: "process_provider_missing_artifact_path"
+           } =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               :missing_artifact_path,
+               source_contract: %{process_provider: %{"artifact_path" => compat_path}}
+             )
+
+    assert %{
+             artifact_source: :config,
+             artifact_path: ^config_path,
+             reason_code: "process_provider_read_failed"
+           } =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               {:error, {:artifact_error, :config, config_path, {:read_failed, config_path, :enoent}}},
+               source_contract: %{path: compat_path}
+             )
+
+    assert %{
+             artifact_source: :source_contract_path,
+             artifact_path: ^compat_path,
+             reason_code: "process_provider_artifact_not_approved"
+           } =
+             ProcessProvider.failure_payload(
+               "legacy",
+               "action_policy",
+               {:artifact_not_approved, "draft"},
+               source_contract: %{manifest_path: compat_path}
+             )
+
+    assert %{
+             artifact_source: :config,
+             artifact_path: ^config_path,
+             reason_code: "process_provider_missing_artifact_path"
+           } = ProcessProvider.failure_payload("legacy", :gate_selection, :missing_artifact_path, [])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      process_provider_kind: "beislid",
+      process_provider_artifact_path: nil
+    )
+
+    assert %{
+             provider_kind: "123",
+             phase: "123",
+             reason_code: "process_provider_123_failed"
+           } = ProcessProvider.failure_payload(123, 123, :other, [])
+
+    refute Map.has_key?(ProcessProvider.failure_payload(123, 123, :other, []), :artifact_path)
+  end
+
+  test "failure payload covers wrapped reasons, probe status fallbacks, and slug edge cases" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      process_provider_kind: "beislid",
+      process_provider_artifact_path: nil
+    )
+
+    assert %{reason_code: "process_provider_failed", reason: "{:process_provider_failed, %{foo: :bar}}"} =
+             ProcessProvider.failure_payload("legacy", :gate_selection, {:process_provider_failed, %{foo: :bar}}, [])
+
+    assert %{reason_code: "process_provider_gate_selection_failed"} =
+             ProcessProvider.failure_payload("legacy", :gate_selection, :other)
+
+    assert %{reason_code: "process_provider_gate_selection_failed"} =
+             Failure.payload("legacy", :gate_selection, :other)
+
+    assert %{provider_kind: "no_id_provider"} =
+             ProcessProvider.failure_payload(NoIdProvider, :gate_selection, :other, [])
+
+    assert %{reason_code: "process_provider_required_failed"} =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               {:process_provider_required_failed, %{foo: :bar}},
+               []
+             )
+
+    assert %{reason_code: "process_provider_gate_selection_missing"} =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               {:probe_failed, %{status: :missing, checks: %{artifact: :ok}}},
+               []
+             )
+
+    assert %{
+             reason_code: "process_provider_read_failed",
+             artifact_source: :config
+           } =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               {:artifact_error, :config, nil, {:read_failed, nil, :enoent}},
+               []
+             )
+
+    refute Map.has_key?(
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               {:artifact_error, :config, nil, {:read_failed, nil, :enoent}},
+               []
+             ),
+             :artifact_path
+           )
+
+    assert %{reason_code: "process_provider_read_failed"} =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               {:read_failed, nil, :enoent},
+               []
+             )
+
+    refute Map.has_key?(
+             ProcessProvider.failure_payload("legacy", :gate_selection, {:read_failed, nil, :enoent}, []),
+             :artifact_path
+           )
+
+    assert %{reason_code: "process_provider_invalid_json"} =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               {:invalid_json, nil, "bad json"},
+               []
+             )
+
+    refute Map.has_key?(
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               {:invalid_json, nil, "bad json"},
+               []
+             ),
+             :artifact_path
+           )
+
+    assert %{reason_code: "process_provider_invalid_artifact_id"} =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               {:invalid_artifact_id, %{foo: :bar}},
+               []
+             )
+
+    assert %{reason_code: "process_provider_gate_selection_missing"} =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               %{status: :missing, checks: %{artifact: :ok}},
+               []
+             )
+
+    assert %{reason_code: "process_provider_gate_selection_unknown"} =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               %{status: "", checks: %{artifact: :ok}},
+               []
+             )
+
+    assert %{reason_code: "process_provider_action_policy_unavailable"} =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               %{status: :missing, checks: %{action_policy: :missing}},
+               []
+             )
+
+    assert %{reason_code: "process_provider_action_policy_unavailable"} =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               %{status: :missing, checks: %{action_policy: "missing"}},
+               []
+             )
+
+    assert %{reason_code: "process_provider_gate_selection_missing"} =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               %{status: :missing, checks: %{action_policy: :ok}},
+               []
+             )
+
+    assert %{reason_code: "process_provider_gate_selection_missing"} =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               %{status: :missing, checks: %{action_policy: "ok"}},
+               []
+             )
+
+    assert %{reason_code: "process_provider_gate_selection_missing"} =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               %{status: :missing, checks: %{action_policy: %{foo: "bar"}}},
+               []
+             )
+
+    assert %{reason_code: "process_provider_invalid_artifact_field_some_field"} =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               {:invalid_artifact_field, :some_field},
+               []
+             )
+
+    assert %{reason_code: "process_provider_invalid_artifact_field_unknown"} =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               {:invalid_artifact_field, ""},
+               []
+             )
+
+    assert %{reason_code: "process_provider_invalid_artifact_field_123"} =
+             ProcessProvider.failure_payload(
+               "legacy",
+               :gate_selection,
+               {:invalid_artifact_field, 123},
+               []
+             )
+
+    assert %{reason: "plain text"} =
+             ProcessProvider.failure_payload("legacy", :gate_selection, "plain text")
   end
 
   test "beislid provider prefers source_contract process provider artifact path" do
