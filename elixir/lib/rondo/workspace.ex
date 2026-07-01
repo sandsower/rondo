@@ -120,6 +120,21 @@ defmodule Rondo.Workspace do
     end
   end
 
+  @spec verify_clean(Path.t(), keyword()) :: {:ok, :clean | :dirty} | {:error, term()}
+  def verify_clean(workspace, opts \\ []) when is_binary(workspace) do
+    case RemoteShell.run_in_workspace("git status --porcelain --untracked-files=all", workspace, opts) do
+      {output, 0} ->
+        if String.trim(output) == "" do
+          {:ok, :clean}
+        else
+          {:ok, :dirty}
+        end
+
+      {output, status} ->
+        {:error, {:workspace_clean_check_failed, status, output}}
+    end
+  end
+
   defp remove_existing_workspace(workspace, opts) do
     case validate_workspace_path(workspace, opts) do
       :ok -> remove_validated_workspace(workspace, opts)
