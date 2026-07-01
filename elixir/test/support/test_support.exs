@@ -143,6 +143,7 @@ defmodule Rondo.TestSupport do
           release_loop_rework_state: nil,
           release_loop_merge_state: nil,
           release_loop_done_state: nil,
+          release_loop_review_policy: nil,
           release_loop_merge_mode: nil,
           release_loop_merge_method: nil,
           release_loop_merge_delete_branch: nil,
@@ -222,6 +223,7 @@ defmodule Rondo.TestSupport do
     release_loop_rework_state = Keyword.get(config, :release_loop_rework_state)
     release_loop_merge_state = Keyword.get(config, :release_loop_merge_state)
     release_loop_done_state = Keyword.get(config, :release_loop_done_state)
+    release_loop_review_policy = Keyword.get(config, :release_loop_review_policy)
     release_loop_merge_mode = Keyword.get(config, :release_loop_merge_mode)
     release_loop_merge_method = Keyword.get(config, :release_loop_merge_method)
     release_loop_merge_delete_branch = Keyword.get(config, :release_loop_merge_delete_branch)
@@ -237,6 +239,7 @@ defmodule Rondo.TestSupport do
       rework_state: release_loop_rework_state,
       merge_state: release_loop_merge_state,
       done_state: release_loop_done_state,
+      review_policy: release_loop_review_policy,
       merge_mode: release_loop_merge_mode,
       merge_method: release_loop_merge_method,
       merge_delete_branch: release_loop_merge_delete_branch
@@ -480,6 +483,7 @@ defmodule Rondo.TestSupport do
         release_loop_line("rework_state", Map.get(config, :rework_state)),
         release_loop_line("merge_state", Map.get(config, :merge_state)),
         release_loop_line("done_state", Map.get(config, :done_state)),
+        release_loop_review_policy_yaml(Map.get(config, :review_policy)),
         release_loop_closeout_yaml(
           Map.get(config, :merge_mode),
           Map.get(config, :merge_method),
@@ -493,6 +497,17 @@ defmodule Rondo.TestSupport do
 
   defp release_loop_line(_key, nil), do: nil
   defp release_loop_line(key, value), do: "  #{key}: #{yaml_value(value)}"
+
+  defp release_loop_review_policy_yaml(nil), do: nil
+
+  defp release_loop_review_policy_yaml(policy) when is_map(policy) do
+    lines =
+      policy
+      |> Enum.map(fn {key, value} -> "    #{key}: #{yaml_value(value)}" end)
+      |> Enum.sort()
+
+    if lines == [], do: nil, else: Enum.join(["  review_policy:" | lines], "\n")
+  end
 
   defp release_loop_closeout_yaml(nil, nil, nil), do: nil
 

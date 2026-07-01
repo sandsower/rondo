@@ -17,8 +17,8 @@ defmodule Rondo.ReleaseLoop do
   @dialyzer {:nowarn_function, execute_closeout: 3}
   @dialyzer {:nowarn_function, post_reply_via_command: 6}
   @dialyzer {:nowarn_function, parse_git_stat_int: 1}
-  @dialyzer {:nowarn_function, classify_pr_risk: 2}
-  @dialyzer {:nowarn_function, docs_or_test_only_paths?: 1}
+  @dialyzer {:nowarn_function, classify_pr_risk: 3}
+  @dialyzer {:nowarn_function, docs_or_test_only_paths?: 2}
 
   @type loop_result ::
           {:ok, map(), RunLedger.t() | nil}
@@ -565,7 +565,8 @@ defmodule Rondo.ReleaseLoop do
 
       true ->
         with {:ok, surface} <- collect_pr_surface_area(workspace, ledger, opts) do
-          risk_level = classify_pr_risk(surface.changed_paths, surface.numstat)
+          review_policy = Map.get(config, :review_policy, Config.release_loop_review_policy())
+          risk_level = classify_pr_risk(surface.changed_paths, surface.numstat, review_policy)
           allowed = risk_level_allowed?(risk_level, threshold)
 
           assessment = %{
@@ -573,7 +574,7 @@ defmodule Rondo.ReleaseLoop do
             threshold: threshold,
             allowed: allowed,
             source: surface.source,
-            evidence: surface
+            evidence: Map.put(surface, :review_policy, review_policy)
           }
 
           ledger = record_risk_gate(ledger, issue, pr, assessment, if(allowed, do: :allowed, else: :blocked))
@@ -783,9 +784,10 @@ defmodule Rondo.ReleaseLoop do
 
   defp parse_git_stat_int(_), do: 0
 
-  defp classify_pr_risk(changed_paths, numstat) do
+  defp classify_pr_risk(changed_paths, numstat, review_policy) do
     changed_paths = changed_paths || []
     numstat = numstat || []
+    review_policy = review_policy || %{}
     total_changes = Enum.reduce(numstat, 0, &(&1.additions + &1.deletions + &2))
     file_count = length(changed_paths)
 
@@ -793,16 +795,16 @@ defmodule Rondo.ReleaseLoop do
       changed_paths == [] ->
         "low"
 
-      Enum.any?(changed_paths, &high_risk_path?/1) ->
+      Enum.any?(changed_paths, &high_risk_path?(&1, review_policy)) ->
         "high"
 
-      file_count >= 12 or total_changes >= 500 ->
+      file_count >= Map.get(review_policy, :high_risk_file_count, 12) or total_changes >= Map.get(review_policy, :high_risk_total_changes, 500) ->
         "high"
 
-      docs_or_test_only_paths?(changed_paths) ->
+      docs_or_test_only_paths?(changed_paths, review_policy) ->
         "low"
 
-      file_count <= 3 and total_changes <= 120 ->
+      file_count <= Map.get(review_policy, :low_risk_file_count, 3) and total_changes <= Map.get(review_policy, :low_risk_total_changes, 120) ->
         "low"
 
       true ->
@@ -810,35 +812,58 @@ defmodule Rondo.ReleaseLoop do
     end
   end
 
-  defp docs_or_test_only_paths?(paths) when is_list(paths), do: Enum.all?(paths, &low_risk_path?/1)
-  defp docs_or_test_only_paths?(_paths), do: false
+  defp docs_or_test_only_paths?(paths, review_policy) when is_list(paths), do: Enum.all?(paths, &low_risk_path?(&1, review_policy))
+  defp docs_or_test_only_paths?(_paths, _review_policy), do: false
 
-  defp low_risk_path?(path) when is_binary(path) do
-    base = Path.basename(path)
-
-    String.starts_with?(path, ["docs/", "test/", "elixir/test/", "elixir/test/support/"]) or
-      String.ends_with?(path, [".md", ".markdown", ".mdx", ".rst"]) or
-      base in ["README", "README.md", "README.markdown", "README.mdx", "CHANGELOG.md"]
+  defp low_risk_path?(path, review_policy) when is_binary(path) do
+    review_policy
+    |> Map.get(:low_risk_paths, [])
+    |> Enum.any?(&path_pattern_match?(path, &1))
   end
 
-  defp low_risk_path?(_path), do: false
+  defp low_risk_path?(_path, _review_policy), do: false
 
-  defp high_risk_path?(path) when is_binary(path) do
-    String.contains?(path, [
-      "/config/",
-      "elixir/config/",
-      "/priv/repo/migrations/",
-      "elixir/priv/repo/migrations/",
-      "_web/",
-      "security/",
-      "auth/",
-      "crypto/",
-      "billing/",
-      "payment/"
-    ]) or String.ends_with?(path, "mix.lock")
+  defp high_risk_path?(path, review_policy) when is_binary(path) do
+    review_policy
+    |> Map.get(:high_risk_paths, [])
+    |> Enum.any?(&path_pattern_match?(path, &1))
   end
 
-  defp high_risk_path?(_path), do: false
+  defp high_risk_path?(_path, _review_policy), do: false
+
+  defp path_pattern_match?(path, pattern) when is_binary(path) and is_binary(pattern) do
+    pattern = String.trim(pattern)
+
+    cond do
+      pattern == "" ->
+        false
+
+      String.contains?(pattern, "*") ->
+        pattern
+        |> glob_pattern_regex()
+        |> Regex.match?(path)
+
+      true ->
+        path == pattern or String.starts_with?(path, pattern) or String.contains?(path, pattern)
+    end
+  end
+
+  defp path_pattern_match?(_path, _pattern), do: false
+
+  defp glob_pattern_regex(pattern) do
+    regex_body =
+      pattern
+      |> String.graphemes()
+      |> glob_pattern_regex_body("")
+
+    Regex.compile!("^" <> regex_body <> "$")
+  end
+
+  defp glob_pattern_regex_body(["*", "*", "/" | rest], acc), do: glob_pattern_regex_body(rest, acc <> "(?:.*/)?")
+  defp glob_pattern_regex_body(["*", "*" | rest], acc), do: glob_pattern_regex_body(rest, acc <> ".*")
+  defp glob_pattern_regex_body(["*" | rest], acc), do: glob_pattern_regex_body(rest, acc <> "[^/]*")
+  defp glob_pattern_regex_body([char | rest], acc), do: glob_pattern_regex_body(rest, acc <> Regex.escape(char))
+  defp glob_pattern_regex_body([], acc), do: acc
 
   defp risk_level_allowed?(risk_level, threshold) do
     risk_level_rank(risk_level) <= risk_level_rank(threshold)

@@ -41,6 +41,44 @@ reply_command: 'gh api repos/{owner}/{repo}/pulls/{number}/comments --method POS
 rerequest_command: 'gh api repos/{owner}/{repo}/pulls/{number}/requested_reviewers --method POST --input {json_file}'
 ```
 
+CodeRabbit is a scarce final-review resource. Do not trigger it for WIP or routine iteration; run local gates and Beislið review first, then opt in by adding the `coderabbit-ready` label or `coderabbit:review` PR body keyword.
+
+```beislid:review_policy
+coderabbit:
+  mode: opt_in_final_review
+  label: coderabbit-ready
+  description_keyword: coderabbit:review
+risk:
+  max_auto_closeout_risk: low
+  high_risk_paths:
+    - '**/config/**'
+    - 'elixir/config/**'
+    - '**/priv/repo/migrations/**'
+    - 'elixir/priv/repo/migrations/**'
+    - '**/*_web/**'
+    - '**/security/**'
+    - '**/auth/**'
+    - '**/crypto/**'
+    - '**/billing/**'
+    - '**/payment/**'
+    - 'mix.lock'
+  low_risk_paths:
+    - 'docs/**'
+    - 'test/**'
+    - 'elixir/test/**'
+    - 'elixir/test/support/**'
+    - '**/*.md'
+    - '**/*.markdown'
+    - '**/*.mdx'
+    - '**/*.rst'
+    - 'README*'
+    - 'CHANGELOG.md'
+  high_risk_file_count: 12
+  high_risk_total_changes: 500
+  low_risk_file_count: 3
+  low_risk_total_changes: 120
+```
+
 ## Quality gates
 
 Cheap gates first for iteration; `elixir-ci` is the pre-PR aggregate matching CI. `dialyzer` runs standalone so static analysis isn't masked when `make all` aborts at the coverage gate on the RON-31 flake.
