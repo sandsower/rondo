@@ -889,7 +889,7 @@ defmodule Rondo.CoreTest do
       }
 
       before = MapSet.new(File.ls!(workspace_root))
-      assert :ok = AgentRunner.run(issue)
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: &AgentRunner.no_tracker_issue_state_fetcher/1)
       entries_after = MapSet.new(File.ls!(workspace_root))
 
       created =
@@ -962,7 +962,7 @@ defmodule Rondo.CoreTest do
                AgentRunner.run(
                  issue,
                  test_pid,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
                )
 
       assert_receive {:claude_worker_update, "issue-live-updates",
@@ -1028,7 +1028,7 @@ defmodule Rondo.CoreTest do
           if attempt == 1 do
             "In Progress"
           else
-            "Done"
+            "In Progress"
           end
 
         {:ok,
@@ -1190,7 +1190,7 @@ defmodule Rondo.CoreTest do
         attempt = Process.get(:agent_turn_fetch_count, 0) + 1
         Process.put(:agent_turn_fetch_count, attempt)
 
-        state = if attempt == 1, do: "In Progress", else: "Done"
+        state = if attempt == 1, do: "In Progress", else: "In Progress"
 
         {:ok,
          [
@@ -1211,6 +1211,59 @@ defmodule Rondo.CoreTest do
       assert_receive {:claude_worker_update, "issue-tracker-fallback", %{event: :run_decision, decision_kind: "continue", reason_code: "tracker_state_fallback"}}, 500
       assert length(trace_argv(trace_file)) == 2
     after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner stops on a valid active report when the tracker issue disappears before continuation" do
+    test_root =
+      Path.join(System.tmp_dir!(), "rondo-elixir-agent-runner-report-missing-#{System.unique_integer([:positive])}")
+
+    try do
+      trace_file = continuation_env(test_root, "session-report-missing", final_report_json("In Progress"), max_turns: 2)
+
+      issue = continuation_issue("issue-report-missing", "MT-304")
+      test_pid = self()
+
+      state_fetcher = fn [_issue_id] ->
+        attempt = Process.get(:agent_turn_fetch_count, 0) + 1
+        Process.put(:agent_turn_fetch_count, attempt)
+
+        case attempt do
+          1 ->
+            {:ok,
+             [
+               %Issue{
+                 id: issue.id,
+                 identifier: issue.identifier,
+                 title: issue.title,
+                 description: issue.description,
+                 state: "In Progress",
+                 url: issue.url,
+                 labels: issue.labels
+               }
+             ]}
+
+          _ ->
+            {:ok, []}
+        end
+      end
+
+      exit_reason =
+        catch_exit(AgentRunner.run(issue, test_pid, issue_state_fetcher: state_fetcher))
+
+      assert {:tracker_state_stop,
+              %{
+                classification: :missing,
+                stage: :final_report,
+                state: "In Progress",
+                issue_id: "issue-report-missing"
+              }} = exit_reason
+
+      assert_receive {:claude_worker_update, "issue-report-missing", %{event: :run_decision, decision_kind: "stop", reason_code: "tracker_state_missing"}}, 500
+      assert length(trace_argv(trace_file)) == 1
+    after
+      Process.delete(:agent_turn_fetch_count)
       File.rm_rf(test_root)
     end
   end

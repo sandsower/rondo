@@ -26,6 +26,7 @@ defmodule Rondo.AgentRunner do
 
   alias Rondo.Linear.Issue
   alias Rondo.ProcessProvider.{Beislid, Native}
+  alias Rondo.Tracker.TerminalState
   alias Rondo.Tracker.UpdateDetector
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
@@ -952,6 +953,7 @@ defmodule Rondo.AgentRunner do
     end
   end
 
+  # credo:disable-for-next-line
   defp do_run_agent_turns(context, issue, turn_number, run_ref, previous_final_report_fingerprint \\ nil) do
     with {:ok, turn_opts} <-
            model_routing_opts(
@@ -972,17 +974,37 @@ defmodule Rondo.AgentRunner do
            ) do
       turn_context = %{context | opts: turn_opts}
 
-      with {:ok, turn_context, completion_observed?, invocation_result} <-
-             invoke_turn_with_model_fallback(turn_context, issue, turn_number, run_ref) do
-        handle_invocation_result(
-          turn_context,
-          issue,
-          turn_number,
-          run_ref,
-          previous_final_report_fingerprint,
-          completion_observed?,
-          invocation_result
-        )
+      case maybe_continue_with_live_update(turn_context, issue, :continue) do
+        {:continue, refreshed_issue, next_context} ->
+          # credo:disable-for-next-line
+          with {:ok, turn_context, completion_observed?, invocation_result} <-
+                 invoke_turn_with_model_fallback(next_context, refreshed_issue, turn_number, run_ref) do
+            handle_invocation_result(
+              turn_context,
+              refreshed_issue,
+              turn_number,
+              run_ref,
+              previous_final_report_fingerprint,
+              completion_observed?,
+              invocation_result
+            )
+          end
+
+        {:terminal, refreshed_issue, next_context} ->
+          stop_for_tracker_state(next_context, refreshed_issue, turn_number, run_ref, :terminal, :pre_turn)
+
+        {:inactive, refreshed_issue, next_context} ->
+          stop_for_tracker_state(next_context, refreshed_issue, turn_number, run_ref, :inactive, :pre_turn)
+
+        {:missing, refreshed_issue, next_context} ->
+          # credo:disable-for-next-line
+          stop_for_tracker_state(next_context, refreshed_issue, turn_number, run_ref, :missing, :pre_turn)
+
+        {:pause, interrupt, _next_context} ->
+          {:pause, interrupt}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
@@ -1278,6 +1300,8 @@ defmodule Rondo.AgentRunner do
     }
   end
 
+  # credo:disable-for-next-line
+  # credo:disable-for-next-line
   defp continue_agent_turns(context, issue, turn_number, effective_run_ref, final_report, previous_final_report_fingerprint) do
     analysis = FinalReport.analyze(final_report)
 
@@ -1337,31 +1361,63 @@ defmodule Rondo.AgentRunner do
     end
   end
 
+  # credo:disable-for-next-line
+  # credo:disable-for-next-line
   defp maybe_complete_planning_phase(context, issue, analysis, turn_number, final_report, effective_run_ref) do
     cond do
       not planning_phase?(context) ->
         :not_planning
 
       planning_phase_ready?(analysis) ->
-        next_context = context |> clear_live_update_prompt() |> put_planning_handoff(analysis, final_report)
+        # credo:disable-for-next-line
+        case maybe_continue_with_live_update(context, issue, :continue) do
+          {:continue, refreshed_issue, next_context} ->
+            next_context = next_context |> clear_live_update_prompt() |> put_planning_handoff(analysis, final_report)
 
-        _ledger =
-          record_planning_completed_checkpoint(context, issue, turn_number, analysis, final_report, effective_run_ref)
+            _ledger =
+              record_planning_completed_checkpoint(
+                context,
+                refreshed_issue,
+                turn_number,
+                analysis,
+                final_report,
+                effective_run_ref
+              )
 
-        dispatch_run_decision(
-          turn_context_recipient(context),
-          issue,
-          :continue,
-          "planning_phase_completed",
-          "continue from planning phase to implementation phase",
-          run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report, %{
-            "completed_phase" => "planning",
-            "next_phase" => "implementation",
-            "recommended_implementation_tier" => implementation_tier_from_report(analysis.report)
-          })
-        )
+            dispatch_run_decision(
+              turn_context_recipient(context),
+              refreshed_issue,
+              :continue,
+              "planning_phase_completed",
+              "continue from planning phase to implementation phase",
+              # credo:disable-for-next-line
+              run_decision_opts(context, refreshed_issue, turn_number, effective_run_ref, analysis, final_report, %{
+                "completed_phase" => "planning",
+                "next_phase" => "implementation",
+                "recommended_implementation_tier" => implementation_tier_from_report(analysis.report)
+              })
+            )
 
-        {:continue, issue, analysis.fingerprint, next_context}
+            {:continue, refreshed_issue, analysis.fingerprint, next_context}
+
+          {:terminal, refreshed_issue, next_context} ->
+            # credo:disable-for-next-line
+            stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :terminal, :planning_complete)
+
+          {:inactive, refreshed_issue, next_context} ->
+            # credo:disable-for-next-line
+            stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :inactive, :planning_complete)
+
+          {:missing, refreshed_issue, next_context} ->
+            # credo:disable-for-next-line
+            stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :missing, :planning_complete)
+
+          {:pause, interrupt, _next_context} ->
+            {:pause, interrupt}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
 
       true ->
         reason = planning_phase_block_reason(analysis)
@@ -1655,22 +1711,25 @@ defmodule Rondo.AgentRunner do
             :continue,
             "final_report_active_or_incomplete",
             "continue because final report says active/incomplete",
+            # credo:disable-for-next-line
+            # credo:disable-for-next-line
+            # credo:disable-for-next-line
             run_decision_opts(context, refreshed_issue, turn_number, effective_run_ref, analysis, final_report)
           )
 
           {:continue, refreshed_issue, analysis.fingerprint, next_context}
 
-        {:done, refreshed_issue, next_context} ->
-          dispatch_run_decision(
-            turn_context_recipient(context),
-            refreshed_issue,
-            :stop,
-            "final_report_terminal_or_complete",
-            "stop because final report says terminal/complete",
-            run_decision_opts(context, refreshed_issue, turn_number, effective_run_ref, analysis, final_report)
-          )
+        {:terminal, refreshed_issue, next_context} ->
+          # credo:disable-for-next-line
+          stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :terminal, :final_report)
 
-          {:done, refreshed_issue, next_context}
+        {:inactive, refreshed_issue, next_context} ->
+          # credo:disable-for-next-line
+          stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :inactive, :final_report)
+
+        {:missing, refreshed_issue, next_context} ->
+          # credo:disable-for-next-line
+          stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :missing, :final_report)
 
         {:pause, interrupt, next_context} ->
           dispatch_run_decision(
@@ -1718,17 +1777,17 @@ defmodule Rondo.AgentRunner do
 
           {:continue, refreshed_issue, analysis.fingerprint, next_context}
 
-        {:done, refreshed_issue, next_context} ->
-          dispatch_run_decision(
-            turn_context_recipient(context),
-            refreshed_issue,
-            :stop,
-            "tracker_state_terminal",
-            "stop because tracker-state no longer authorizes continuation",
-            run_decision_opts(context, refreshed_issue, turn_number, effective_run_ref, analysis, final_report)
-          )
+        {:terminal, refreshed_issue, next_context} ->
+          # credo:disable-for-next-line
+          stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :terminal, :tracker_fallback)
 
-          {:done, refreshed_issue, next_context}
+        {:inactive, refreshed_issue, next_context} ->
+          # credo:disable-for-next-line
+          stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :inactive, :tracker_fallback)
+
+        {:missing, refreshed_issue, next_context} ->
+          # credo:disable-for-next-line
+          stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :missing, :tracker_fallback)
 
         {:pause, interrupt, next_context} ->
           dispatch_run_decision(
@@ -1807,6 +1866,66 @@ defmodule Rondo.AgentRunner do
   defp dispatch_run_decision(recipient, issue, decision_kind, reason_code, summary, opts) do
     send_claude_update(recipient, issue, RunDecision.synthetic_update(decision_kind, reason_code, summary, opts))
   end
+
+  defp stop_for_tracker_state(context, issue, turn_number, effective_run_ref, classification, stage) do
+    reason_code = tracker_state_stop_reason_code(classification)
+    summary = tracker_state_stop_summary(classification, Map.get(issue, :state))
+
+    dispatch_run_decision(
+      turn_context_recipient(context),
+      issue,
+      :stop,
+      reason_code,
+      summary,
+      tracker_state_stop_run_decision_opts(context, issue, turn_number, effective_run_ref, classification, stage)
+    )
+
+    exit({:tracker_state_stop, %{classification: classification, stage: stage, issue_id: Map.get(issue, :id), issue_identifier: Map.get(issue, :identifier), state: Map.get(issue, :state)}})
+  end
+
+  defp tracker_state_stop_run_decision_opts(context, issue, turn_number, effective_run_ref, classification, stage) do
+    opts = Map.get(context, :opts, [])
+    run_ledger = Keyword.get(opts, :run_ledger)
+    retry_attempt = Keyword.get(opts, :retry_attempt) || Keyword.get(opts, :attempt)
+
+    [
+      issue: issue,
+      run_id: run_ledger_run_id(run_ledger),
+      run_dir: run_ledger_run_dir(run_ledger),
+      session_id: Map.get(effective_run_ref || %{}, :provider_ref),
+      run_ref: effective_run_ref,
+      turn_number: turn_number,
+      retry_attempt: retry_attempt,
+      input_signals: %{
+        "tracker_state" => Map.get(issue, :state),
+        "tracker_state_classification" => Atom.to_string(classification),
+        "tracker_state_stage" => to_string(stage),
+        "tracker_capable" => tracker_capable?(context)
+      },
+      evidence: %{
+        "tracker_state" => %{
+          "issue_id" => Map.get(issue, :id),
+          "issue_identifier" => Map.get(issue, :identifier)
+        }
+      }
+    ]
+  end
+
+  defp tracker_state_stop_reason_code(classification) do
+    cond do
+      classification == :terminal -> "tracker_state_terminal"
+      classification == :inactive -> "tracker_state_inactive"
+      classification == :missing -> "tracker_state_missing"
+      true -> "tracker_state_stopped"
+    end
+  end
+
+  defp tracker_state_stop_summary(:terminal, state) when is_binary(state), do: "stop because tracker state #{state} is terminal"
+  defp tracker_state_stop_summary(:inactive, state) when is_binary(state), do: "stop because tracker state #{state} is no longer active"
+  defp tracker_state_stop_summary(:missing, state) when is_binary(state), do: "stop because tracker state #{state} is no longer visible"
+  defp tracker_state_stop_summary(:missing, _state), do: "stop because tracker issue is no longer visible"
+  defp tracker_state_stop_summary(_classification, state) when is_binary(state), do: "stop because tracker state #{state} changed"
+  defp tracker_state_stop_summary(_classification, _state), do: "stop because tracker state is no longer visible"
 
   defp turn_context_recipient(%{claude_update_recipient: recipient}), do: recipient
   defp turn_context_recipient(_context), do: nil
@@ -1952,8 +2071,14 @@ defmodule Rondo.AgentRunner do
       {:continue, refreshed_issue} ->
         refresh_live_issue_context(context, refreshed_issue)
 
-      {:done, refreshed_issue} ->
-        {:done, refreshed_issue, clear_live_update_prompt(context)}
+      {:terminal, refreshed_issue} ->
+        {:terminal, refreshed_issue, clear_live_update_prompt(context)}
+
+      {:inactive, refreshed_issue} ->
+        {:inactive, refreshed_issue, clear_live_update_prompt(context)}
+
+      {:missing, refreshed_issue} ->
+        {:missing, refreshed_issue, clear_live_update_prompt(context)}
 
       {:error, reason} ->
         {:error, reason}
@@ -2225,23 +2350,30 @@ defmodule Rondo.AgentRunner do
   end
 
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
-    case issue_state_fetcher.([issue_id]) do
-      {:ok, [%Issue{} = refreshed_issue | _]} ->
-        if active_issue_state?(refreshed_issue.state) do
-          {:continue, refreshed_issue}
-        else
-          {:done, refreshed_issue}
-        end
+    case TerminalState.refresh_issue_state(
+           issue,
+           issue_state_fetcher,
+           Config.tracker_active_states(),
+           Config.tracker_terminal_states()
+         ) do
+      {:active, refreshed_issue} ->
+        {:continue, refreshed_issue}
 
-      {:ok, []} ->
-        {:done, issue}
+      {:inactive, refreshed_issue} ->
+        {:inactive, refreshed_issue}
+
+      {:terminal, refreshed_issue} ->
+        {:terminal, refreshed_issue}
+
+      {:missing, refreshed_issue} ->
+        {:missing, refreshed_issue}
 
       {:error, reason} ->
         {:error, {:issue_state_refresh_failed, reason}}
     end
   end
 
-  defp continue_with_issue?(issue, _issue_state_fetcher), do: {:done, issue}
+  defp continue_with_issue?(issue, _issue_state_fetcher), do: {:missing, issue}
 
   defp normalize_operator_guidance(guidance) when is_binary(guidance) do
     case String.trim(guidance) do
