@@ -60,6 +60,7 @@ defmodule Rondo.Orchestrator do
       claimed: MapSet.new(),
       retry_attempts: %{},
       paused_interrupts: %{},
+      dispatch_blockers: [],
       claude_totals: nil,
       claude_rate_limits: nil,
       archived_runs: []
@@ -88,6 +89,7 @@ defmodule Rondo.Orchestrator do
       claimed: MapSet.new(Map.keys(paused_interrupts)),
       retry_attempts: %{},
       paused_interrupts: paused_interrupts,
+      dispatch_blockers: [],
       claude_totals: @empty_claude_totals,
       claude_rate_limits: nil,
       archived_runs: load_archived_runs()
@@ -303,58 +305,53 @@ defmodule Rondo.Orchestrator do
       state
       |> reconcile_running_issues()
       |> reconcile_paused_interrupts()
+      |> Map.put(:dispatch_blockers, [])
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
          true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+      dispatch_candidate_issues(state)
     else
-      {:error, :missing_linear_api_token} ->
-        Logger.error("Linear API token missing in WORKFLOW.md")
-        state
-
-      {:error, :missing_linear_project_slug} ->
-        Logger.error("Linear project slug missing in WORKFLOW.md")
-        state
-
-      {:error, :missing_tracker_kind} ->
-        Logger.error("Tracker kind missing in WORKFLOW.md")
-
-        state
-
-      {:error, {:unsupported_tracker_kind, kind}} ->
-        Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
-
-        state
-
-      {:error, :missing_claude_command} ->
-        Logger.error("Claude command missing in WORKFLOW.md")
-        state
-
-      {:error, {:invalid_workflow_config, _path, _errors} = reason} ->
-        Logger.error(Config.format_validation_error(reason))
-        state
-
-      {:error, {:missing_workflow_file, path, reason}} ->
-        Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
-        state
-
-      {:error, :workflow_front_matter_not_a_map} ->
-        Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
-        state
-
-      {:error, {:workflow_parse_error, reason}} ->
-        Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
-        state
-
       {:error, reason} ->
-        Logger.error("Failed to fetch from tracker: #{inspect(reason)}")
-        state
+        handle_dispatch_config_error(state, reason)
 
       false ->
-        state
+        %{state | dispatch_blockers: [no_available_slots_dispatch_blocker(state)]}
     end
   end
+
+  defp dispatch_candidate_issues(%State{} = state) do
+    case Tracker.fetch_candidate_issues() do
+      {:ok, issues} ->
+        choose_issues(issues, state)
+
+      {:error, reason} ->
+        handle_dispatch_tracker_error(state, reason)
+    end
+  end
+
+  defp handle_dispatch_config_error(%State{} = state, reason) do
+    message = dispatch_error_message(reason, :config)
+    Logger.error("#{message} issue_id=n/a issue_identifier=n/a session_id=n/a")
+    %{state | dispatch_blockers: [dispatch_blocker(nil, "config_invalid", message)]}
+  end
+
+  defp handle_dispatch_tracker_error(%State{} = state, reason) do
+    message = dispatch_error_message(reason, :tracker)
+    Logger.error("#{message} issue_id=n/a issue_identifier=n/a session_id=n/a")
+    %{state | dispatch_blockers: [dispatch_blocker(nil, "tracker_fetch_failed", message)]}
+  end
+
+  defp dispatch_error_message(:missing_linear_api_token, _source), do: "Linear API token missing in WORKFLOW.md"
+  defp dispatch_error_message(:missing_linear_project_slug, _source), do: "Linear project slug missing in WORKFLOW.md"
+  defp dispatch_error_message(:missing_tracker_kind, _source), do: "Tracker kind missing in WORKFLOW.md"
+  defp dispatch_error_message({:unsupported_tracker_kind, kind}, _source), do: "Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}"
+  defp dispatch_error_message(:missing_claude_command, _source), do: "Claude command missing in WORKFLOW.md"
+  defp dispatch_error_message({:invalid_workflow_config, _path, _errors} = reason, _source), do: Config.format_validation_error(reason)
+  defp dispatch_error_message({:missing_workflow_file, path, reason}, _source), do: "Missing WORKFLOW.md at #{path}: #{inspect(reason)}"
+  defp dispatch_error_message(:workflow_front_matter_not_a_map, _source), do: "Failed to parse WORKFLOW.md: workflow front matter must decode to a map"
+  defp dispatch_error_message({:workflow_parse_error, reason}, _source), do: "Failed to parse WORKFLOW.md: #{inspect(reason)}"
+  defp dispatch_error_message(reason, :config), do: "Failed to validate WORKFLOW.md: #{inspect(reason)}"
+  defp dispatch_error_message(reason, :tracker), do: "Failed to fetch from tracker: #{inspect(reason)}"
 
   defp reconcile_running_issues(%State{} = state) do
     state = reconcile_stalled_running_issues(state)
@@ -779,15 +776,44 @@ defmodule Rondo.Orchestrator do
     terminal_states = terminal_state_set()
     candidate_states = candidate_state_set()
 
-    issues
-    |> sort_issues_for_dispatch()
-    |> Enum.reduce(state, fn issue, state_acc ->
-      if should_dispatch_issue?(issue, state_acc, candidate_states, terminal_states) do
-        dispatch_issue(state_acc, issue)
-      else
-        state_acc
-      end
-    end)
+    {state, dispatch_blockers} =
+      issues
+      |> sort_issues_for_dispatch()
+      |> Enum.reduce({state, []}, fn issue, {state_acc, blockers_acc} ->
+        case dispatch_blocker_for_issue(issue, state_acc, candidate_states, terminal_states) do
+          nil ->
+            {dispatch_issue(state_acc, issue), blockers_acc}
+
+          blocker ->
+            {state_acc, [blocker | blockers_acc]}
+        end
+      end)
+
+    %{state | dispatch_blockers: Enum.reverse(dispatch_blockers)}
+  end
+
+  defp dispatch_blocker(%Issue{} = issue, reason, detail) do
+    %{
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      state: issue.state,
+      blocks_dispatch: true,
+      blocked_at: DateTime.utc_now() |> DateTime.truncate(:second),
+      blocked_dispatch_reason: reason,
+      blocked_dispatch_detail: detail
+    }
+  end
+
+  defp dispatch_blocker(nil, reason, detail) do
+    %{
+      issue_id: nil,
+      issue_identifier: nil,
+      state: nil,
+      blocks_dispatch: true,
+      blocked_at: DateTime.utc_now() |> DateTime.truncate(:second),
+      blocked_dispatch_reason: reason,
+      blocked_dispatch_detail: detail
+    }
   end
 
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
@@ -812,18 +838,89 @@ defmodule Rondo.Orchestrator do
 
   defp should_dispatch_issue?(
          %Issue{} = issue,
+         %State{} = state,
+         active_states,
+         terminal_states
+       ) do
+    is_nil(dispatch_blocker_for_issue(issue, state, active_states, terminal_states))
+  end
+
+  defp dispatch_blocker_for_issue(
+         %Issue{} = issue,
          %State{running: running, claimed: claimed} = state,
          active_states,
          terminal_states
        ) do
-    candidate_issue?(issue, active_states, terminal_states) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
-      !MapSet.member?(claimed, issue.id) and
-      !Map.has_key?(running, issue.id) and
-      dispatch_slots_available?(issue, state)
+    cond do
+      !candidate_issue?(issue, active_states, terminal_states) ->
+        dispatch_blocker_for_non_candidate(issue, active_states, terminal_states) ||
+          dispatch_blocker(issue, "invalid_issue", "issue is missing required tracker fields")
+
+      todo_issue_blocked_by_non_terminal?(issue, terminal_states) ->
+        dispatch_blocker(issue, "blocked_by_non_terminal", "waiting on non-terminal blockers")
+
+      MapSet.member?(claimed, issue.id) ->
+        dispatch_blocker(issue, "claimed", "issue already claimed by a pending run")
+
+      Map.has_key?(running, issue.id) ->
+        dispatch_blocker(issue, "running", "issue already running")
+
+      true ->
+        dispatch_capacity_blocker(issue, state, running)
+    end
   end
 
-  defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
+  defp dispatch_blocker_for_issue(_issue, _state, _active_states, _terminal_states) do
+    dispatch_blocker(nil, "invalid_issue", "tracker returned malformed issue")
+  end
+
+  defp dispatch_capacity_blocker(%Issue{} = issue, %State{} = state, running) do
+    cond do
+      available_slots(state) == 0 ->
+        capacity_exhausted_dispatch_blocker(state, issue)
+
+      !state_slots_available?(issue, running) ->
+        dispatch_blocker(
+          issue,
+          "state_capacity_exhausted",
+          "state #{issue.state} at capacity #{running_issue_count_for_state(running, issue.state)}/#{Config.max_concurrent_agents_for_state(issue.state)}"
+        )
+
+      !worker_pool_slots_available?(running) ->
+        dispatch_blocker(issue, "worker_pool_exhausted", "no worker hosts available")
+
+      true ->
+        nil
+    end
+  end
+
+  defp dispatch_blocker_for_non_candidate(%Issue{} = issue, active_states, terminal_states) do
+    cond do
+      !issue_routable_to_worker?(issue) ->
+        dispatch_blocker(issue, "assignment_mismatch", "issue is not assigned to the configured worker")
+
+      terminal_issue_state?(issue.state, terminal_states) ->
+        dispatch_blocker(issue, "terminal_state", "issue is already in a terminal tracker state")
+
+      !active_issue_state?(issue.state, active_states) ->
+        dispatch_blocker(issue, "inactive_state", "issue is not in an active tracker state")
+
+      true ->
+        nil
+    end
+  end
+
+  defp capacity_exhausted_dispatch_blocker(%State{} = state, issue \\ nil) do
+    dispatch_blocker(issue, "capacity_exhausted", global_capacity_detail(state))
+  end
+
+  defp global_capacity_detail(%State{} = state) do
+    "global capacity #{map_size(state.running)}/#{state.max_concurrent_agents || Config.max_concurrent_agents()}"
+  end
+
+  defp no_available_slots_dispatch_blocker(%State{} = state) do
+    capacity_exhausted_dispatch_blocker(state)
+  end
 
   defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
@@ -2765,6 +2862,10 @@ defmodule Rondo.Orchestrator do
         }
       end)
 
+    dispatch_blockers =
+      Map.get(state, :dispatch_blockers, [])
+      |> Enum.map(&normalize_dispatch_blocker_snapshot/1)
+
     paused_issues_by_id =
       case Tracker.fetch_issue_states_by_ids(Map.keys(state.paused_interrupts)) do
         {:ok, issues} -> Map.new(issues, &{&1.id, &1})
@@ -2815,6 +2916,7 @@ defmodule Rondo.Orchestrator do
        running: running,
        retrying: retrying,
        paused: paused,
+       dispatch_blockers: dispatch_blockers,
        archived:
          Map.get(state, :archived_runs, [])
          |> Enum.map(&normalize_archived_run_snapshot/1),
@@ -3686,6 +3788,15 @@ defmodule Rondo.Orchestrator do
   end
 
   defp normalize_archived_run_snapshot(entry), do: entry
+
+  defp normalize_dispatch_blocker_snapshot(entry) when is_map(entry) do
+    entry
+    |> Map.update(:blocked_at, nil, &parse_datetime/1)
+    |> Map.update(:blocked_dispatch_reason, nil, &to_string/1)
+    |> Map.update(:blocked_dispatch_detail, nil, &to_string/1)
+  end
+
+  defp normalize_dispatch_blocker_snapshot(entry), do: entry
 
   defp deserialize_token_map(tokens) when is_map(tokens), do: atomize_allowed_keys(tokens, @token_keys)
   defp deserialize_token_map(tokens), do: tokens

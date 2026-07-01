@@ -1611,7 +1611,10 @@ Minimum endpoints:
       "generated_at": "2026-02-24T20:15:30Z",
       "counts": {
         "running": 2,
-        "retrying": 1
+        "retrying": 1,
+        "paused": 0,
+        "needs_guidance": 0,
+        "dispatch_blockers": 3
       },
       "running": [
         {
@@ -1646,6 +1649,17 @@ Minimum endpoints:
         "total_tokens": 7400,
         "seconds_running": 1834.2
       },
+      "dispatch_blockers": [
+        {
+          "issue_id": "ghi789",
+          "issue_identifier": "MT-651",
+          "state": "Todo",
+          "blocks_dispatch": true,
+          "blocked_at": "2026-02-24T20:15:30Z",
+          "blocked_dispatch_reason": "claimed",
+          "blocked_dispatch_detail": "issue already claimed by a pending run"
+        }
+      ],
       "rate_limits": null
     }
     ```
