@@ -1369,88 +1369,7 @@ defmodule Rondo.AgentRunner do
         :not_planning
 
       planning_phase_ready?(analysis) ->
-        # credo:disable-for-next-line
-        case maybe_continue_with_live_update(context, issue, :continue) do
-          {:continue, refreshed_issue, next_context} ->
-            case Workspace.verify_clean(next_context.workspace, next_context.opts) do
-              {:ok, :clean} ->
-                next_context = next_context |> clear_live_update_prompt() |> put_planning_handoff(analysis, final_report)
-
-                _ledger =
-                  record_planning_completed_checkpoint(
-                    context,
-                    refreshed_issue,
-                    turn_number,
-                    analysis,
-                    final_report,
-                    effective_run_ref
-                  )
-
-                dispatch_run_decision(
-                  turn_context_recipient(context),
-                  refreshed_issue,
-                  :continue,
-                  "planning_phase_completed",
-                  "continue from planning phase to implementation phase",
-                  # credo:disable-for-next-line
-                  run_decision_opts(context, refreshed_issue, turn_number, effective_run_ref, analysis, final_report, %{
-                    "completed_phase" => "planning",
-                    "next_phase" => "implementation",
-                    "recommended_implementation_tier" => implementation_tier_from_report(analysis.report)
-                  })
-                )
-
-                {:continue, refreshed_issue, analysis.fingerprint, next_context}
-
-              {:ok, :dirty} ->
-                pause_planning_phase(
-                  next_context,
-                  %{
-                    issue: refreshed_issue,
-                    analysis: analysis,
-                    turn_number: turn_number,
-                    final_report: final_report,
-                    effective_run_ref: effective_run_ref,
-                    extra_input_signals: %{"workspace_status" => "dirty"}
-                  },
-                  "planning_workspace_dirty",
-                  "pause because the workspace must be clean before implementation can begin"
-                )
-
-              {:error, reason} ->
-                pause_planning_phase(
-                  next_context,
-                  %{
-                    issue: refreshed_issue,
-                    analysis: analysis,
-                    turn_number: turn_number,
-                    final_report: final_report,
-                    effective_run_ref: effective_run_ref,
-                    extra_input_signals: %{"workspace_check_error" => inspect(reason)}
-                  },
-                  "planning_workspace_check_failed",
-                  "pause because the workspace cleanliness check failed before implementation can begin"
-                )
-            end
-
-          {:terminal, refreshed_issue, next_context} ->
-            # credo:disable-for-next-line
-            stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :terminal, :planning_complete)
-
-          {:inactive, refreshed_issue, next_context} ->
-            # credo:disable-for-next-line
-            stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :inactive, :planning_complete)
-
-          {:missing, refreshed_issue, next_context} ->
-            # credo:disable-for-next-line
-            stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :missing, :planning_complete)
-
-          {:pause, interrupt, _next_context} ->
-            {:pause, interrupt}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
+        maybe_complete_ready_planning_phase(context, issue, analysis, turn_number, final_report, effective_run_ref)
 
       true ->
         reason = planning_phase_block_reason(analysis)
@@ -1468,6 +1387,141 @@ defmodule Rondo.AgentRunner do
           "pause because planning phase did not produce a safe implementation handoff"
         )
     end
+  end
+
+  # credo:disable-for-next-line
+  defp maybe_complete_ready_planning_phase(context, issue, analysis, turn_number, final_report, effective_run_ref) do
+    case maybe_continue_with_live_update(context, issue, :continue) do
+      {:continue, refreshed_issue, next_context} ->
+        maybe_continue_after_workspace_check(
+          next_context,
+          context,
+          refreshed_issue,
+          analysis,
+          turn_number,
+          final_report,
+          effective_run_ref
+        )
+
+      {:terminal, refreshed_issue, next_context} ->
+        # credo:disable-for-next-line
+        stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :terminal, :planning_complete)
+
+      {:inactive, refreshed_issue, next_context} ->
+        # credo:disable-for-next-line
+        stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :inactive, :planning_complete)
+
+      {:missing, refreshed_issue, next_context} ->
+        # credo:disable-for-next-line
+        stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :missing, :planning_complete)
+
+      {:pause, interrupt, _next_context} ->
+        {:pause, interrupt}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp maybe_continue_after_workspace_check(
+         next_context,
+         context,
+         issue,
+         analysis,
+         turn_number,
+         final_report,
+         effective_run_ref
+       ) do
+    case Workspace.verify_clean(next_context.workspace, next_context.opts) do
+      {:ok, :clean} ->
+        continue_after_planning_ready(
+          next_context,
+          context,
+          issue,
+          analysis,
+          turn_number,
+          final_report,
+          effective_run_ref
+        )
+
+      {:ok, :dirty} ->
+        pause_after_planning_workspace_check(
+          next_context,
+          issue,
+          analysis,
+          turn_number,
+          final_report,
+          effective_run_ref,
+          %{"workspace_status" => "dirty"}
+        )
+
+      {:error, reason} ->
+        pause_after_planning_workspace_check(
+          next_context,
+          issue,
+          analysis,
+          turn_number,
+          final_report,
+          effective_run_ref,
+          %{"workspace_check_error" => inspect(reason)}
+        )
+    end
+  end
+
+  defp continue_after_planning_ready(
+         next_context,
+         context,
+         issue,
+         analysis,
+         turn_number,
+         final_report,
+         effective_run_ref
+       ) do
+    next_context = next_context |> clear_live_update_prompt() |> put_planning_handoff(analysis, final_report)
+
+    _ledger =
+      record_planning_completed_checkpoint(context, issue, turn_number, analysis, final_report, effective_run_ref)
+
+    dispatch_run_decision(
+      turn_context_recipient(context),
+      issue,
+      :continue,
+      "planning_phase_completed",
+      "continue from planning phase to implementation phase",
+      run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report, %{
+        "completed_phase" => "planning",
+        "next_phase" => "implementation",
+        "recommended_implementation_tier" => implementation_tier_from_report(analysis.report)
+      })
+    )
+
+    {:continue, issue, analysis.fingerprint, next_context}
+  end
+
+  defp pause_after_planning_workspace_check(
+         next_context,
+         issue,
+         analysis,
+         turn_number,
+         final_report,
+         effective_run_ref,
+         extra_input_signals
+       ) do
+    reason = Map.get(extra_input_signals, "workspace_status") || "check_failed"
+
+    pause_planning_phase(
+      next_context,
+      %{
+        issue: issue,
+        analysis: analysis,
+        turn_number: turn_number,
+        final_report: final_report,
+        effective_run_ref: effective_run_ref,
+        extra_input_signals: extra_input_signals
+      },
+      "planning_workspace_#{reason}",
+      "pause because the workspace must be clean before implementation can begin"
+    )
   end
 
   defp pause_planning_phase(context, planning_args, reason, summary) do
