@@ -396,7 +396,8 @@ fields are ignored for forward compatibility, but consumed sections are validate
   and scheduling are halted until fixed. Invalid live reloads keep the last known good workflow and
   log the config path plus invalid field names.
 - `server.port` or CLI `--port` enables the optional HTTP dashboard and JSON API at `/`,
-  `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+  `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`. The dashboard and state
+  API surface dispatch blockers when the poller intentionally skips candidate issues.
 - Each dispatched attempt writes a local run ledger under
   `<workspace.root>/.rondo_runs/<issue_identifier>/<run_id>/`. Completed runs also emit
   `artifacts/delivery-artifact.json`, a redacted handoff summary that links patch/final-report,

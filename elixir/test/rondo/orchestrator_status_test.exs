@@ -1,3 +1,12 @@
+defmodule Rondo.OrchestratorStatusTest.TrackerFailureClient do
+  def fetch_candidate_issues, do: {:error, :tracker_failure}
+  def fetch_issues_by_states(_states), do: {:error, :tracker_failure}
+  def fetch_issue_states_by_ids(_issue_ids), do: {:error, :tracker_failure}
+  def fetch_issue_contexts_by_ids(_issue_ids), do: {:error, :tracker_failure}
+  def create_comment(_issue_id, _body), do: {:error, :tracker_failure}
+  def update_issue_state(_issue_id, _state_name), do: {:error, :tracker_failure}
+end
+
 defmodule Rondo.OrchestratorStatusTest do
   use Rondo.TestSupport
 
@@ -32,6 +41,84 @@ defmodule Rondo.OrchestratorStatusTest do
     assert %{running: []} = Orchestrator.snapshot(pid, 1_000)
     assert %{queued: true} = Orchestrator.request_refresh(pid)
     assert {:error, :guidance_interrupt_not_found} = Orchestrator.submit_guidance(pid, "missing", "approve_once")
+  end
+
+  test "dispatch exposes config validation failures as poll-level blockers" do
+    workspace_root = tmp_dir("orchestrator-config-blocker")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "mystery",
+      workspace_root: workspace_root,
+      claude_command: fake_claude_script(workspace_root, "config-blocker-session", 0)
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :ConfigBlockerOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    initial_state = :sys.get_state(pid)
+    state_with_dispatch = %{initial_state | poll_interval_ms: 60_000}
+    :sys.replace_state(pid, fn _ -> state_with_dispatch end)
+
+    send(pid, {:tick, state_with_dispatch.tick_token})
+
+    snapshot =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).dispatch_blockers do
+          [blocker | _] -> blocker
+          _ -> nil
+        end
+      end)
+
+    assert snapshot.blocked_dispatch_reason == "config_invalid"
+    assert snapshot.blocked_dispatch_detail =~ "tracker.kind"
+  end
+
+  test "dispatch exposes tracker fetch failures as poll-level blockers" do
+    workspace_root = tmp_dir("orchestrator-tracker-blocker")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "linear",
+      workspace_root: workspace_root,
+      claude_command: fake_claude_script(workspace_root, "tracker-blocker-session", 0)
+    )
+
+    previous_linear_client_module = Application.get_env(:rondo, :linear_client_module)
+    Application.put_env(:rondo, :linear_client_module, Rondo.OrchestratorStatusTest.TrackerFailureClient)
+
+    orchestrator_name = Module.concat(__MODULE__, :TrackerBlockerOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      case previous_linear_client_module do
+        nil -> Application.delete_env(:rondo, :linear_client_module)
+        module -> Application.put_env(:rondo, :linear_client_module, module)
+      end
+
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    initial_state = :sys.get_state(pid)
+    state_with_dispatch = %{initial_state | poll_interval_ms: 60_000}
+    :sys.replace_state(pid, fn _ -> state_with_dispatch end)
+
+    send(pid, {:tick, state_with_dispatch.tick_token})
+
+    snapshot =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot).dispatch_blockers do
+          [blocker | _] -> blocker
+          _ -> nil
+        end
+      end)
+
+    assert snapshot.blocked_dispatch_reason == "tracker_fetch_failed"
+    assert snapshot.blocked_dispatch_detail =~ "tracker_failure"
   end
 
   test "guidance can address paused claims by issue identifier" do
@@ -3845,6 +3932,174 @@ defmodule Rondo.OrchestratorStatusTest do
     assert event.tokens.total_tokens == 150
   end
 
+  test "queue refills after an archived run completes" do
+    workspace_root = tmp_dir("orchestrator-queue-refill")
+
+    issue_a = %Issue{
+      id: "issue-queue-a",
+      identifier: "MT-QUEUE-A",
+      title: "Queue refill A",
+      description: "First archived run",
+      state: "Closed",
+      url: "https://example.org/issues/MT-QUEUE-A"
+    }
+
+    issue_b = %Issue{
+      id: "issue-queue-b",
+      identifier: "MT-QUEUE-B",
+      title: "Queue refill B",
+      description: "Second queued run",
+      state: "Todo",
+      url: "https://example.org/issues/MT-QUEUE-B"
+    }
+
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+    Application.put_env(:rondo, :memory_tracker_issues, [])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: fake_claude_script(workspace_root, "queue-refill-session", 1),
+      max_turns: 1,
+      max_concurrent_agents: 1,
+      poll_interval_ms: 60_000
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :QueueRefillOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+
+      if Process.alive?(pid) do
+        try do
+          GenServer.stop(pid, :normal)
+        catch
+          :exit, _ -> :ok
+        end
+      end
+    end)
+
+    process_ref = make_ref()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue_a.identifier,
+      issue: issue_a,
+      session_id: "sess-queue-a",
+      turn_count: 1,
+      last_claude_message: nil,
+      last_claude_timestamp: nil,
+      last_claude_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    state = :sys.get_state(pid)
+
+    state = %{
+      state
+      | max_concurrent_agents: 0,
+        poll_interval_ms: 60_000,
+        running: %{issue_a.id => running_entry},
+        claimed: MapSet.new([issue_a.id])
+    }
+
+    :sys.replace_state(pid, fn _ -> state end)
+    send(pid, {:DOWN, process_ref, :process, self(), :normal})
+
+    wait_until(fn ->
+      snapshot = GenServer.call(pid, :snapshot)
+
+      if Enum.any?(snapshot.archived, &(&1.identifier == "MT-QUEUE-A")) do
+        true
+      end
+    end)
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue_a, issue_b])
+    state = :sys.get_state(pid)
+    state = %{state | max_concurrent_agents: 1}
+    :sys.replace_state(pid, fn _ -> state end)
+    send(pid, :run_poll_cycle)
+
+    wait_until(fn ->
+      snapshot = GenServer.call(pid, :snapshot)
+
+      if Enum.any?(snapshot.running, &(&1.identifier == "MT-QUEUE-B")) do
+        true
+      end
+    end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert Enum.any?(snapshot.running, &(&1.identifier == "MT-QUEUE-B"))
+    assert Enum.any?(snapshot.archived, &(&1.identifier == "MT-QUEUE-A"))
+  end
+
+  test "dispatch blocks the second todo issue when global capacity is exhausted" do
+    workspace_root = tmp_dir("orchestrator-global-capacity")
+
+    issue_a = %Issue{
+      id: "issue-capacity-a",
+      identifier: "MT-CAP-A",
+      title: "Capacity A",
+      description: "First capacity run",
+      state: "Todo",
+      url: "https://example.org/issues/MT-CAP-A"
+    }
+
+    issue_b = %Issue{
+      id: "issue-capacity-b",
+      identifier: "MT-CAP-B",
+      title: "Capacity B",
+      description: "Second capacity run",
+      state: "Todo",
+      url: "https://example.org/issues/MT-CAP-B"
+    }
+
+    Application.put_env(:rondo, :memory_tracker_issues, [])
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: fake_claude_script(workspace_root, "capacity-session", 1),
+      max_turns: 1,
+      max_concurrent_agents: 1,
+      poll_interval_ms: 60_000
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :GlobalCapacityOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    initial_state = :sys.get_state(pid)
+    state_with_dispatch = %{initial_state | max_concurrent_agents: 1, poll_interval_ms: 60_000}
+    :sys.replace_state(pid, fn _ -> state_with_dispatch end)
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue_a, issue_b])
+    send(pid, {:tick, state_with_dispatch.tick_token})
+
+    snapshot =
+      wait_until(fn ->
+        case GenServer.call(pid, :snapshot) do
+          %{running: running, dispatch_blockers: dispatch_blockers}
+          when length(running) == 1 and length(dispatch_blockers) == 1 ->
+            %{running: running, dispatch_blockers: dispatch_blockers}
+
+          _ ->
+            nil
+        end
+      end)
+
+    assert Enum.any?(snapshot.running, &(&1.identifier == "MT-CAP-A"))
+    assert [%{issue_identifier: "MT-CAP-B", blocked_dispatch_reason: "capacity_exhausted"} = blocker] = snapshot.dispatch_blockers
+    assert blocker.blocked_dispatch_detail == "global capacity 1/1"
+  end
+
   test "snapshot normalizes archived run timestamps" do
     issue = %Issue{
       id: "issue-archive-normalize-timestamps",
@@ -3859,7 +4114,13 @@ defmodule Rondo.OrchestratorStatusTest do
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
-      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      if Process.alive?(pid) do
+        try do
+          GenServer.stop(pid, :normal)
+        catch
+          :exit, _ -> :ok
+        end
+      end
     end)
 
     initial_state = :sys.get_state(pid)
