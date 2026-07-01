@@ -425,17 +425,23 @@ defmodule Rondo.ExtensionsTest do
     assert Map.fetch!(headers, "content-type") =~ "text/html"
     assert body =~ "Rondo Observability"
     assert body =~ "Blocks dispatch: paused_claim"
-    assert body =~ "stale: policy_revalidation_failed"
 
     {status, headers, body} = http_request(port, "GET", "/api/v1/state")
     assert status == 200
     assert Map.fetch!(headers, "content-type") =~ "application/json"
 
+    state_payload = Jason.decode!(body)
+
     assert %{
              "counts" => %{"running" => 1, "retrying" => 1},
              "running" => [%{"issue_identifier" => "MT-HTTP", "last_message" => "rendered", "turn_count" => 7}],
              "retrying" => [%{"issue_identifier" => "MT-RETRY", "error" => "boom"}]
-           } = Jason.decode!(body)
+           } = state_payload
+
+    assert %{
+             "blocks_dispatch" => true,
+             "stale_reason" => "policy_revalidation_failed: :invalid_paused_side_effect"
+           } = Enum.find(state_payload["paused"], &(&1["issue_identifier"] == "MT-PAUSED"))
 
     :sys.replace_state(orchestrator_pid, fn state ->
       update_in(state.running["issue-http"].last_claude_message, fn _ -> %{message: "structured"} end)
@@ -805,9 +811,9 @@ defmodule Rondo.ExtensionsTest do
     |> IO.iodata_to_binary()
   end
 
-  defp recv_all(socket, acc) do
-    case :gen_tcp.recv(socket, 0, 10_000) do
-      {:ok, chunk} -> recv_all(socket, acc <> chunk)
+  defp recv_all(socket, acc, timeout \\ 30_000) do
+    case :gen_tcp.recv(socket, 0, timeout) do
+      {:ok, chunk} -> recv_all(socket, acc <> chunk, 100)
       {:error, :closed} -> acc
       {:error, :timeout} -> acc
     end

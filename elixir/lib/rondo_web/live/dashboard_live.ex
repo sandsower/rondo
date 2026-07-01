@@ -6,7 +6,17 @@ defmodule RondoWeb.DashboardLive do
   use Phoenix.LiveView, layout: {RondoWeb.Layouts, :app}
 
   alias Rondo.RunOutcome
-  alias RondoWeb.{ArchivedRuns, Endpoint, EventInspector, ObservabilityPubSub, Presenter}
+
+  alias RondoWeb.{
+    ArchivedRuns,
+    DashboardEventStream,
+    Endpoint,
+    EventInspector,
+    ObservabilityPubSub,
+    Presenter,
+    ResultSummary
+  }
+
   @runtime_tick_ms 1_000
 
   @impl true
@@ -28,6 +38,7 @@ defmodule RondoWeb.DashboardLive do
       |> assign(:selected_event_index, nil)
       |> assign(:selected_event_view, :summary)
       |> assign(:selected_event_detail, nil)
+      |> assign(:event_stream_view, DashboardEventStream.build(%{}, nil, nil, 0, %{}))
 
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
@@ -76,7 +87,7 @@ defmodule RondoWeb.DashboardLive do
           if entry, do: assign(socket, :selected_issue_data, entry), else: socket
       end
 
-    {:noreply, maybe_refresh_selected_event_detail(socket)}
+    {:noreply, socket |> rebuild_event_stream_view() |> maybe_refresh_selected_event_detail()}
   end
 
   @impl true
@@ -97,6 +108,7 @@ defmodule RondoWeb.DashboardLive do
       |> assign(:selected_event_index, nil)
       |> assign(:selected_event_view, :summary)
       |> assign(:selected_event_detail, nil)
+      |> rebuild_event_stream_view(DashboardEventStream.default_filters())
       |> assign(:event_query, "")
       |> assign(:event_category, :all)
 
@@ -169,6 +181,7 @@ defmodule RondoWeb.DashboardLive do
      socket
      |> assign(:payload, load_payload())
      |> assign(:now, DateTime.utc_now())
+     |> rebuild_event_stream_view()
      |> maybe_refresh_selected_event_detail()}
   end
 
@@ -190,6 +203,7 @@ defmodule RondoWeb.DashboardLive do
        |> assign(:selected_runs, group.runs)
        |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, latest_run))
        |> reset_event_filters()
+       |> rebuild_event_stream_view(DashboardEventStream.default_filters())
        |> push_run_charts(group.runs)}
     else
       {:noreply, socket}
@@ -216,6 +230,7 @@ defmodule RondoWeb.DashboardLive do
          |> assign(:selected_runs, runs)
          |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, selected_run))
          |> reset_event_filters()
+         |> rebuild_event_stream_view(DashboardEventStream.default_filters())
          |> push_run_charts(runs)}
 
       _ ->
@@ -266,10 +281,29 @@ defmodule RondoWeb.DashboardLive do
        |> assign(:selected_outcome, selected_outcome(run_with_log))
        |> assign(:selected_run_index, index)
        |> assign(:selected_run_projection, selected_run_projection_for(socket.assigns.payload, run))
-       |> reset_event_filters()}
+       |> reset_event_filters()
+       |> rebuild_event_stream_view(DashboardEventStream.default_filters())}
     else
       {:noreply, socket}
     end
+  end
+
+  @impl true
+  def handle_event("event_stream_filters", params, socket) do
+    filters = socket.assigns.event_stream_view.filters |> Map.merge(dashboard_query_params(params))
+    {:noreply, rebuild_event_stream_view(socket, filters)}
+  end
+
+  @impl true
+  def handle_event("event_stream_facet", %{"facet" => facet}, socket) do
+    filters = Map.put(socket.assigns.event_stream_view.filters, "facet", facet)
+    {:noreply, rebuild_event_stream_view(socket, filters)}
+  end
+
+  @impl true
+  def handle_event("event_stream_sort", %{"sort" => sort}, socket) do
+    filters = Map.put(socket.assigns.event_stream_view.filters, "sort", sort)
+    {:noreply, rebuild_event_stream_view(socket, filters)}
   end
 
   @impl true
@@ -286,6 +320,11 @@ defmodule RondoWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("reset_event_filters", _params, socket) do
+    {:noreply, rebuild_event_stream_view(socket, DashboardEventStream.default_filters())}
+  end
+
+  @impl true
   def handle_event("close_panel", _params, socket) do
     {:noreply,
      socket
@@ -295,7 +334,8 @@ defmodule RondoWeb.DashboardLive do
      |> assign(:selected_runs, nil)
      |> assign(:selected_run_index, 0)
      |> assign(:selected_run_projection, nil)
-     |> reset_event_filters()}
+     |> reset_event_filters()
+     |> rebuild_event_stream_view(DashboardEventStream.default_filters())}
   end
 
   @impl true
@@ -688,8 +728,8 @@ defmodule RondoWeb.DashboardLive do
                       <div class="detail-stack">
                         <span
                           class="event-text"
-                          title={entry.last_message || to_string(entry.last_event || "n/a")}
-                        ><%= entry.last_message || to_string(entry.last_event || "n/a") %></span>
+                          title={result_preview_text(entry.last_result_payload || entry.last_message || to_string(entry.last_event || "n/a"))}
+                        ><%= result_preview_text(entry.last_result_payload || entry.last_message || to_string(entry.last_event || "n/a")) %></span>
                         <span class="muted event-meta">
                           <%= entry.last_event || "n/a" %>
                           <%= if entry.last_event_at do %>
@@ -789,7 +829,6 @@ defmodule RondoWeb.DashboardLive do
           <%= if (@payload[:archived_table] || []) == [] do %>
             <p class="empty-state">No archived runs yet.</p>
           <% else %>
-
             <form class="archive-filter-bar" phx-change="filter_archived">
               <input type="hidden" name="page_size" value={archived_view.page_size} />
               <input class="archive-filter-input" type="search" name="search" value={archived_view.filters.search} placeholder="Search issue, title, repo, model, result" />
@@ -907,7 +946,6 @@ defmodule RondoWeb.DashboardLive do
                 <button type="button" class="subtle-button" phx-click="page_archived" phx-value-page={archived_view.page + 1} disabled={archived_view.page >= archived_view.page_count}>Next</button>
               </div>
             <% end %>
-
           <% end %>
         </section>
       <% end %>
@@ -984,20 +1022,31 @@ defmodule RondoWeb.DashboardLive do
               </div>
             </div>
             <div class="panel-metric">
-              <%= if @selected_issue_data[:finished_at] && @selected_outcome do %>
-                <span class="panel-metric-label">Result</span>
-                <div class="detail-stack">
-                  <span class={@selected_outcome.class}><%= @selected_outcome.label %></span>
-                  <%= if @selected_outcome.detail do %>
-                    <span class="muted" style="font-size: 11px;"><%= @selected_outcome.detail %></span>
-                  <% end %>
-                </div>
-              <% else %>
+              <%= cond do %>
+                <% selected_result_payload(@selected_issue_data) -> %>
+                  <span class="panel-metric-label">Last result</span>
+                  <span class={result_summary_badge_class(selected_result_payload(@selected_issue_data))} style="font-size: 11px; line-height: 1.4;"><%= result_preview_text(selected_result_payload(@selected_issue_data)) %></span>
+                <% @selected_issue_data[:finished_at] && @selected_outcome -> %>
+                  <span class="panel-metric-label">Result</span>
+                  <div class="detail-stack">
+                    <span class={@selected_outcome.class}><%= @selected_outcome.label %></span>
+                    <%= if @selected_outcome.detail do %>
+                      <span class="muted" style="font-size: 11px;"><%= @selected_outcome.detail %></span>
+                    <% end %>
+                  </div>
+              <% true -> %>
                 <span class="panel-metric-label">Session</span>
                 <span class="mono" style="font-size: 11px;"><%= @selected_issue_data[:session_id] || "n/a" %></span>
               <% end %>
             </div>
           </div>
+
+          <%= if selected_result_payload(@selected_issue_data) do %>
+            <div class="section-card" style="margin: 0 24px 16px; padding: 16px;">
+              <p class="panel-metric-label">Last result</p>
+              <%= render_result_summary(selected_result_payload(@selected_issue_data)) %>
+            </div>
+          <% end %>
 
           <%= if @selected_runs && length(@selected_runs) > 0 do %>
             <div class="panel-charts">
@@ -1115,146 +1164,206 @@ defmodule RondoWeb.DashboardLive do
           <% end %>
 
           <div class="panel-stream-header">
-            <div>
-              <span class="panel-metric-label">Event inspector</span>
-              <p class="muted" style="font-size: 11px; margin-top: 4px;">Open a row to inspect the underlying prompt, tool call, result, or metadata.</p>
+            <div class="detail-stack">
+              <span class="panel-metric-label">Event stream</span>
+              <span class="muted" style="font-size: 11px;"><%= @event_stream_view.filtered_count %> / <%= @event_stream_view.total_count %> events</span>
             </div>
-            <span class="muted" style="font-size: 11px;"><%= length(event_entries(@selected_issue_data, %{query: @event_query, category: @event_category})) %> visible / <%= length(selected_event_log(@selected_issue_data)) %> total</span>
+            <button type="button" class="subtle-button" phx-click="reset_event_filters">Reset</button>
           </div>
 
-          <form class="event-inspector-toolbar" phx-change="filter_events">
-            <input
-              type="search"
-              name="event_query"
-              value={@event_query}
-              aria-label="Search event inspector"
-              placeholder="Search prompts, tools, results, metadata..."
-              phx-debounce="200"
-            />
-            <select name="event_category" aria-label="Filter events by category">
-              <option value="all" selected={@event_category == :all}>All roles</option>
-              <option value="prompt" selected={@event_category == :prompt}>Prompt</option>
-              <option value="tool" selected={@event_category == :tool}>Tool</option>
-              <option value="result" selected={@event_category == :result}>Result</option>
-              <option value="gate" selected={@event_category == :gate}>Gate</option>
-              <option value="system" selected={@event_category == :system}>System</option>
-              <option value="other" selected={@event_category == :other}>Other</option>
-            </select>
-          </form>
-
-          <% visible_events = event_entries(@selected_issue_data, %{query: @event_query, category: @event_category}) %>
-          <div class="event-inspector-split">
-            <div class="event-stream event-stream-list" id="event-stream" phx-hook="ScrollBottom">
-              <%= if visible_events == [] do %>
-                <%= if selected_event_log(@selected_issue_data) == [] do %>
-                  <p class="empty-state">Waiting for agent activity...</p>
-                <% else %>
-                  <p class="empty-state">No events match the current filters.</p>
-                <% end %>
-              <% else %>
+          <div class="event-toolbar">
+            <div class="event-facet-row">
+              <%= for {facet, label, count} <- event_facet_tabs(@event_stream_view.facets) do %>
                 <button
-                  :for={entry <- visible_events}
                   type="button"
-                  class={"event-row event-row-button #{if @selected_event_index == entry.index, do: "event-row-selected", else: ""}"}
-                  phx-click="select_event"
-                  phx-value-index={entry.index}
+                  class={"event-facet #{if @event_stream_view.filters.facet == facet, do: "event-facet-active", else: ""}"}
+                  phx-click="event_stream_facet"
+                  phx-value-facet={facet}
                 >
-                  <span class={event_type_class(entry.event)}>
-                    <%= if tool_event?(entry.event) do %><svg class="event-icon" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg><% end %><%= entry.event %>
-                  </span>
-                  <div class="event-row-message event-row-message-stack">
-                    <div class="event-row-message-meta">
-                      <span class="event-row-category"><%= entry.category_label %></span>
-                      <span class="muted"><%= format_event_time(entry.at) %></span>
-                    </div>
-                    <span><%= render_event_message(entry.message) %></span>
-                  </div>
+                  <%= label %> <span><%= count %></span>
                 </button>
               <% end %>
             </div>
 
-            <div class="event-detail-panel">
-              <%= if @selected_event_detail do %>
-                <div class="event-detail-header">
-                  <div class="detail-stack">
-                    <span class={event_type_class(@selected_event_detail.display_event || @selected_event_detail.event)}><%= @selected_event_detail.event || @selected_event_detail.display_event || "n/a" %></span>
-                    <div class="event-row-message-meta">
-                      <span class="event-row-category"><%= @selected_event_detail.category_label %></span>
-                      <span class="muted"><%= @selected_event_detail.at || "n/a" %></span>
-                    </div>
-                  </div>
-                  <div class="event-detail-actions">
-                    <button type="button" class={"subtle-button #{if @selected_event_view == :summary, do: "subtle-button-active", else: ""}"} phx-click="toggle_event_view" phx-value-view="summary">Summary</button>
-                    <button type="button" class={"subtle-button #{if @selected_event_view == :raw, do: "subtle-button-active", else: ""}"} phx-click="toggle_event_view" phx-value-view="raw">Raw</button>
-                    <button
-                      type="button"
-                      class="subtle-button"
-                      data-label="Copy raw"
-                      data-raw-text={@selected_event_detail.raw_json || ""}
-                      onclick="event.stopPropagation(); const text = this.dataset.rawText || ''; const label = this.dataset.label || 'Copy raw'; const finish = () => { this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = label }, 1200); }; const fallback = () => { const textarea = document.createElement('textarea'); textarea.value = text; textarea.setAttribute('readonly', ''); textarea.style.position = 'fixed'; textarea.style.opacity = '0'; document.body.appendChild(textarea); textarea.focus(); textarea.select(); document.execCommand('copy'); textarea.remove(); finish(); }; if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text).then(finish).catch(fallback); } else { fallback(); }"
-                    >
-                      Copy raw
-                    </button>
-                  </div>
-                </div>
+            <form id="event-stream-filter-form" class="event-filter-popover" phx-change="event_stream_filters" phx-submit="event_stream_filters">
+              <input type="hidden" name="issue" value={@selected_issue || ""} />
+              <%= if is_list(@selected_runs) and @selected_runs != [] do %>
+                <input type="hidden" name="run" value={@selected_run_index} />
+              <% end %>
 
-                <div class="event-detail-metadata">
-                  <%= for {label, value} <- [{"Timestamp", @selected_event_detail.at}, {"Session", @selected_event_detail.session_id}, {"Run", @selected_event_detail.run_id}, {"Turn", @selected_event_detail.turn_id || @selected_event_detail.turn_count}, {"Adapter", @selected_event_detail.adapter}, {"Provider", @selected_event_detail.provider}, {"Model", @selected_event_detail.model}, {"Source path", @selected_event_detail.source_path}] do %>
-                    <div class="event-detail-metric">
-                      <span class="panel-metric-label"><%= label %></span>
-                      <span class="mono event-detail-value"><%= value || "n/a" %></span>
-                    </div>
-                  <% end %>
-                </div>
+              <div class="event-filter-grid">
+                <label class="event-search-field event-filter-span-2">
+                  <span>Search</span>
+                  <input
+                    type="search"
+                    name="query"
+                    value={@event_stream_view.filters.query}
+                    placeholder="Search event type, summary, issue, provider, model..."
+                    phx-debounce="300"
+                  />
+                </label>
 
-                <div class="event-detail-body">
-                  <div class="event-detail-summary">
-                    <span class="panel-metric-label">Summary</span>
-                    <p><%= @selected_event_detail.summary || "No summary available." %></p>
-                    <%= if @selected_event_detail.has_redacted_content? do %>
-                      <p class="muted" style="font-size: 11px; margin-top: 8px;">Raw content is rendered from the ledger’s redacted event stream.</p>
-                    <% end %>
-                  </div>
+                <label>
+                  <span>Issue / project</span>
+                  <input type="search" name="scope" value={@event_stream_view.filters.scope} placeholder="Issue, project, or run text" />
+                </label>
 
-                  <%= if @selected_event_view == :raw do %>
-                    <pre id="selected-event-raw" class="code-panel event-raw-block"><%= @selected_event_detail.raw_json %></pre>
-                  <% else %>
-                    <div class="event-detail-structured">
-                      <div class="event-detail-group">
-                        <span class="panel-metric-label">Structured fields</span>
-                        <div class="event-detail-field-list">
-                          <%= for {label, value} <- @selected_event_detail.structured_fields do %>
-                            <div class="event-detail-field">
-                              <span class="muted"><%= label %></span>
-                              <span class="mono"><%= value || "n/a" %></span>
-                            </div>
-                          <% end %>
-                        </div>
-                      </div>
-
-                      <%= if @selected_event_detail.artifact_links != [] do %>
-                        <div class="event-detail-group">
-                          <span class="panel-metric-label">Artifact links</span>
-                          <div class="event-detail-artifacts">
-                            <%= for artifact <- @selected_event_detail.artifact_links do %>
-                              <div class="event-detail-artifact">
-                                <span class="mono"><%= artifact.label %></span>
-                                <span class="muted"><%= artifact.path %></span>
-                              </div>
-                            <% end %>
-                          </div>
-                        </div>
+                <label>
+                  <span>Facet</span>
+                  <select name="facet">
+                    <option value="all" selected={@event_stream_view.filters.facet == "all"}>All</option>
+                    <%= for {facet, label, _count} <- event_facet_tabs(@event_stream_view.facets) do %>
+                      <%= if facet != "all" do %>
+                        <option value={facet} selected={@event_stream_view.filters.facet == facet}><%= label %></option>
                       <% end %>
+                    <% end %>
+                  </select>
+                </label>
 
-                      <p class="muted event-detail-raw-hint">Raw payload loads on demand in the Raw view.</p>
-                    </div>
-                  <% end %>
-                </div>
-              <% else %>
-                <p class="empty-state">Select an event to inspect the underlying prompt, tool call, or result.</p>
+                <label>
+                  <span>Kind</span>
+                  <select name="kind">
+                    <option value="all" selected={@event_stream_view.filters.kind == "all"}>All</option>
+                    <%= for kind <- @event_stream_view.options.kinds do %>
+                      <option value={kind} selected={@event_stream_view.filters.kind == kind}><%= kind %></option>
+                    <% end %>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Status</span>
+                  <select name="status">
+                    <option value="all" selected={@event_stream_view.filters.status == "all"}>All</option>
+                    <%= for status <- @event_stream_view.options.statuses do %>
+                      <option value={status} selected={@event_stream_view.filters.status == status}><%= status %></option>
+                    <% end %>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Provider</span>
+                  <select name="provider">
+                    <option value="all" selected={@event_stream_view.filters.provider == "all"}>All</option>
+                    <%= for provider <- @event_stream_view.options.providers do %>
+                      <option value={provider} selected={@event_stream_view.filters.provider == provider}><%= provider %></option>
+                    <% end %>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Model</span>
+                  <select name="model">
+                    <option value="all" selected={@event_stream_view.filters.model == "all"}>All</option>
+                    <%= for model <- @event_stream_view.options.models do %>
+                      <option value={model} selected={@event_stream_view.filters.model == model}><%= model %></option>
+                    <% end %>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Run state</span>
+                  <select name="run_state">
+                    <option value="all" selected={@event_stream_view.filters.run_state == "all"}>All</option>
+                    <%= for run_state <- @event_stream_view.options.run_states do %>
+                      <option value={run_state} selected={@event_stream_view.filters.run_state == run_state}><%= run_state %></option>
+                    <% end %>
+                  </select>
+                </label>
+
+                <label>
+                  <span>Result</span>
+                  <select name="result">
+                    <option value="all" selected={@event_stream_view.filters.result == "all"}>All</option>
+                    <%= for result <- @event_stream_view.options.results do %>
+                      <option value={result} selected={@event_stream_view.filters.result == result}><%= result %></option>
+                    <% end %>
+                  </select>
+                </label>
+
+                <label>
+                  <span>From (UTC)</span>
+                  <input type="datetime-local" name="from" value={datetime_local_value(@event_stream_view.filters.from)} />
+                </label>
+
+                <label>
+                  <span>To (UTC)</span>
+                  <input type="datetime-local" name="to" value={datetime_local_value(@event_stream_view.filters.to)} />
+                </label>
+
+                <label>
+                  <span>Sort</span>
+                  <select name="sort">
+                    <%= for {value, label} <- event_sort_options() do %>
+                      <option value={value} selected={@event_stream_view.filters.sort == value}><%= label %></option>
+                    <% end %>
+                  </select>
+                </label>
+              </div>
+            </form>
+
+            <div class="event-active-filters">
+              <%= for chip <- active_event_filter_chips(@event_stream_view.filters) do %>
+                <span class="event-filter-chip"><%= chip %></span>
               <% end %>
             </div>
           </div>
+
+          <%= if @event_stream_view.total_count == 0 do %>
+            <p class="empty-state">Waiting for agent activity...</p>
+          <% else %>
+            <%= if @event_stream_view.filtered_count == 0 do %>
+              <p class="empty-state">No events match the current filters.</p>
+            <% else %>
+              <div class="event-stream" id="event-stream">
+                <div class="event-table-wrap" id="event-stream-scroll" phx-hook="ScrollBottom">
+                  <table class="event-table">
+                    <thead>
+                      <tr>
+                        <th>
+                          <button type="button" class="event-sort-button" phx-click="event_stream_sort" phx-value-sort={toggle_sort(@event_stream_view.filters.sort, "time")}>Time</button>
+                        </th>
+                        <th>
+                          <button type="button" class="event-sort-button" phx-click="event_stream_sort" phx-value-sort={toggle_sort(@event_stream_view.filters.sort, "kind")}>Kind</button>
+                        </th>
+                        <th>
+                          <button type="button" class="event-sort-button" phx-click="event_stream_sort" phx-value-sort={toggle_sort(@event_stream_view.filters.sort, "status")}>Status</button>
+                        </th>
+                        <th>
+                          <button type="button" class="event-sort-button" phx-click="event_stream_sort" phx-value-sort={toggle_sort(@event_stream_view.filters.sort, "summary")}>Summary</button>
+                        </th>
+                        <th>Context</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr :for={row <- @event_stream_view.rows}>
+                        <td class="mono muted event-time"><%= format_event_time(row.at) %></td>
+                        <td>
+                          <span class={row.kind_class}><%= row.kind %></span>
+                        </td>
+                        <td>
+                          <span class={row.status_class}><%= row.status %></span>
+                        </td>
+                        <td>
+                          <div class="event-summary">
+                            <%= render_event_message(row.summary) %>
+                          </div>
+                        </td>
+                        <td>
+                          <div class="event-context">
+                            <span><%= row.issue_identifier || "n/a" %></span>
+                            <span><%= event_context_label(row) %></span>
+                            <%= if row.artifacts != [] do %>
+                              <span class="event-artifacts"><%= Enum.join(row.artifacts, " · ") %></span>
+                            <% end %>
+                          </div>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            <% end %>
+          <% end %>
         <% else %>
           <p class="empty-state">Issue not currently running.</p>
         <% end %>
@@ -1338,7 +1447,10 @@ defmodule RondoWeb.DashboardLive do
       case Rondo.Orchestrator.load_archived_run(identifier, filename) do
         {:ok, full_entry} ->
           event_log = RondoWeb.Presenter.format_event_log_public(Map.get(full_entry, :event_log, []))
-          Map.put(run, :event_log, event_log)
+
+          run
+          |> Map.merge(full_entry)
+          |> Map.put(:event_log, event_log)
 
         _ ->
           Map.put(run, :event_log, [])
@@ -1481,6 +1593,122 @@ defmodule RondoWeb.DashboardLive do
   end
 
   defp artifact_summary(artifact), do: to_string(artifact)
+
+  @dashboard_query_keys ~w(issue run query scope facet kind status provider model run_state result from to sort)
+
+  @spec dashboard_query_params(map()) :: map()
+  def dashboard_query_params(params) when is_map(params) do
+    params
+    |> Enum.reduce(%{}, fn {key, value}, acc ->
+      key = to_string(key)
+
+      cond do
+        key not in @dashboard_query_keys -> acc
+        is_nil(value) -> acc
+        true -> Map.put(acc, key, to_string(value))
+      end
+    end)
+  end
+
+  def dashboard_query_params(_), do: %{}
+
+  defp rebuild_event_stream_view(socket, filters \\ nil) do
+    filters =
+      filters || get_in(socket.assigns, [:event_stream_view, :filters]) ||
+        DashboardEventStream.default_filters()
+
+    assign(
+      socket,
+      :event_stream_view,
+      DashboardEventStream.build(
+        socket.assigns.payload,
+        socket.assigns.selected_issue_data,
+        socket.assigns.selected_runs,
+        socket.assigns.selected_run_index,
+        filters
+      )
+    )
+  end
+
+  defp event_facet_tabs(facets) do
+    [{"all", "All", total_facet_count(facets)} | DashboardEventStream.facet_choices(facets)]
+  end
+
+  defp total_facet_count(facets), do: Map.values(facets) |> Enum.sum()
+
+  defp active_event_filter_chips(filters) do
+    [
+      chip(filters.query, "Search: "),
+      chip(filters.scope, "Issue/project: "),
+      chip(filters.facet, "Facet: ", "all"),
+      chip(filters.kind, "Kind: ", "all"),
+      chip(filters.status, "Status: ", "all"),
+      chip(filters.provider, "Provider: ", "all"),
+      chip(filters.model, "Model: ", "all"),
+      chip(filters.run_state, "Run state: ", "all"),
+      chip(filters.result, "Result: ", "all"),
+      chip(filters.from, "From: "),
+      chip(filters.to, "To: ")
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp chip(value, prefix, skip_value \\ nil) do
+    cond do
+      blank?(value) -> nil
+      skip_value != nil and value == skip_value -> nil
+      true -> "#{prefix}#{value}"
+    end
+  end
+
+  defp blank?(value), do: value in [nil, ""]
+
+  defp event_sort_options do
+    [
+      {"time_asc", "Time ↑"},
+      {"time_desc", "Time ↓"},
+      {"kind_asc", "Kind ↑"},
+      {"kind_desc", "Kind ↓"},
+      {"status_asc", "Status ↑"},
+      {"status_desc", "Status ↓"},
+      {"summary_asc", "Summary ↑"},
+      {"summary_desc", "Summary ↓"}
+    ]
+  end
+
+  defp toggle_sort(current, field) do
+    field = if field in ["time", "kind", "status", "summary"], do: field, else: "time"
+    current = current || "time_asc"
+    direction = if String.starts_with?(current, "#{field}_") and String.ends_with?(current, "_asc"), do: "desc", else: "asc"
+    "#{field}_#{direction}"
+  end
+
+  defp datetime_local_value(nil), do: ""
+  defp datetime_local_value(""), do: ""
+
+  defp datetime_local_value(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, dt, _offset} -> Calendar.strftime(dt, "%Y-%m-%dT%H:%M")
+      _ -> value
+    end
+  end
+
+  defp datetime_local_value(%DateTime{} = dt), do: Calendar.strftime(dt, "%Y-%m-%dT%H:%M")
+  defp datetime_local_value(_), do: ""
+
+  defp event_context_label(row) do
+    provider_model =
+      case {Map.get(row, :provider), Map.get(row, :model)} do
+        {nil, nil} -> nil
+        {provider, nil} -> provider
+        {nil, model} -> model
+        {provider, model} -> "#{provider}/#{model}"
+      end
+
+    [provider_model, Map.get(row, :action), Map.get(row, :run_state)]
+    |> Enum.reject(&blank?/1)
+    |> Enum.join(" · ")
+  end
 
   defp find_issue_entry(payload, identifier) do
     [:needs_guidance, :paused, :running, :retrying]
@@ -1981,7 +2209,9 @@ defmodule RondoWeb.DashboardLive do
     |> assign(:event_category, :all)
   end
 
-  defp selected_outcome(entry), do: Map.get(entry, :outcome_display) || RunOutcome.display(entry)
+  defp selected_outcome(entry) do
+    Map.get(entry, :outcome_display) || RunOutcome.display(entry)
+  end
 
   defp total_runtime_seconds(payload, now) do
     completed_runtime_seconds(payload) +
@@ -2408,6 +2638,83 @@ defmodule RondoWeb.DashboardLive do
             </div>
           <% end %>
         </div>
+      <% end %>
+    </div>
+    """
+  end
+
+  defp selected_result_payload(selected_issue_data) when is_map(selected_issue_data) do
+    Map.get(selected_issue_data, :final_report) ||
+      get_in(selected_issue_data, [:interrupt, :final_report]) ||
+      Map.get(selected_issue_data, :last_result_payload) ||
+      Map.get(selected_issue_data, :last_message)
+  end
+
+  defp selected_result_payload(_selected_issue_data), do: nil
+
+  defp result_preview_text(nil), do: "n/a"
+  defp result_preview_text(result), do: ResultSummary.preview(result)
+
+  defp result_summary_badge_class(:final_report), do: "state-badge state-badge-active"
+  defp result_summary_badge_class(:json), do: "state-badge state-badge-warning"
+  defp result_summary_badge_class(:text), do: "state-badge"
+  defp result_summary_badge_class(nil), do: "state-badge"
+
+  defp result_summary_badge_class(result) do
+    case ResultSummary.describe(result).kind do
+      :final_report -> "state-badge state-badge-active"
+      :json -> "state-badge state-badge-warning"
+      :text -> "state-badge"
+    end
+  end
+
+  defp render_result_summary(result) do
+    assigns = %{summary: ResultSummary.describe(result)}
+
+    ~H"""
+    <div class="detail-stack" style="gap: 12px;">
+      <span class={result_summary_badge_class(@summary.kind)} style="font-size: 11px; align-self: flex-start; line-height: 1.4;"><%= @summary.preview %></span>
+
+      <%= if @summary.fields != [] do %>
+        <div style="display: grid; gap: 8px;">
+          <%= for field <- @summary.fields do %>
+            <div class="detail-stack" style="gap: 2px;">
+              <span class="muted" style="font-size: 10px; text-transform: uppercase; letter-spacing: .06em;"><%= field.label %></span>
+              <span class="mono" style="font-size: 12px; white-space: pre-wrap; word-break: break-word;"><%= field.value %></span>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+
+      <%= if @summary.pretty do %>
+        <details style="margin-top: 4px;">
+          <summary class="muted" style="cursor: pointer;">Raw JSON</summary>
+          <div style="display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap;">
+            <button
+              type="button"
+              class="subtle-button"
+              data-label="Copy raw"
+              data-copy={@summary.copy_text}
+              onclick="event.stopPropagation(); navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);"
+            >
+              Copy raw
+            </button>
+          </div>
+          <pre class="mono" style="margin-top: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-word; background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: 12px; padding: 10px;"><%= @summary.pretty %></pre>
+        </details>
+      <% else %>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+          <button
+            type="button"
+            class="subtle-button"
+            data-label="Copy text"
+            data-copy={@summary.copy_text}
+            onclick="event.stopPropagation(); navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);"
+          >
+            Copy text
+          </button>
+        </div>
+        <pre class="mono" style="margin-top: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-word; background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: 12px; padding: 10px;"><%= @summary.raw %></pre>
       <% end %>
     </div>
     """
