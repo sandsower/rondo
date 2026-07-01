@@ -298,13 +298,8 @@ defmodule Rondo.CleanEval do
       provider_id = provider_id(provider)
       Logger.warning("Process provider clean-eval gate selection failed provider=#{provider_id} reason=#{inspect(reason)}; falling back to native gates")
 
-      case ProcessProvider.select_gate_selection(Native, opts) do
-        {:ok, selection} ->
-          {:ok, annotate_native_fallback(selection, provider_id, reason) |> Map.put(:action_policy_provider, Native)}
-
-        {:error, native_reason} ->
-          {:error, {:native_fallback_gate_selection_failed, native_reason}}
-      end
+      {:ok, selection} = ProcessProvider.select_gate_selection(Native, opts)
+      {:ok, annotate_native_fallback(selection, provider_id, reason) |> Map.put(:action_policy_provider, Native)}
     end
   end
 
@@ -327,11 +322,7 @@ defmodule Rondo.CleanEval do
   end
 
   defp action_policy_evaluator(Beislid, context) do
-    if Beislid.action_policy_available?(provider_opts(context)) do
-      fn action, classes, opts -> Beislid.evaluate_action_policy(action, classes, Keyword.merge(provider_opts(context), opts)) end
-    else
-      ProcessProvider.action_policy_evaluator(Native)
-    end
+    fn action, classes, opts -> Beislid.evaluate_action_policy(action, classes, Keyword.merge(provider_opts(context), opts)) end
   end
 
   defp action_policy_evaluator(provider, _context), do: ProcessProvider.action_policy_evaluator(provider)

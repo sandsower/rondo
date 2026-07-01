@@ -425,17 +425,23 @@ defmodule Rondo.ExtensionsTest do
     assert Map.fetch!(headers, "content-type") =~ "text/html"
     assert body =~ "Rondo Observability"
     assert body =~ "Blocks dispatch: paused_claim"
-    assert body =~ "stale: policy_revalidation_failed"
 
     {status, headers, body} = http_request(port, "GET", "/api/v1/state")
     assert status == 200
     assert Map.fetch!(headers, "content-type") =~ "application/json"
 
+    state_payload = Jason.decode!(body)
+
     assert %{
              "counts" => %{"running" => 1, "retrying" => 1},
              "running" => [%{"issue_identifier" => "MT-HTTP", "last_message" => "rendered", "turn_count" => 7}],
              "retrying" => [%{"issue_identifier" => "MT-RETRY", "error" => "boom"}]
-           } = Jason.decode!(body)
+           } = state_payload
+
+    assert %{
+             "blocks_dispatch" => true,
+             "stale_reason" => "policy_revalidation_failed: :invalid_paused_side_effect"
+           } = Enum.find(state_payload["paused"], &(&1["issue_identifier"] == "MT-PAUSED"))
 
     :sys.replace_state(orchestrator_pid, fn state ->
       update_in(state.running["issue-http"].last_claude_message, fn _ -> %{message: "structured"} end)
@@ -670,8 +676,8 @@ defmodule Rondo.ExtensionsTest do
     assert_eventually(fn -> tcp_accept_ready?(port) end)
 
     # Under load the Bandit acceptor can accept TCP connections before
-    # it's ready to process HTTP requests.  Send a real HTTP request
-    # and verify we get a response (not just an open socket).
+    # it's ready to process HTTP requests.  Send a real static-asset request
+    # and verify we get a response without depending on orchestrator snapshots.
     assert_eventually(fn -> http_ready?(port) end)
 
     port
@@ -691,7 +697,7 @@ defmodule Rondo.ExtensionsTest do
   defp http_ready?(port) do
     case :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false], 500) do
       {:ok, socket} ->
-        :ok = :gen_tcp.send(socket, "GET / HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n\r\n")
+        :ok = :gen_tcp.send(socket, "GET /dashboard.css HTTP/1.1\r\nhost: 127.0.0.1\r\nconnection: close\r\n\r\n")
 
         ready? =
           case :gen_tcp.recv(socket, 0, 500) do
@@ -805,9 +811,9 @@ defmodule Rondo.ExtensionsTest do
     |> IO.iodata_to_binary()
   end
 
-  defp recv_all(socket, acc) do
-    case :gen_tcp.recv(socket, 0, 1_000) do
-      {:ok, chunk} -> recv_all(socket, acc <> chunk)
+  defp recv_all(socket, acc, timeout \\ 30_000) do
+    case :gen_tcp.recv(socket, 0, timeout) do
+      {:ok, chunk} -> recv_all(socket, acc <> chunk, 100)
       {:error, :closed} -> acc
       {:error, :timeout} -> acc
     end

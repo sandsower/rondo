@@ -173,6 +173,14 @@ defmodule RondoWeb.ArchivedRunsTest do
     assert Enum.map(issue_sort_view.rows, & &1.issue_identifier) == ["MT-DONE", "MT-ERR", "MT-EXIT", "MT-FAIL", "MT-HAND", "MT-TERM", "MT-UNKNOWN"]
   end
 
+  test "empty views retain one empty pagination page" do
+    view = ArchivedRuns.view([], %{})
+
+    assert view.rows == []
+    assert view.total == 0
+    assert view.page_count == 1
+  end
+
   test "next_sort and sorter comparison handle toggles, invalid fields, equality, and nils" do
     default = ArchivedRuns.default_filters()
     started_asc = ArchivedRuns.next_sort(default, "started")

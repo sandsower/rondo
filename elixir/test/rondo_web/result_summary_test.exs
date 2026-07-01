@@ -194,6 +194,21 @@ defmodule RondoWeb.ResultSummaryTest do
 
     assert summary.pretty =~ "reported_next_state"
     assert summary.copy_text =~ "\"reason\":\"final_report_invalid\""
+
+    string_key_summary =
+      ResultSummary.describe(%{
+        "reason" => "final_report_invalid",
+        "final_report" => %{
+          "status" => "missing",
+          "reported_next_state" => "blocked",
+          "errors" => ["missing"],
+          "excerpt" => "no final report",
+          "continuation_count" => 0
+        }
+      })
+
+    assert string_key_summary.kind == :json
+    assert string_key_summary.preview == "JSON object · missing"
   end
 
   test "unwraps final report diagnostics from json text candidates" do
@@ -327,6 +342,20 @@ defmodule RondoWeb.ResultSummaryTest do
 
     assert summary.fields |> Enum.find(&(&1.label == "PR / issue links")) ==
              %{label: "PR / issue links", value: "raw"}
+
+    summary =
+      ResultSummary.describe(%{
+        schema: "rondo.final_report/v0",
+        summary: "Blank links",
+        changed_files: ["lib/a.ex"],
+        gates_run: [%{"name" => "lint"}],
+        links: [""],
+        failures: [],
+        risks: [],
+        next_state: "done"
+      })
+
+    refute Enum.any?(summary.fields, &(&1.label == "PR / issue links"))
 
     summary =
       ResultSummary.describe(%{

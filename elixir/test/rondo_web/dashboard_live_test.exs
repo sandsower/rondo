@@ -1,7 +1,7 @@
-defmodule RondoWeb.DashboardLiveTest do
+defmodule RondoWeb.DashboardLiveArchivedSelectionTest do
   use Rondo.TestSupport
 
-  alias RondoWeb.{ArchivedRuns, DashboardLive}
+  alias RondoWeb.{ArchivedRuns, DashboardEventStream, DashboardLive}
 
   test "renders readable last result summaries for active and archived runs" do
     report = %{
@@ -145,7 +145,8 @@ defmodule RondoWeb.DashboardLiveTest do
       event_category: :all,
       selected_event_index: nil,
       selected_event_view: :summary,
-      selected_event_detail: nil
+      selected_event_detail: nil,
+      event_stream_view: DashboardEventStream.build(%{}, nil, nil, 0, %{})
     }
 
     DashboardLive.render(Map.merge(defaults, assigns))

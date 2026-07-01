@@ -247,6 +247,28 @@ defmodule Rondo.ProcessProviderTest do
             }} = Beislid.select_gates(changed_files: ["lib/rondo/gates.ex"], stage: :pre_pr)
 
     assert reason =~ "no gates matched stage pre_pr"
+
+    any_stage_path =
+      write_json!(temp_dir, "any-stage-empty.json", %{
+        "schema" => "beislid-process-artifact-v1",
+        "id" => "any-stage-empty-artifact",
+        "status" => "approved",
+        "gate_sets" => [
+          %{
+            "id" => "runtime",
+            "paths" => ["lib/**/*.ex"],
+            "gates" => []
+          }
+        ]
+      })
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      process_provider_kind: "beislid",
+      process_provider_artifact_path: any_stage_path
+    )
+
+    assert {:ok, %{skipped: [%{reason: any_stage_reason}]}} = Beislid.select_gates(changed_files: ["lib/rondo/gates.ex"])
+    assert any_stage_reason =~ "no gates matched stage any"
   end
 
   test "beislid provider matches trailing slash and prefix selectors deterministically" do

@@ -104,6 +104,46 @@ defmodule Rondo.CleanEvalTest do
     end
   end
 
+  defmodule ConfigurableProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "configurable_pre_pr"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: Rondo.ProcessProvider.probe_result(:ok, %{gate_selection: :ok})
+
+    @impl true
+    def select_gates(_opts \\ []), do: Process.get(:clean_eval_select_gates_result)
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Provider prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []), do: %{}
+
+    @impl true
+    def proof_requirements(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def evaluate_action_policy(action, classes, opts \\ []) do
+      {:ok,
+       %{
+         "decision" => "allow",
+         "action" => action,
+         "classes" => classes,
+         "mode" => Keyword.get(opts, :mode, "unattended-auto"),
+         "provider" => id()
+       }}
+    end
+  end
+
   test "exposes the clean-eval artifact contract" do
     assert CleanEval.schema() == "rondo.clean_eval/v0"
     assert CleanEval.result_relative_path() == "clean_eval/result.json"
@@ -268,6 +308,49 @@ defmodule Rondo.CleanEvalTest do
     assert result.reason =~ "gate_selection_failed"
     assert result.reason =~ "artifact_not_approved"
     assert read_result_json!(context)["status"] == "error"
+  end
+
+  test "treats changed-file selector empty gate selections as errors" do
+    context = setup_run("clean-eval-empty-selector-selection", clean_eval_enabled: true)
+    write_patch_artifacts!(context)
+
+    Process.put(
+      :clean_eval_select_gates_result,
+      {:ok,
+       Rondo.ProcessProvider.gate_selection_result([],
+         changed_files: ["lib/rondo/example.ex"],
+         skipped: [%{name: "runtime", reason: "no pre-pr gates"}],
+         warnings: [%{message: "selector matched no pre-pr gates"}],
+         metadata: %{selector_mode: "changed_files"}
+       )}
+    )
+
+    assert {:ok, _ledger, result} = CleanEval.run(context.ledger, process_provider: ConfigurableProcessProvider)
+    assert result.status == :error
+    assert result.reason =~ "gate_selection_empty"
+    assert result.reason =~ "lib/rondo/example.ex"
+  after
+    Process.delete(:clean_eval_select_gates_result)
+  end
+
+  test "invalid provider artifacts do not fall back to native gates" do
+    for {suffix, reason} <- [
+          {"field", {:invalid_artifact_field, "gates"}},
+          {"artifact", :invalid_artifact},
+          {"artifact-id", :invalid_artifact_id},
+          {"schema", {:unsupported_artifact_schema, "future"}},
+          {"json", {:invalid_json, "/tmp/artifact.json", "bad json"}}
+        ] do
+      context = setup_run("clean-eval-invalid-artifact-#{suffix}", clean_eval_enabled: true)
+      write_patch_artifacts!(context)
+      Process.put(:clean_eval_select_gates_result, {:error, reason})
+
+      assert {:ok, _ledger, result} = CleanEval.run(context.ledger, process_provider: ConfigurableProcessProvider)
+      assert result.status == :error
+      assert result.reason =~ "gate_selection_failed"
+    end
+  after
+    Process.delete(:clean_eval_select_gates_result)
   end
 
   test "returns an error when provider gate selection is required and fails" do

@@ -8,6 +8,7 @@ defmodule Rondo.DeliveryArtifact do
   """
 
   alias Rondo.{Redaction, RunLedger}
+  alias Rondo.RunEvidence.ArtifactCatalog
 
   @schema "rondo-delivery-artifact-v0"
   @relative_path "artifacts/delivery-artifact.json"
@@ -218,8 +219,7 @@ defmodule Rondo.DeliveryArtifact do
 
   defp gate_results(ledger, manifest, final_report_gates) do
     manifest
-    |> Map.get("artifacts", [])
-    |> Enum.filter(&(Map.get(&1, "kind") == "gate_results"))
+    |> ArtifactCatalog.find_all(:gate_results)
     |> Enum.flat_map(&gate_results_from_artifact(ledger, &1))
     |> then(fn results -> if results == [], do: final_report_gate_results(final_report_gates), else: results end)
   end
@@ -365,14 +365,7 @@ defmodule Rondo.DeliveryArtifact do
     end
   end
 
-  defp artifact_path(artifacts, kind) when is_list(artifacts) do
-    artifacts
-    |> Enum.find(fn artifact -> Map.get(artifact, "kind") == kind end)
-    |> case do
-      %{"path" => path} -> path
-      _other -> nil
-    end
-  end
+  defp artifact_path(artifacts, kind), do: ArtifactCatalog.path(artifacts, kind)
 
   defp list_field(map, key) when is_map(map) do
     case Map.get(map, key) do

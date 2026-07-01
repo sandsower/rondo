@@ -134,19 +134,13 @@ defmodule RondoWeb.ResultSummary do
     final_report
   end
 
-  defp unwrap_final_report_wrapper(%{reason: "final_report_invalid", final_report: final_report}) do
-    final_report
-  end
-
   defp unwrap_final_report_wrapper(report), do: report
 
-  defp summary_candidate_value(value) when is_map(value) or is_list(value) do
+  defp summary_candidate_value(value) do
     value
     |> normalize_json_value()
     |> unwrap_final_report_wrapper()
   end
-
-  defp summary_candidate_value(value), do: value
 
   defp decoded_json_candidates(text) when is_binary(text) do
     text

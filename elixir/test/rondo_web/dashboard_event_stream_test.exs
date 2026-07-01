@@ -54,6 +54,8 @@ defmodule RondoWeb.DashboardEventStreamTest do
     assert DashboardEventStream.selection_params(%{issue: "MT-100", run: 2}) == %{"issue" => "MT-100", "run" => 2}
     assert DashboardEventStream.selection_params(%{}) == %{}
     assert DashboardEventStream.selection_params("nope") == %{}
+    assert DashboardEventStream.facet_choices("nope") == []
+    assert DashboardEventStream.facet_choices(%{custom: 2}) == [{:custom, "Custom", 2}]
 
     assert DashboardEventStream.build(nil, nil, nil, 0, %{}) == %{
              rows: [],
@@ -223,6 +225,22 @@ defmodule RondoWeb.DashboardEventStreamTest do
       )
 
     assert string_key_live_view.selected_run["session_id"] == "in-progress"
+
+    finished_only_view =
+      DashboardEventStream.build(
+        %{
+          run_timelines: [
+            %{"identifier" => "MT-203", "session_id" => "finished-a", "started_at" => @start_one, "finished_at" => @start_two, "timeline" => []},
+            %{"identifier" => "MT-203", "session_id" => "finished-b", "started_at" => @start_two, "finished_at" => @start_three, "timeline" => []}
+          ]
+        },
+        %{"issue_identifier" => "MT-203", "session_id" => "missing"},
+        nil,
+        0,
+        %{}
+      )
+
+    assert finished_only_view.selected_run["session_id"] == "finished-a"
 
     empty_timeline_view = DashboardEventStream.build(%{run_timelines: [%{"identifier" => "MT-202", "session_id" => "session-202", "timeline" => []}]}, nil, nil, 0, %{})
     assert empty_timeline_view.selected_run["session_id"] == "session-202"
