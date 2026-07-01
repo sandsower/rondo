@@ -984,6 +984,7 @@ defmodule Rondo.AgentAdapterTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        hook_after_create: "git init -q",
         model_routing: %{
           defaults: %{tier: "standard", mode: "prefer"},
           tiers: %{
@@ -1006,13 +1007,15 @@ defmodule Rondo.AgentAdapterTest do
       assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
       send(parent, {:set_ledger, ledger})
 
-      assert :ok =
-               AgentRunner.run(issue, parent,
-                 agent_adapter: FakeAdapter,
-                 process_provider: InitialContextModelHintProcessProvider,
-                 run_ledger: ledger,
-                 test_pid: parent,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+      assert {:final_report_invalid, _interrupt} =
+               catch_exit(
+                 AgentRunner.run(issue, parent,
+                   agent_adapter: FakeAdapter,
+                   process_provider: InitialContextModelHintProcessProvider,
+                   run_ledger: ledger,
+                   test_pid: parent,
+                   issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                 )
                )
 
       assert_receive {:fake_adapter_opts, opts}, 500
@@ -1271,6 +1274,7 @@ defmodule Rondo.AgentAdapterTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        hook_after_create: "git init -q",
         model_routing: %{
           defaults: %{tier: "standard", mode: "prefer"},
           tiers: %{
@@ -1293,13 +1297,15 @@ defmodule Rondo.AgentAdapterTest do
       assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
       send(parent, {:set_ledger, ledger})
 
-      assert :ok =
-               AgentRunner.run(issue, parent,
-                 agent_adapter: FakeAdapter,
-                 process_provider: InitialStageLessStepModelHintProcessProvider,
-                 run_ledger: ledger,
-                 test_pid: parent,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+      assert {:final_report_invalid, _interrupt} =
+               catch_exit(
+                 AgentRunner.run(issue, parent,
+                   agent_adapter: FakeAdapter,
+                   process_provider: InitialStageLessStepModelHintProcessProvider,
+                   run_ledger: ledger,
+                   test_pid: parent,
+                   issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                 )
                )
 
       assert_receive {:fake_adapter_opts, opts}, 500
@@ -1331,6 +1337,7 @@ defmodule Rondo.AgentAdapterTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        hook_after_create: "git init -q",
         max_turns: 2,
         gates: nil,
         model_routing: %{
@@ -1410,6 +1417,7 @@ defmodule Rondo.AgentAdapterTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        hook_after_create: "git init -q",
         max_turns: 2,
         gates: [],
         model_routing: %{
@@ -1492,7 +1500,7 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
-  test "agent runner does not implement from unsafe planning reports" do
+  test "agent runner pauses on unsafe planning reports before implementation" do
     scenarios = [
       {:missing_plan,
        %{
@@ -1565,15 +1573,20 @@ defmodule Rondo.AgentAdapterTest do
 
         report = if is_map(planning_report), do: Jason.encode!(planning_report), else: planning_report
 
-        assert :ok =
-                 AgentRunner.run(issue, parent,
-                   agent_adapter: FakeAdapter,
-                   process_provider: Rondo.ProcessProvider.Native,
-                   run_ledger: ledger,
-                   test_pid: parent,
-                   fake_final_reports: [report],
-                   issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
+        assert {:final_report_invalid, interrupt} =
+                 catch_exit(
+                   AgentRunner.run(issue, parent,
+                     agent_adapter: FakeAdapter,
+                     process_provider: Rondo.ProcessProvider.Native,
+                     run_ledger: ledger,
+                     test_pid: parent,
+                     fake_final_reports: [report, "fake final 2"],
+                     issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
+                   )
                  )
+
+        assert interrupt["reason"] == "final_report_invalid"
+        assert interrupt["classification"] == reason_code
 
         assert_receive {:fake_adapter_invoked, 1, _planning_prompt, _workspace, nil}, 500
         assert_receive {:claude_worker_update, _, %{event: :run_decision, reason_code: ^reason_code}}, 500
@@ -1585,6 +1598,81 @@ defmodule Rondo.AgentAdapterTest do
         File.rm_rf(test_root)
       end
     end)
+  end
+
+  test "agent runner pauses when planning leaves the workspace dirty" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-planning-dirty-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 2,
+        hook_after_create: "git init -b main && git config user.email test@example.org && git config user.name Rondo Test",
+        gates: [],
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{
+            standard: [%{model: "standard-model"}],
+            frontier: [%{model: "frontier-model"}]
+          }
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-planning-dirty",
+        identifier: "MT-PLANNING-DIRTY",
+        title: "Planning workspace dirty",
+        description: "Workspace dirtiness should block implementation",
+        state: "In Progress",
+        labels: []
+      }
+
+      planning_report = %{
+        "schema" => "rondo.final_report/v0",
+        "summary" => "planned with workspace dirtied by the agent",
+        "changed_files" => [],
+        "gates_run" => [],
+        "failures" => [],
+        "risks" => [],
+        "next_state" => "In Progress",
+        "implementation_plan" => "Implement later."
+      }
+
+      parent = start_update_recorder(self())
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
+
+      assert {:final_report_invalid, interrupt} =
+               catch_exit(
+                 AgentRunner.run(issue, parent,
+                   agent_adapter: FakeAdapter,
+                   process_provider: Rondo.ProcessProvider.Native,
+                   run_ledger: ledger,
+                   test_pid: parent,
+                   touch_workspace_on_invocation: 1,
+                   touch_workspace_path: "dirty.txt",
+                   touch_workspace_contents: "dirty\n",
+                   fake_final_reports: [Jason.encode!(planning_report), "fake final 2"],
+                   issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
+                 )
+               )
+
+      assert interrupt["reason"] == "final_report_invalid"
+      assert interrupt["classification"] == "planning_workspace_dirty"
+
+      assert_receive {:fake_adapter_invoked, 1, _planning_prompt, workspace, nil}, 500
+      assert File.exists?(Path.join(workspace, "dirty.txt"))
+      assert_receive {:claude_worker_update, _, %{event: :run_decision, reason_code: "planning_workspace_dirty"}}, 500
+      refute_receive {:fake_adapter_invoked, 2, _implementation_prompt, _workspace, _previous_run_ref}, 100
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      refute Enum.any?(manifest["checkpoints"], &(&1["kind"] == "planning_completed"))
+    after
+      File.rm_rf(test_root)
+    end
   end
 
   test "agent runner records unresolved required initial routing before blocking" do

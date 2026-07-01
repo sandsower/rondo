@@ -1331,48 +1331,128 @@ defmodule Rondo.AgentRunner do
         :not_planning
 
       planning_phase_ready?(analysis) ->
-        next_context = context |> clear_live_update_prompt() |> put_planning_handoff(analysis, final_report)
+        case Workspace.verify_clean(context.workspace, context.opts) do
+          {:ok, :clean} ->
+            next_context = context |> clear_live_update_prompt() |> put_planning_handoff(analysis, final_report)
 
-        _ledger =
-          record_planning_completed_checkpoint(context, issue, turn_number, analysis, final_report, effective_run_ref)
+            _ledger =
+              record_planning_completed_checkpoint(
+                context,
+                issue,
+                turn_number,
+                analysis,
+                final_report,
+                effective_run_ref
+              )
 
-        dispatch_run_decision(
-          turn_context_recipient(context),
-          issue,
-          :continue,
-          "planning_phase_completed",
-          "continue from planning phase to implementation phase",
-          run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report, %{
-            "completed_phase" => "planning",
-            "next_phase" => "implementation",
-            "recommended_implementation_tier" => implementation_tier_from_report(analysis.report)
-          })
-        )
+            dispatch_run_decision(
+              turn_context_recipient(context),
+              issue,
+              :continue,
+              "planning_phase_completed",
+              "continue from planning phase to implementation phase",
+              run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report, %{
+                "completed_phase" => "planning",
+                "next_phase" => "implementation",
+                "recommended_implementation_tier" => implementation_tier_from_report(analysis.report)
+              })
+            )
 
-        {:continue, issue, analysis.fingerprint, next_context}
+            {:continue, issue, analysis.fingerprint, next_context}
+
+          {:ok, :dirty} ->
+            pause_planning_phase(
+              context,
+              %{
+                issue: issue,
+                analysis: analysis,
+                turn_number: turn_number,
+                final_report: final_report,
+                effective_run_ref: effective_run_ref,
+                extra_input_signals: %{"workspace_status" => "dirty"}
+              },
+              "planning_workspace_dirty",
+              "pause because the workspace must be clean before implementation can begin"
+            )
+
+          {:error, reason} ->
+            pause_planning_phase(
+              context,
+              %{
+                issue: issue,
+                analysis: analysis,
+                turn_number: turn_number,
+                final_report: final_report,
+                effective_run_ref: effective_run_ref,
+                extra_input_signals: %{"workspace_check_error" => inspect(reason)}
+              },
+              "planning_workspace_check_failed",
+              "pause because the workspace cleanliness check failed before implementation can begin"
+            )
+        end
 
       true ->
         reason = planning_phase_block_reason(analysis)
 
-        dispatch_run_decision(
-          turn_context_recipient(context),
-          issue,
-          :stop,
+        pause_planning_phase(
+          context,
+          %{
+            issue: issue,
+            analysis: analysis,
+            turn_number: turn_number,
+            final_report: final_report,
+            effective_run_ref: effective_run_ref
+          },
           reason,
-          "stop because planning phase did not produce a safe implementation handoff",
-          run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report, %{
-            "completed_phase" => "planning",
-            "next_phase" => nil,
-            "planning_block_reason" => reason
-          })
+          "pause because planning phase did not produce a safe implementation handoff"
         )
-
-        {:done, issue, clear_live_update_prompt(context)}
     end
   end
 
+  defp pause_planning_phase(context, planning_args, reason, summary) do
+    issue = Map.fetch!(planning_args, :issue)
+    analysis = Map.fetch!(planning_args, :analysis)
+    turn_number = Map.fetch!(planning_args, :turn_number)
+    final_report = Map.fetch!(planning_args, :final_report)
+    effective_run_ref = Map.fetch!(planning_args, :effective_run_ref)
+    extra_input_signals = Map.get(planning_args, :extra_input_signals, %{})
+
+    dispatch_run_decision(
+      turn_context_recipient(context),
+      issue,
+      :pause,
+      reason,
+      summary,
+      run_decision_opts(
+        context,
+        issue,
+        turn_number,
+        effective_run_ref,
+        analysis,
+        final_report,
+        Map.merge(
+          %{"completed_phase" => "planning", "next_phase" => nil, "planning_block_reason" => reason},
+          extra_input_signals
+        )
+      )
+    )
+
+    {:pause,
+     final_report_interrupt(
+       context,
+       issue,
+       effective_run_ref,
+       analysis,
+       final_report,
+       turn_number,
+       reason
+     ), clear_live_update_prompt(context)}
+  end
+
   defp planning_phase_ready?(%{status: :valid, report: report}) when is_map(report) do
-    active_issue_state?(Map.get(report, "next_state")) and implementation_plan_present?(report) and planning_changed_files(report) == []
+    active_issue_state?(Map.get(report, "next_state")) and
+      implementation_plan_present?(report) and
+      planning_changed_files(report) == []
   end
 
   defp planning_phase_ready?(_analysis), do: false

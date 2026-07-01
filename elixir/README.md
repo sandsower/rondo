@@ -289,8 +289,9 @@ Notes:
   `frontier` and `standard` tier candidates, native Rondo separates fresh ticket runs into a generic
   planning phase followed by an implementation phase: planning defaults to `frontier`, writes a
   `planning_completed` checkpoint, and the implementation continuation defaults to `standard` unless
-  the planning final report recommends `recommended_implementation_tier: "heavy"`. These phases are
-  provider-neutral (`planning` / `implementation`) and do not require Beislið skill names. Resolved
+  the planning final report recommends `recommended_implementation_tier: "heavy"`. Unsafe planning
+  reports pause instead of continuing, and implementation only starts after the workspace is verified
+  clean. These phases are provider-neutral (`planning` / `implementation`) and do not require Beislið skill names. Resolved
   routing is passed to adapters per run and persisted under `agent.model_routing` in the run ledger.
 - `agent.max_turns` caps how many back-to-back agent turns Rondo will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.

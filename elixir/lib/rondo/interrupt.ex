@@ -97,6 +97,34 @@ defmodule Rondo.Interrupt do
     "The last assistant message reported a terminal state, but it was not valid rondo.final_report/v0 JSON."
   end
 
+  defp final_report_question("planning_final_report_invalid") do
+    "The planning turn did not produce valid rondo.final_report/v0 JSON."
+  end
+
+  defp final_report_question("planning_final_report_terminal") do
+    "The planning report marked the issue terminal, so implementation cannot begin."
+  end
+
+  defp final_report_question("planning_handoff_missing") do
+    "The planning report did not include a usable implementation plan."
+  end
+
+  defp final_report_question("planning_report_declared_changes") do
+    "The planning report declared file changes, so implementation cannot begin."
+  end
+
+  defp final_report_question("planning_workspace_dirty") do
+    "The planning turn left the workspace dirty. Clean or discard those changes before implementation can begin."
+  end
+
+  defp final_report_question("planning_workspace_check_failed") do
+    "Rondo could not verify the workspace was clean before implementation could begin."
+  end
+
+  defp final_report_question("planning_handoff_unsafe") do
+    "The planning report did not produce a safe implementation handoff."
+  end
+
   defp final_report_question("repeated_final_report") do
     "The assistant repeated the same final report across continuations. Rondo paused to avoid a loop."
   end
