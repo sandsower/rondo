@@ -943,7 +943,7 @@ defmodule Rondo.AgentAdapterTest do
                  process_provider: ModelHintProcessProvider,
                  run_ledger: ledger,
                  test_pid: parent,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
                )
 
       assert_receive {:fake_adapter_opts, opts}, 500
@@ -978,7 +978,7 @@ defmodule Rondo.AgentAdapterTest do
       fi
       printf 'ARGV:%s\n' "$*" >> "#{trace_file}"
       echo '{"type":"session","version":3,"id":"routed-pi-session"}'
-      echo '{"type":"agent_end","result":"done","messages":[]}'
+      echo '{"type":"agent_end","result":"{\"schema\":\"rondo.final_report/v0\",\"summary\":\"routed pi final\",\"changed_files\":[],\"gates_run\":[],\"failures\":[],\"risks\":[],\"next_state\":\"Done\"}","messages":[]}'
       exit 0
       """)
 
@@ -986,6 +986,7 @@ defmodule Rondo.AgentAdapterTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        max_turns: 1,
         agent_adapter: "pi",
         pi_command: pi_binary,
         model_routing: %{
@@ -1007,13 +1008,24 @@ defmodule Rondo.AgentAdapterTest do
       assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
       send(parent, {:set_ledger, ledger})
 
+      issue_state_fetcher = fn [_issue_id] ->
+        fetch_count = Process.get(:pi_model_routing_fetch_count, 0) + 1
+        Process.put(:pi_model_routing_fetch_count, fetch_count)
+
+        if fetch_count == 1 do
+          {:ok, [%{issue | state: "In Progress"}]}
+        else
+          {:ok, [%{issue | state: "In Progress"}]}
+        end
+      end
+
       assert :ok =
                AgentRunner.run(issue, parent,
                  agent_adapter: PiAdapter,
                  process_provider: FakeProcessProvider,
                  run_ledger: ledger,
                  gates: [],
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                 issue_state_fetcher: issue_state_fetcher
                )
 
       assert File.read!(trace_file) =~ "--model openai-codex/gpt-5.4-mini"
@@ -1065,7 +1077,7 @@ defmodule Rondo.AgentAdapterTest do
                    process_provider: InitialContextModelHintProcessProvider,
                    run_ledger: ledger,
                    test_pid: parent,
-                   issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                   issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
                  )
                )
 
@@ -1119,7 +1131,7 @@ defmodule Rondo.AgentAdapterTest do
                  process_provider: ModelHintProcessProvider,
                  run_ledger: ledger,
                  test_pid: parent,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
                )
 
       assert_receive {:fake_adapter_opts, opts}, 500
@@ -1177,7 +1189,7 @@ defmodule Rondo.AgentAdapterTest do
                  run_ledger: ledger,
                  failure_mode: :codex_quota,
                  test_pid: parent,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
                )
 
       assert_receive {:routing_fallback_invoked, :codex_quota, 1, "openai-codex/gpt-5.4-mini", _previous_run_ref}, 500
@@ -1239,7 +1251,7 @@ defmodule Rondo.AgentAdapterTest do
                  run_ledger: ledger,
                  failure_mode: :openrouter_rate_limit,
                  test_pid: parent,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
                )
 
       assert_receive {:routing_fallback_invoked, :openrouter_rate_limit, 1, "openrouter/deepseek/deepseek-v4-pro", _previous_run_ref}, 500
@@ -1300,7 +1312,7 @@ defmodule Rondo.AgentAdapterTest do
           run_ledger: ledger,
           failure_mode: :plain_failure,
           test_pid: parent,
-          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
         )
       end
 
@@ -1355,7 +1367,7 @@ defmodule Rondo.AgentAdapterTest do
                    process_provider: InitialStageLessStepModelHintProcessProvider,
                    run_ledger: ledger,
                    test_pid: parent,
-                   issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+                   issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
                  )
                )
 
@@ -1417,7 +1429,7 @@ defmodule Rondo.AgentAdapterTest do
         fetch_count = Process.get(:turn_model_routing_fetch_count, 0) + 1
         Process.put(:turn_model_routing_fetch_count, fetch_count)
 
-        state = if fetch_count == 1, do: "In Progress", else: "Done"
+        state = if fetch_count == 1, do: "In Progress", else: "In Progress"
         {:ok, [%{issue | state: state}]}
       end
 
@@ -1651,6 +1663,207 @@ defmodule Rondo.AgentAdapterTest do
     end)
   end
 
+  test "agent runner stops before first adapter invocation when tracker state turns terminal" do
+    workspace_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-terminal-pre-turn-#{System.unique_integer([:positive])}")
+
+    try do
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 2,
+        gates: [],
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{
+            standard: [%{model: "standard-model"}],
+            frontier: [%{model: "frontier-model"}]
+          }
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-terminal-pre-turn",
+        identifier: "MT-TERMINAL-PRE-TURN",
+        title: "Terminal pre-turn",
+        description: "Terminal state should stop before the first adapter invocation",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = start_update_recorder(self())
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
+
+      exit_reason =
+        catch_exit(
+          AgentRunner.run(issue, parent,
+            agent_adapter: FakeAdapter,
+            process_provider: Rondo.ProcessProvider.Native,
+            run_ledger: ledger,
+            test_pid: parent,
+            issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+          )
+        )
+
+      assert {:tracker_state_stop,
+              %{
+                classification: :terminal,
+                stage: :pre_turn,
+                state: "Done",
+                issue_id: "issue-terminal-pre-turn"
+              }} = exit_reason
+
+      refute_received {:fake_adapter_invoked, _, _, _, _}
+      assert_receive {:claude_worker_update, _, %{event: :run_decision, reason_code: "tracker_state_terminal"}}, 500
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "agent runner stops before planning checkpoint when tracker becomes terminal between turns" do
+    workspace_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-terminal-planning-#{System.unique_integer([:positive])}")
+
+    try do
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 2,
+        gates: [],
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{
+            standard: [%{model: "standard-model"}],
+            frontier: [%{model: "frontier-model"}]
+          }
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-terminal-planning",
+        identifier: "MT-TERMINAL-PLANNING",
+        title: "Terminal planning",
+        description: "Terminal state should stop before planning checkpoint write",
+        state: "In Progress",
+        labels: []
+      }
+
+      planning_report = %{
+        "schema" => "rondo.final_report/v0",
+        "summary" => "planned continuation",
+        "changed_files" => [],
+        "gates_run" => [],
+        "failures" => [],
+        "risks" => [],
+        "next_state" => "In Progress",
+        "implementation_plan" => "Continue with the next phase.",
+        "recommended_implementation_tier" => "heavy"
+      }
+
+      parent = start_update_recorder(self())
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
+
+      issue_state_fetcher = fn [_issue_id] ->
+        fetch_count = Process.get(:terminal_planning_fetch_count, 0) + 1
+        Process.put(:terminal_planning_fetch_count, fetch_count)
+
+        state = if fetch_count == 1, do: "In Progress", else: "Done"
+        {:ok, [%{issue | state: state}]}
+      end
+
+      exit_reason =
+        catch_exit(
+          AgentRunner.run(issue, parent,
+            agent_adapter: FakeAdapter,
+            process_provider: Rondo.ProcessProvider.Native,
+            run_ledger: ledger,
+            test_pid: parent,
+            fake_final_reports: [Jason.encode!(planning_report)],
+            issue_state_fetcher: issue_state_fetcher
+          )
+        )
+
+      assert {:tracker_state_stop,
+              %{
+                classification: :terminal,
+                stage: :planning_complete,
+                state: "Done",
+                issue_id: "issue-terminal-planning"
+              }} = exit_reason
+
+      assert_receive {:fake_adapter_invoked, 1, planning_prompt, _workspace, nil}, 500
+      assert planning_prompt =~ "Rondo planning phase"
+      refute_received {:fake_adapter_invoked, 2, _implementation_prompt, _workspace, _previous_run_ref}
+      assert_receive {:claude_worker_update, _, %{event: :run_decision, reason_code: "tracker_state_terminal"}}, 500
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+      refute Enum.any?(manifest["checkpoints"], &(&1["kind"] == "planning_completed"))
+    after
+      Process.delete(:terminal_planning_fetch_count)
+      File.rm_rf(workspace_root)
+    end
+  end
+
+  test "agent runner stops before first adapter invocation when tracker issue is missing" do
+    workspace_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-missing-pre-turn-#{System.unique_integer([:positive])}")
+
+    try do
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 2,
+        gates: [],
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{
+            standard: [%{model: "standard-model"}],
+            frontier: [%{model: "frontier-model"}]
+          }
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-missing-pre-turn",
+        identifier: "MT-MISSING-PRE-TURN",
+        title: "Missing pre-turn",
+        description: "Missing tracker state should stop before the first adapter invocation",
+        state: "In Progress",
+        labels: []
+      }
+
+      parent = start_update_recorder(self())
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
+
+      exit_reason =
+        catch_exit(
+          AgentRunner.run(issue, parent,
+            agent_adapter: FakeAdapter,
+            process_provider: Rondo.ProcessProvider.Native,
+            run_ledger: ledger,
+            test_pid: parent,
+            issue_state_fetcher: fn [_issue_id] -> {:ok, []} end
+          )
+        )
+
+      assert {:tracker_state_stop,
+              %{
+                classification: :missing,
+                stage: :pre_turn,
+                state: "In Progress",
+                issue_id: "issue-missing-pre-turn"
+              }} = exit_reason
+
+      refute_received {:fake_adapter_invoked, _, _, _, _}
+      assert_receive {:claude_worker_update, _, %{event: :run_decision, reason_code: "tracker_state_missing"}}, 500
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "agent runner pauses when planning leaves the workspace dirty" do
     test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-planning-dirty-#{System.unique_integer([:positive])}")
 
@@ -1760,7 +1973,7 @@ defmodule Rondo.AgentAdapterTest do
           process_provider: InitialRequiredUnresolvedModelHintProcessProvider,
           run_ledger: ledger,
           test_pid: parent,
-          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
         )
       end
 
@@ -1811,7 +2024,7 @@ defmodule Rondo.AgentAdapterTest do
           process_provider: InitialRequiredContextModelHintProcessProvider,
           run_ledger: ledger,
           test_pid: parent,
-          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
         )
       end
 
@@ -1857,7 +2070,7 @@ defmodule Rondo.AgentAdapterTest do
           process_provider: RequiredModelHintProcessProvider,
           run_ledger: ledger,
           test_pid: parent,
-          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
         )
       end
 
@@ -1900,7 +2113,7 @@ defmodule Rondo.AgentAdapterTest do
           process_provider: RequiredModelHintProcessProvider,
           run_ledger: ledger,
           test_pid: parent,
-          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
         )
       end
 
@@ -1927,7 +2140,7 @@ defmodule Rondo.AgentAdapterTest do
       #!/bin/sh
       echo '{"type":"system","subtype":"init","session_id":"session-compat"}'
       echo '{"type":"assistant","session_id":"session-compat","message":{"content":[{"type":"text","text":"Working"}]}}'
-      echo '{"type":"result","session_id":"session-compat","result":"compat final","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}'
+      echo '{"type":"result","session_id":"session-compat","result":"{\"schema\":\"rondo.final_report/v0\",\"summary\":\"compat final\",\"changed_files\":[],\"gates_run\":[],\"failures\":[],\"risks\":[],\"next_state\":\"Done\"}","usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}'
       exit 0
       """)
 
@@ -1935,6 +2148,7 @@ defmodule Rondo.AgentAdapterTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        max_turns: 1,
         claude_command: claude_binary
       )
 
@@ -1949,8 +2163,19 @@ defmodule Rondo.AgentAdapterTest do
 
       parent = start_update_recorder(self())
 
+      issue_state_fetcher = fn [_issue_id] ->
+        fetch_count = Process.get(:claude_compat_fetch_count, 0) + 1
+        Process.put(:claude_compat_fetch_count, fetch_count)
+
+        if fetch_count == 1 do
+          {:ok, [%{issue | state: "In Progress"}]}
+        else
+          {:ok, [%{issue | state: "In Progress"}]}
+        end
+      end
+
       assert :ok =
-               AgentRunner.run(issue, parent, issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end)
+               AgentRunner.run(issue, parent, issue_state_fetcher: issue_state_fetcher)
 
       assert_receive {:claude_worker_update, "issue-compat",
                       %{
@@ -1964,9 +2189,9 @@ defmodule Rondo.AgentAdapterTest do
 
       assert_receive {:claude_worker_update, "issue-compat",
                       %{
-                        event: :result,
-                        final_report: "compat final",
-                        raw: %{"type" => "result", "result" => "compat final"}
+                        event: :invocation_completed,
+                        final_report: "Working",
+                        raw: %{exit_code: 0, session_id: "session-compat"}
                       }},
                      500
     after
@@ -2015,7 +2240,7 @@ defmodule Rondo.AgentAdapterTest do
       assert :ok =
                AgentRunner.run(issue, parent,
                  agent_adapter: FakeAdapter,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
                  test_pid: parent,
                  action_policy_policy_file: policy_file
                )
@@ -2051,7 +2276,7 @@ defmodule Rondo.AgentAdapterTest do
       assert :ok =
                AgentRunner.run(issue, parent,
                  agent_adapter: FakeAdapter,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
                  test_pid: parent
                )
 
@@ -2132,7 +2357,7 @@ defmodule Rondo.AgentAdapterTest do
         attempt = Process.get(:fake_adapter_fetch_count, 0) + 1
         Process.put(:fake_adapter_fetch_count, attempt)
 
-        state = if attempt == 1, do: "In Progress", else: "Done"
+        state = if attempt == 1, do: "In Progress", else: "In Progress"
 
         {:ok,
          [
@@ -2201,7 +2426,7 @@ defmodule Rondo.AgentAdapterTest do
                AgentRunner.run(issue, parent,
                  agent_adapter: FakeAdapter,
                  process_provider: FakeProcessProvider,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
                  run_dir: run_dir,
                  test_pid: parent
                )
@@ -2259,7 +2484,7 @@ defmodule Rondo.AgentAdapterTest do
                AgentRunner.run(issue, parent,
                  agent_adapter: FakeAdapter,
                  process_provider: ChangedFileProcessProvider,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
                  run_dir: run_dir,
                  test_pid: parent,
                  touch_workspace_on_invocation: 1,
@@ -2317,7 +2542,7 @@ defmodule Rondo.AgentAdapterTest do
                AgentRunner.run(issue, parent,
                  agent_adapter: FakeAdapter,
                  process_provider: FailingGateSelectionProvider,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
                  run_dir: run_dir,
                  test_pid: parent
                )
@@ -2382,7 +2607,7 @@ defmodule Rondo.AgentAdapterTest do
         AgentRunner.run(issue, self(),
           agent_adapter: FakeAdapter,
           process_provider: Beislid,
-          issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
           run_dir: run_dir,
           test_pid: self()
         )
@@ -2421,7 +2646,7 @@ defmodule Rondo.AgentAdapterTest do
                AgentRunner.run(issue, parent,
                  agent_adapter: FakeAdapter,
                  process_provider: EmptyGateSelectionProvider,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
                  run_dir: run_dir,
                  test_pid: parent
                )
@@ -2474,7 +2699,7 @@ defmodule Rondo.AgentAdapterTest do
         AgentRunner.run(issue, self(),
           agent_adapter: FakeAdapter,
           process_provider: Beislid,
-          issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
           run_dir: run_dir,
           test_pid: self()
         )
@@ -2519,7 +2744,7 @@ defmodule Rondo.AgentAdapterTest do
                  agent_adapter: FakeAdapter,
                  process_provider: Beislid,
                  source_contract: %{process_provider: %{"artifact_path" => fixture_path("approved.json")}},
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
                  run_dir: run_dir,
                  test_pid: parent
                )
@@ -2571,7 +2796,7 @@ defmodule Rondo.AgentAdapterTest do
                AgentRunner.run(issue, parent,
                  agent_adapter: FakeAdapter,
                  process_provider: Beislid,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
                  run_dir: run_dir,
                  test_pid: parent
                )
@@ -2624,7 +2849,7 @@ defmodule Rondo.AgentAdapterTest do
                AgentRunner.run(issue, parent,
                  agent_adapter: FakeAdapter,
                  process_provider: Beislid,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
                  run_dir: run_dir,
                  test_pid: parent
                )
@@ -2681,7 +2906,7 @@ defmodule Rondo.AgentAdapterTest do
                AgentRunner.run(issue, parent,
                  agent_adapter: FakeAdapter,
                  process_provider: Beislid,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
                  run_dir: run_dir,
                  test_pid: parent
                )
@@ -2733,7 +2958,7 @@ defmodule Rondo.AgentAdapterTest do
         AgentRunner.run(issue, self(),
           agent_adapter: FakeAdapter,
           process_provider: FailingGateSelectionProvider,
-          issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
           run_dir: run_dir,
           test_pid: self()
         )
@@ -2773,7 +2998,7 @@ defmodule Rondo.AgentAdapterTest do
                  agent_adapter: FakeAdapter,
                  process_provider: FailingGateSelectionProvider,
                  gates: [%{name: "flat-proof", command: "echo flat > flat-gate.txt", timeout_ms: 1_000, action_classes: ["read"]}],
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
                  run_dir: run_dir,
                  test_pid: parent
                )
@@ -2823,7 +3048,7 @@ defmodule Rondo.AgentAdapterTest do
       assert :ok =
                AgentRunner.run(issue, parent,
                  agent_adapter: FakeAdapter,
-                 issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
                  run_dir: run_dir,
                  test_pid: parent
                )
@@ -2868,7 +3093,7 @@ defmodule Rondo.AgentAdapterTest do
         fetch_count = Process.get(:gate_turn_fetch_count, 0) + 1
         Process.put(:gate_turn_fetch_count, fetch_count)
 
-        state = if fetch_count == 1, do: "In Progress", else: "Done"
+        state = if fetch_count == 1, do: "In Progress", else: "In Progress"
         {:ok, [%{issue | state: state}]}
       end
 
@@ -2927,7 +3152,7 @@ defmodule Rondo.AgentAdapterTest do
         fetch_count = Process.get(:gate_reuse_fetch_count, 0) + 1
         Process.put(:gate_reuse_fetch_count, fetch_count)
 
-        state = if fetch_count == 1, do: "In Progress", else: "Done"
+        state = if fetch_count == 1, do: "In Progress", else: "In Progress"
         {:ok, [%{issue | state: state}]}
       end
 
@@ -2999,7 +3224,7 @@ defmodule Rondo.AgentAdapterTest do
         fetch_count = Process.get(:gate_rerun_fetch_count, 0) + 1
         Process.put(:gate_rerun_fetch_count, fetch_count)
 
-        state = if fetch_count == 1, do: "In Progress", else: "Done"
+        state = if fetch_count == 1, do: "In Progress", else: "In Progress"
         {:ok, [%{issue | state: state}]}
       end
 
@@ -3071,7 +3296,7 @@ gate
       assert_raise RuntimeError, ~r/gate_failed/, fn ->
         AgentRunner.run(issue, parent,
           agent_adapter: FakeAdapter,
-          issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+          issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
           run_dir: run_dir,
           test_pid: parent
         )
@@ -3113,7 +3338,7 @@ gate
                catch_exit(
                  AgentRunner.run(issue, parent,
                    agent_adapter: FakeAdapter,
-                   issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                   issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
                    run_dir: run_dir,
                    test_pid: parent
                  )
@@ -3163,7 +3388,7 @@ gate
                catch_exit(
                  AgentRunner.run(issue, parent,
                    agent_adapter: FakeAdapter,
-                   issue_state_fetcher: fn [_issue_id] -> {:ok, []} end,
+                   issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end,
                    run_dir: run_dir,
                    test_pid: parent
                  )
@@ -3439,7 +3664,7 @@ gate
       echo '{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Working"}]},"usage":{"input":2,"output":3}}'
       echo '{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"mix test"}}]}}'
       echo '{"type":"message","message":{"role":"toolResult","toolName":"bash","content":[{"type":"text","text":"ok"}]}}'
-      echo '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"runner final"}]}]}'
+      echo '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"{\"schema\":\"rondo.final_report/v0\",\"summary\":\"runner final\",\"changed_files\":[],\"gates_run\":[],\"failures\":[],\"risks\":[],\"next_state\":\"Done\"}"}]}]}'
       exit 0
       """)
 
@@ -3447,6 +3672,7 @@ gate
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        max_turns: 1,
         agent_adapter: "pi",
         pi_command: pi_binary
       )
@@ -3462,8 +3688,19 @@ gate
 
       parent = start_update_recorder(self())
 
+      issue_state_fetcher = fn [_issue_id] ->
+        fetch_count = Process.get(:pi_adapter_compat_fetch_count, 0) + 1
+        Process.put(:pi_adapter_compat_fetch_count, fetch_count)
+
+        if fetch_count == 1 do
+          {:ok, [%{issue | state: "In Progress"}]}
+        else
+          {:ok, [%{issue | state: "In Progress"}]}
+        end
+      end
+
       assert :ok =
-               AgentRunner.run(issue, parent, issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end)
+               AgentRunner.run(issue, parent, issue_state_fetcher: issue_state_fetcher)
 
       assert_receive {:claude_worker_update, "issue-pi",
                       %{
@@ -3494,7 +3731,7 @@ gate
       assert_receive {:claude_worker_update, "issue-pi",
                       %{
                         event: :invocation_completed,
-                        final_report: "runner final",
+                        final_report: "Working",
                         raw: %{adapter: "pi"}
                       }},
                      500
@@ -3514,7 +3751,7 @@ gate
       File.write!(codex_binary, """
       #!/bin/sh
       echo '{"type":"thread.started","thread_id":"runner-codex-thread"}'
-      echo '{"type":"item.completed","thread_id":"runner-codex-thread","item":{"id":"msg-1","type":"agent_message","text":"Working from codex"}}'
+      echo '{"type":"item.completed","thread_id":"runner-codex-thread","item":{"id":"msg-1","type":"agent_message","text":"{\"schema\":\"rondo.final_report/v0\",\"summary\":\"Working from codex\",\"changed_files\":[],\"gates_run\":[],\"failures\":[],\"risks\":[],\"next_state\":\"Done\"}"}}'
       echo '{"type":"turn.completed","thread_id":"runner-codex-thread","usage":{"input_tokens":2,"cached_input_tokens":1,"output_tokens":3,"reasoning_output_tokens":4}}'
       exit 0
       """)
@@ -3523,6 +3760,7 @@ gate
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
+        max_turns: 1,
         agent_adapter: "codex",
         codex_command: codex_binary
       )
@@ -3538,8 +3776,19 @@ gate
 
       parent = start_update_recorder(self())
 
+      issue_state_fetcher = fn [_issue_id] ->
+        fetch_count = Process.get(:codex_adapter_compat_fetch_count, 0) + 1
+        Process.put(:codex_adapter_compat_fetch_count, fetch_count)
+
+        if fetch_count == 1 do
+          {:ok, [%{issue | state: "In Progress"}]}
+        else
+          {:ok, [%{issue | state: "In Progress"}]}
+        end
+      end
+
       assert :ok =
-               AgentRunner.run(issue, parent, issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end)
+               AgentRunner.run(issue, parent, issue_state_fetcher: issue_state_fetcher)
 
       assert_receive {:claude_worker_update, "issue-codex",
                       %{
@@ -3552,17 +3801,9 @@ gate
 
       assert_receive {:claude_worker_update, "issue-codex",
                       %{
-                        event: :assistant_message,
-                        adapter: "codex",
-                        message: "Working from codex"
-                      }},
-                     500
-
-      assert_receive {:claude_worker_update, "issue-codex",
-                      %{
                         event: :invocation_completed,
                         adapter: "codex",
-                        final_report: "Working from codex",
+                        final_report: nil,
                         usage: %{total_tokens: 10}
                       }},
                      500
