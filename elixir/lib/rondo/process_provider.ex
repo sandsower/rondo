@@ -8,7 +8,7 @@ defmodule Rondo.ProcessProvider do
   """
 
   alias Rondo.{Config, Linear.Issue}
-  alias Rondo.ProcessProvider.{Beislid, Native}
+  alias Rondo.ProcessProvider.{Beislid, Failure, Native}
 
   @type capability_status :: :ok | :degraded | :unsupported | :missing
   @type capabilities :: map()
@@ -84,6 +84,11 @@ defmodule Rondo.ProcessProvider do
   @spec action_policy_evaluator(module()) :: (String.t(), [String.t()], keyword() -> {:ok, map()} | {:error, term()})
   def action_policy_evaluator(provider \\ provider_module()) do
     fn action, classes, opts -> provider.evaluate_action_policy(action, classes, opts) end
+  end
+
+  @spec failure_payload(module() | atom() | String.t(), atom() | String.t(), term(), keyword()) :: map()
+  def failure_payload(provider, phase, reason, opts \\ []) do
+    Failure.payload(provider, phase, reason, opts)
   end
 
   @spec gate_selection_result([Config.gate()], keyword()) :: gate_selection_result()

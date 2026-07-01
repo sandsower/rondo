@@ -1,0 +1,33 @@
+{
+  "schema": "beislid-process-artifact-v1",
+  "id": "beislid-fixture-ask-policy",
+  "status": "approved",
+  "gates": [
+    {
+      "name": "beislid-unit",
+      "command": "echo beislid > beislid-gate.txt",
+      "timeout_ms": 1000,
+      "reason": "matched Beislið post-turn proof requirement",
+      "action_classes": ["read"]
+    }
+  ],
+  "skipped": [
+    {"name": "slow-proof", "reason": "not required for this slice"}
+  ],
+  "warnings": [
+    {"message": "fixture-backed Beislið artifact"}
+  ],
+  "guides": [
+    {"id": "review-guide", "status": "deferred", "reason": "guide dispatch is not implemented in RON-9"}
+  ],
+  "proof_requirements": [
+    {"id": "unit-proof", "status": "covered_by_gate", "gate": "beislid-unit"}
+  ],
+  "metadata": {
+    "artifact_ref": "beislid-fixture-ask-policy",
+    "source_kind": "fixture"
+  },
+  "action_policy": {
+    "decision": "ask"
+  }
+}

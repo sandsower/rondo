@@ -296,18 +296,24 @@ defmodule Rondo.CleanEvalTest do
         process_provider_artifact_path: artifact_path
       )
 
+    request_manifest_path = Path.join(context.root, "request.json")
+    File.write!(request_manifest_path, Jason.encode!(%{"schema" => "rondo-execution-request-v1"}))
     write_patch_artifacts!(context)
 
     assert {:ok, _ledger, result} =
              CleanEval.run(context.ledger,
                process_provider: Rondo.ProcessProvider.Beislid,
-               source_contract: %{path: Path.join(context.root, "request.json")}
+               source_contract: %{path: request_manifest_path}
              )
 
     assert result.status == :error
-    assert result.reason =~ "gate_selection_failed"
-    assert result.reason =~ "artifact_not_approved"
+    assert result.reason_code == "process_provider_artifact_not_approved"
+    assert result.process_provider_failure.provider_kind == "beislid"
+    assert result.process_provider_failure.artifact_source == :config
+    assert result.process_provider_failure.artifact_path == artifact_path
+    assert result.reason =~ "not approved"
     assert read_result_json!(context)["status"] == "error"
+    assert read_result_json!(context)["reason_code"] == "process_provider_artifact_not_approved"
   end
 
   test "treats changed-file selector empty gate selections as errors" do
@@ -334,12 +340,12 @@ defmodule Rondo.CleanEvalTest do
   end
 
   test "invalid provider artifacts do not fall back to native gates" do
-    for {suffix, reason} <- [
-          {"field", {:invalid_artifact_field, "gates"}},
-          {"artifact", :invalid_artifact},
-          {"artifact-id", :invalid_artifact_id},
-          {"schema", {:unsupported_artifact_schema, "future"}},
-          {"json", {:invalid_json, "/tmp/artifact.json", "bad json"}}
+    for {suffix, reason, expected_reason_code} <- [
+          {"field", {:invalid_artifact_field, "gates"}, "process_provider_invalid_artifact_field_gates"},
+          {"artifact", :invalid_artifact, "process_provider_invalid_artifact"},
+          {"artifact-id", :invalid_artifact_id, "process_provider_invalid_artifact_id"},
+          {"schema", {:unsupported_artifact_schema, "future"}, "process_provider_unsupported_artifact_schema"},
+          {"json", {:invalid_json, "/tmp/artifact.json", "bad json"}, "process_provider_invalid_json"}
         ] do
       context = setup_run("clean-eval-invalid-artifact-#{suffix}", clean_eval_enabled: true)
       write_patch_artifacts!(context)
@@ -347,7 +353,8 @@ defmodule Rondo.CleanEvalTest do
 
       assert {:ok, _ledger, result} = CleanEval.run(context.ledger, process_provider: ConfigurableProcessProvider)
       assert result.status == :error
-      assert result.reason =~ "gate_selection_failed"
+      assert result.reason_code == expected_reason_code
+      assert result.reason =~ "artifact_path"
     end
   after
     Process.delete(:clean_eval_select_gates_result)
@@ -365,7 +372,8 @@ defmodule Rondo.CleanEvalTest do
 
     assert {:ok, _ledger, result} = CleanEval.run(context.ledger, process_provider: FailingProcessProvider)
     assert result.status == :error
-    assert result.reason =~ "gate_selection_failed"
+    assert result.reason_code == "process_provider_gate_selection_failed"
+    assert result.reason =~ "provider_unavailable"
   end
 
   test "uses Beislið pre-PR gates and action policy when the artifact provides policy" do
@@ -415,6 +423,163 @@ defmodule Rondo.CleanEvalTest do
     assert gate_selection["metadata"]["provider"] == "beislid"
     assert gate_selection["metadata"]["action_policy_provider"] == "native"
     assert gate_selection["metadata"]["stage"] == "pre_pr"
+  end
+
+  test "returns an error when a required Beislið artifact lacks policy" do
+    artifact_path = beislid_fixture_path("no_policy.json")
+
+    context =
+      setup_run("clean-eval-beislid-required-policy",
+        clean_eval_enabled: true,
+        process_provider_required: true,
+        process_provider_kind: "beislid",
+        process_provider_artifact_path: artifact_path
+      )
+
+    write_patch_artifacts!(context)
+
+    assert {:ok, _ledger, result} =
+             CleanEval.run(context.ledger,
+               process_provider: Rondo.ProcessProvider.Beislid
+             )
+
+    assert result.status == :error
+    assert result.reason_code == "process_provider_action_policy_unavailable"
+    assert result.process_provider_failure.provider_kind == "beislid"
+    assert result.process_provider_failure.artifact_path == artifact_path
+    assert result.process_provider_failure.phase == "action_policy"
+    assert read_result_json!(context)["reason_code"] == "process_provider_action_policy_unavailable"
+    assert read_result_json!(context)["process_provider_failure"]["artifact_path"] == artifact_path
+  end
+
+  test "returns an error when a required Beislið artifact asks for approval or is denied" do
+    for {filename, expected_reason_code, message_fragment} <- [
+          {"ask_policy.json", "process_provider_action_policy_requires_approval", "requires approval"},
+          {"deny_policy.json", "process_provider_action_policy_denied", "rejected by action policy"}
+        ] do
+      artifact_path = beislid_fixture_path(filename)
+
+      context =
+        setup_run("clean-eval-beislid-required-policy-#{filename}",
+          clean_eval_enabled: true,
+          process_provider_kind: "beislid",
+          process_provider_required: true,
+          process_provider_artifact_path: artifact_path
+        )
+
+      write_patch_artifacts!(context)
+
+      assert {:ok, _ledger, result} =
+               CleanEval.run(context.ledger,
+                 process_provider: Rondo.ProcessProvider.Beislid
+               )
+
+      assert result.status == :error
+      assert result.reason_code == expected_reason_code
+      assert result.process_provider_failure.provider_kind == "beislid"
+      assert result.process_provider_failure.artifact_path == artifact_path
+      assert result.process_provider_failure.phase == "action_policy"
+      assert result.process_provider_failure.message =~ message_fragment
+      assert read_result_json!(context)["reason_code"] == expected_reason_code
+      assert read_result_json!(context)["process_provider_failure"]["artifact_path"] == artifact_path
+    end
+  end
+
+  test "treats optional Beislið policy-blocked summaries as gate errors" do
+    artifact_path = beislid_fixture_path("approved.json")
+
+    context =
+      setup_run("clean-eval-beislid-optional-policy-blocked",
+        clean_eval_enabled: true,
+        process_provider_kind: "beislid",
+        process_provider_artifact_path: artifact_path
+      )
+
+    write_patch_artifacts!(context)
+
+    gate_runner = fn _gates, workspace, _opts ->
+      {:error,
+       %{
+         status: :policy_blocked,
+         results_path: "clean_eval/gates/results.json",
+         results: [
+           %{
+             name: "policy",
+             command: "true",
+             cwd: workspace,
+             stdout_path: nil,
+             stderr_path: nil,
+             status: :failed,
+             exit_status: 1,
+             duration_ms: 0,
+             retryable: false,
+             environment_failure: false
+           }
+         ]
+       }}
+    end
+
+    assert {:ok, _ledger, result} =
+             CleanEval.run(context.ledger,
+               process_provider: Rondo.ProcessProvider.Beislid,
+               gate_runner: gate_runner
+             )
+
+    assert result.status == :error
+    assert result.gates.status == :policy_blocked
+    assert Enum.any?(result.gates.results, &(&1.status == :failed))
+  end
+
+  test "records policy-blocked and denied summaries without a policy match as required failures" do
+    artifact_path = beislid_fixture_path("approved.json")
+
+    for status <- [:policy_blocked, :policy_denied] do
+      context =
+        setup_run("clean-eval-beislid-required-policy-fallback-#{status}",
+          clean_eval_enabled: true,
+          process_provider_kind: "beislid",
+          process_provider_required: true,
+          process_provider_artifact_path: artifact_path
+        )
+
+      write_patch_artifacts!(context)
+
+      gate_runner = fn _gates, workspace, _opts ->
+        {:error,
+         %{
+           status: status,
+           results_path: "clean_eval/gates/results.json",
+           results: [
+             %{
+               name: "policy",
+               command: "true",
+               cwd: workspace,
+               stdout_path: nil,
+               stderr_path: nil,
+               status: :failed,
+               exit_status: 1,
+               duration_ms: 0,
+               retryable: false,
+               environment_failure: false
+             }
+           ]
+         }}
+      end
+
+      assert {:ok, _ledger, result} =
+               CleanEval.run(context.ledger,
+                 process_provider: Rondo.ProcessProvider.Beislid,
+                 gate_runner: gate_runner
+               )
+
+      assert result.status == :error
+      assert result.reason_code == "process_provider_action_policy_failed"
+      assert result.process_provider_failure.provider_kind == "beislid"
+      assert result.process_provider_failure.artifact_path == artifact_path
+      assert result.process_provider_failure.reason =~ "{:gate_failed,"
+      assert read_result_json!(context)["reason_code"] == "process_provider_action_policy_failed"
+      assert read_result_json!(context)["process_provider_failure"]["artifact_path"] == artifact_path
+    end
   end
 
   test "passes with apply-only evaluation when no gates are configured" do

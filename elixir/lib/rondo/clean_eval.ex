@@ -213,20 +213,24 @@ defmodule Rondo.CleanEval do
         empty_gate_selection_outcome(gate_selection)
 
       {:ok, gate_selection} ->
-        {action_policy_provider, gate_selection} = action_policy_provider_for_gates(gate_selection, context)
+        case action_policy_provider_for_gates(gate_selection, context) do
+          {:ok, action_policy_provider, gate_selection} ->
+            gate_selection.gates
+            |> context.gate_runner.(context.eval_workspace,
+              run_dir: context.run_dir,
+              gates_dir: @gates_relative_dir,
+              gate_selection: Map.drop(gate_selection, [:gates, :action_policy_provider]),
+              action_policy: true,
+              action_policy_evaluator: action_policy_evaluator(action_policy_provider, context)
+            )
+            |> process_provider_gate_outcome(action_policy_provider, context)
 
-        gate_selection.gates
-        |> context.gate_runner.(context.eval_workspace,
-          run_dir: context.run_dir,
-          gates_dir: @gates_relative_dir,
-          gate_selection: Map.drop(gate_selection, [:gates, :action_policy_provider]),
-          action_policy: true,
-          action_policy_evaluator: action_policy_evaluator(action_policy_provider, context)
-        )
-        |> gates_outcome()
+          {:error, reason} ->
+            process_provider_failure_outcome(reason)
+        end
 
       {:error, reason} ->
-        %{status: :error, reason: "gate_selection_failed #{cap(inspect(reason))}"}
+        process_provider_failure_outcome(reason)
     end
   end
 
@@ -248,14 +252,6 @@ defmodule Rondo.CleanEval do
       warnings: Map.get(gate_selection, :warnings, [])
     }
   end
-
-  defp gates_outcome({:ok, summary}), do: %{status: :pass, gates: Gates.summary_to_json(summary)}
-
-  defp gates_outcome({:error, %{status: gate_status, results: _results} = summary}) do
-    %{status: gates_status(gate_status), gates: Gates.summary_to_json(summary)}
-  end
-
-  defp gates_outcome({:error, reason}), do: %{status: :error, reason: "gate_runner_failed #{cap(inspect(reason))}"}
 
   defp gates_status(:fail), do: :fail
   defp gates_status(_environment_failure), do: :error
@@ -291,15 +287,65 @@ defmodule Rondo.CleanEval do
   defp maybe_put_source_contract(opts, source_contract) when is_map(source_contract), do: Keyword.put(opts, :source_contract, source_contract)
   defp maybe_put_source_contract(opts, _source_contract), do: opts
 
-  defp handle_gate_selection_failure(provider, reason, opts) do
-    if provider == Native or invalid_artifact_reason?(reason) or Config.process_provider_required?() do
-      {:error, reason}
-    else
-      provider_id = provider_id(provider)
-      Logger.warning("Process provider clean-eval gate selection failed provider=#{provider_id} reason=#{inspect(reason)}; falling back to native gates")
+  defp process_provider_failure_outcome({kind, payload}) when kind in [:process_provider_failed, :process_provider_required_failed] do
+    %{
+      status: :error,
+      reason: Map.get(payload, :message) || Map.get(payload, "message") || Map.get(payload, :reason) || inspect(payload),
+      reason_code: Map.get(payload, :reason_code) || Map.get(payload, "reason_code"),
+      process_provider_failure: payload
+    }
+  end
 
-      {:ok, selection} = ProcessProvider.select_gate_selection(Native, opts)
-      {:ok, annotate_native_fallback(selection, provider_id, reason) |> Map.put(:action_policy_provider, Native)}
+  defp process_provider_gate_outcome({:ok, summary}, _provider, _context), do: %{status: :pass, gates: Gates.summary_to_json(summary)}
+
+  defp process_provider_gate_outcome({:error, %{status: status} = summary}, Beislid, context)
+       when status in [:policy_blocked, "policy_blocked", :policy_denied, "policy_denied"] do
+    if Config.process_provider_required?() do
+      payload =
+        process_provider_failure_payload(
+          Beislid,
+          :action_policy,
+          gate_failure_reason(summary),
+          provider_opts(context),
+          true
+        )
+
+      process_provider_failure_outcome({:process_provider_required_failed, payload})
+    else
+      %{status: gates_status(status), gates: Gates.summary_to_json(summary)}
+    end
+  end
+
+  defp process_provider_gate_outcome({:error, %{status: gate_status, results: _results} = summary}, _provider, _context)
+       when gate_status in [:fail, :policy_blocked, :policy_denied, "fail", "policy_blocked", "policy_denied"] do
+    %{status: gates_status(gate_status), gates: Gates.summary_to_json(summary)}
+  end
+
+  defp process_provider_gate_outcome({:error, reason}, _provider, _context) do
+    if is_map(reason) and (Map.has_key?(reason, :results) || Map.has_key?(reason, "results")) do
+      %{status: gates_status(Map.get(reason, :status) || Map.get(reason, "status")), gates: Gates.summary_to_json(reason)}
+    else
+      %{status: :error, reason: "gate_runner_failed #{cap(inspect(reason))}"}
+    end
+  end
+
+  defp handle_gate_selection_failure(provider, reason, opts) do
+    required? = Config.process_provider_required?()
+    payload = process_provider_failure_payload(provider, :gate_selection, reason, opts, required?)
+
+    cond do
+      required? ->
+        {:error, {:process_provider_required_failed, payload}}
+
+      provider == Native or invalid_artifact_reason?(reason) ->
+        {:error, {:process_provider_failed, payload}}
+
+      true ->
+        provider_id = provider_id(provider)
+        Logger.warning("Process provider clean-eval gate selection failed provider=#{provider_id} reason=#{inspect(reason)}; falling back to native gates")
+
+        {:ok, selection} = ProcessProvider.select_gate_selection(Native, opts)
+        {:ok, annotate_native_fallback(selection, provider_id, reason) |> Map.put(:action_policy_provider, Native)}
     end
   end
 
@@ -312,13 +358,33 @@ defmodule Rondo.CleanEval do
   defp invalid_artifact_reason?(_reason), do: false
 
   defp action_policy_provider_for_gates(%{action_policy_provider: Beislid} = gate_selection, context) do
-    provider = if Beislid.action_policy_available?(provider_opts(context)), do: Beislid, else: Native
-    {provider, annotate_action_policy_provider(gate_selection, provider)}
+    required? = Config.process_provider_required?()
+    opts = provider_opts(context)
+
+    if Beislid.action_policy_available?(opts) do
+      provider = Beislid
+      {:ok, provider, annotate_action_policy_provider(gate_selection, provider)}
+    else
+      payload = process_provider_failure_payload(Beislid, :action_policy, :action_policy_unavailable, opts, required?)
+
+      if required? do
+        {:error, {:process_provider_required_failed, payload}}
+      else
+        provider = Native
+
+        selection =
+          gate_selection
+          |> annotate_native_fallback(provider_id(Beislid), :action_policy_unavailable)
+          |> annotate_action_policy_provider(provider)
+
+        {:ok, provider, selection}
+      end
+    end
   end
 
   defp action_policy_provider_for_gates(gate_selection, _context) do
     provider = Map.get(gate_selection, :action_policy_provider, Native)
-    {provider, annotate_action_policy_provider(gate_selection, provider)}
+    {:ok, provider, annotate_action_policy_provider(gate_selection, provider)}
   end
 
   defp action_policy_evaluator(Beislid, context) do
@@ -326,6 +392,41 @@ defmodule Rondo.CleanEval do
   end
 
   defp action_policy_evaluator(provider, _context), do: ProcessProvider.action_policy_evaluator(provider)
+
+  defp process_provider_failure_payload(provider, phase, reason, opts, required?) do
+    ProcessProvider.failure_payload(provider, phase, reason, Keyword.put(opts, :required, required?))
+  end
+
+  defp gate_failure_reason(%{status: status} = summary) when status in [:policy_blocked, "policy_blocked"] do
+    case policy_gate_result(summary, [:policy_blocked, "policy_blocked"]) do
+      nil -> {:gate_failed, gate_error_summary(summary)}
+      result -> {:action_policy_guidance_required, gate_policy_envelope(result)}
+    end
+  end
+
+  defp gate_failure_reason(%{status: status} = summary) when status in [:policy_denied, "policy_denied"] do
+    case policy_gate_result(summary, [:policy_denied, "policy_denied"]) do
+      nil -> {:gate_failed, gate_error_summary(summary)}
+      result -> {:action_policy_denied, gate_policy_envelope(result)}
+    end
+  end
+
+  defp gate_error_summary(summary) do
+    %{
+      status: summary.status,
+      failed: Enum.map(summary.results, &Map.take(&1, [:name, :status, :exit_status, :retryable, :environment_failure]))
+    }
+  end
+
+  defp policy_gate_result(summary, statuses) when is_list(statuses) do
+    Enum.find(List.wrap(summary.results), fn result ->
+      status = Map.get(result, :status)
+      status_text = if is_atom(status), do: Atom.to_string(status), else: status
+      status in statuses or status_text in statuses
+    end)
+  end
+
+  defp gate_policy_envelope(result), do: Map.get(result, :policy_decision) || %{}
 
   defp provider_opts(context) do
     case context.source_contract do
@@ -404,6 +505,8 @@ defmodule Rondo.CleanEval do
       "schema" => @schema,
       "status" => Atom.to_string(result.status),
       "reason" => Map.get(result, :reason),
+      "reason_code" => Map.get(result, :reason_code),
+      "process_provider_failure" => Map.get(result, :process_provider_failure),
       "base_ref" => Map.get(result, :base_ref),
       "base_branch" => Map.get(result, :base_branch),
       "patch_path" => Map.get(result, :patch_path),
