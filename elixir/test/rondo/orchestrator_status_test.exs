@@ -3832,6 +3832,8 @@ defmodule Rondo.OrchestratorStatusTest do
       %{state | paused_interrupts: %{issue.id => paused_entry}, claimed: MapSet.new([issue.id])}
     end)
 
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+
     assert {:ok, %{status: :resumed}} =
              Orchestrator.submit_guidance(orchestrator_name, issue.id, "Please reuse the existing fix and add the missing regression test.")
 
@@ -3967,6 +3969,80 @@ defmodule Rondo.OrchestratorStatusTest do
     refute_receive {:memory_tracker_state_update, "issue-transition-stale", "In Progress"}, 100
     assert [%{issue_id: "issue-transition-stale"}] = GenServer.call(pid, :snapshot).paused
     assert GenServer.call(pid, :snapshot).running == []
+  end
+
+  test "retry polling releases terminal issues without relaunching" do
+    workspace_root = tmp_dir("orchestrator-retry-terminal")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      claude_command: fake_claude_script(workspace_root, "retry-terminal-session", 0),
+      action_policy_command: fake_action_policy_script(workspace_root, "allow")
+    )
+
+    issue = %Issue{
+      id: "issue-retry-terminal",
+      identifier: "MT-RETRY-TERMINAL",
+      title: "Retry terminal test",
+      description: "Retry polling should release terminal issues",
+      state: "Done",
+      url: "https://example.org/issues/MT-RETRY-TERMINAL"
+    }
+
+    workspace = Path.join(workspace_root, issue.identifier)
+
+    Application.put_env(:rondo, :memory_tracker_issues, [issue])
+    Application.put_env(:rondo, :memory_tracker_recipient, self())
+
+    orchestrator_name = Module.concat(__MODULE__, :RetryTerminalOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    File.mkdir_p!(workspace)
+
+    on_exit(fn ->
+      Application.delete_env(:rondo, :memory_tracker_recipient)
+      Application.delete_env(:rondo, :memory_tracker_issues)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+      File.rm_rf(workspace_root)
+    end)
+
+    initial_state = :sys.get_state(pid)
+    retry_token = make_ref()
+
+    retry_entry = %{
+      attempt: 1,
+      retry_token: retry_token,
+      identifier: issue.identifier
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      %{initial_state | poll_interval_ms: 60_000, retry_attempts: %{issue.id => retry_entry}, claimed: MapSet.new([issue.id])}
+    end)
+
+    send(pid, {:retry_issue, issue.id, retry_token})
+
+    Process.sleep(50)
+
+    refute_receive {:memory_tracker_state_update, "issue-retry-terminal", "In Progress"}, 100
+    assert GenServer.call(pid, :snapshot).retrying == []
+    refute MapSet.member?(:sys.get_state(pid).claimed, issue.id)
+    refute File.exists?(workspace)
+  end
+
+  test "tracker transition guard classifies terminal issues before state writes" do
+    issue = %Issue{
+      id: "issue-transition-guard",
+      identifier: "MT-TRANSITION-GUARD",
+      title: "Transition guard test",
+      description: "Terminal issues should be detected before transition writes",
+      state: "Todo",
+      url: "https://example.org/issues/MT-TRANSITION-GUARD"
+    }
+
+    assert {:terminal, %Issue{state: "Done"}} =
+             Orchestrator.guard_issue_for_transition_for_test(issue, fn [_issue_id] ->
+               {:ok, [%{issue | state: "Done"}]}
+             end)
   end
 
   test "completed agent runs appear in snapshot archived list" do
