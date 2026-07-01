@@ -15,6 +15,7 @@ defmodule RondoWeb.Presenter do
         retrying = Map.get(snapshot, :retrying, [])
         archived = Map.get(snapshot, :archived, [])
         paused = Map.get(snapshot, :paused, [])
+        dispatch_blockers = Map.get(snapshot, :dispatch_blockers, [])
         needs_guidance = Enum.filter(paused, &guidance_entry?/1)
 
         %{
@@ -23,12 +24,14 @@ defmodule RondoWeb.Presenter do
             running: length(running),
             retrying: length(retrying),
             paused: length(paused),
-            needs_guidance: length(needs_guidance)
+            needs_guidance: length(needs_guidance),
+            dispatch_blockers: length(dispatch_blockers)
           },
           running: Enum.map(running, &running_entry_payload/1),
           retrying: Enum.map(retrying, &retry_entry_payload/1),
           needs_guidance: Enum.map(needs_guidance, &needs_guidance_entry_payload/1),
           paused: Enum.map(paused, &paused_entry_payload/1),
+          dispatch_blockers: Enum.map(dispatch_blockers, &dispatch_blocker_payload/1),
           archived: group_archived_by_ticket(archived),
           run_timelines: RunTimeline.project(running, archived, archived_loader: &Orchestrator.load_archived_run/2),
           model_usage: ModelUsage.aggregate(running, archived),
@@ -174,6 +177,18 @@ defmodule RondoWeb.Presenter do
       attempt: entry.attempt,
       due_at: due_at_iso8601(entry.due_in_ms),
       error: entry.error
+    }
+  end
+
+  defp dispatch_blocker_payload(entry) do
+    %{
+      issue_id: entry_value(entry, :issue_id),
+      issue_identifier: entry_value(entry, :issue_identifier) || entry_value(entry, :identifier),
+      state: entry_value(entry, :state),
+      blocks_dispatch: true,
+      blocked_dispatch_reason: entry_value(entry, :blocked_dispatch_reason),
+      blocked_dispatch_detail: entry_value(entry, :blocked_dispatch_detail),
+      blocked_at: timestamp_payload(entry_value(entry, :blocked_at))
     }
   end
 

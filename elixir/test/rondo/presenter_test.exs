@@ -381,6 +381,62 @@ defmodule Rondo.PresenterTest do
     assert issue_payload.paused.interrupt.blocked_side_effect.label == "Tracker update"
   end
 
+  test "state API exposes dispatch blockers for suppressed candidates" do
+    snapshot = %{
+      running: [],
+      retrying: [],
+      dispatch_blockers: [
+        %{
+          issue_id: "issue-blocked",
+          issue_identifier: "MT-BLOCKED",
+          state: "Todo",
+          blocked_dispatch_reason: "claimed",
+          blocked_dispatch_detail: "issue already claimed by a pending run"
+        }
+      ],
+      paused: [],
+      archived: [],
+      claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    server_name = Module.concat(__MODULE__, :DispatchBlockersSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+    assert payload.counts.dispatch_blockers == 1
+    assert [%{issue_identifier: "MT-BLOCKED", blocked_dispatch_reason: "claimed"}] = payload.dispatch_blockers
+    assert payload.dispatch_blockers |> hd() |> Map.get(:blocked_dispatch_detail) == "issue already claimed by a pending run"
+  end
+
+  test "state API exposes poll-level dispatch blockers" do
+    snapshot = %{
+      running: [],
+      retrying: [],
+      dispatch_blockers: [
+        %{
+          issue_id: nil,
+          issue_identifier: nil,
+          state: nil,
+          blocked_dispatch_reason: "config_invalid",
+          blocked_dispatch_detail: "Invalid WORKFLOW.md config path=/tmp/WORKFLOW.md fields=tracker.kind errors=tracker.kind: must be linear, memory, or github"
+        }
+      ],
+      paused: [],
+      archived: [],
+      claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    server_name = Module.concat(__MODULE__, :PollDispatchBlockersSnapshotServer)
+    {:ok, pid} = GenServer.start_link(SnapshotServer, snapshot, name: server_name)
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+    payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
+    assert payload.counts.dispatch_blockers == 1
+    assert [%{issue_id: nil, issue_identifier: nil, blocked_dispatch_reason: "config_invalid"}] = payload.dispatch_blockers
+    assert payload.dispatch_blockers |> hd() |> Map.get(:blocked_dispatch_detail) =~ "tracker.kind"
+  end
+
   test "state API tolerates disk-reconstructed paused entries with missing or string keys" do
     snapshot = %{
       running: [],

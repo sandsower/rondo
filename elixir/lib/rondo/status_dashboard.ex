@@ -314,7 +314,8 @@ defmodule Rondo.StatusDashboard do
              retrying: retrying,
              claude_totals: claude_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
-             polling: Map.get(snapshot, :polling)
+             polling: Map.get(snapshot, :polling),
+             dispatch_blockers: Map.get(snapshot, :dispatch_blockers, [])
            }},
           update_token_samples(token_samples, now_ms, total_tokens)
         }
@@ -336,12 +337,14 @@ defmodule Rondo.StatusDashboard do
         claude_output_tokens = Map.get(claude_totals, :output_tokens, 0)
         claude_total_tokens = Map.get(claude_totals, :total_tokens, 0)
         claude_seconds_running = Map.get(claude_totals, :seconds_running, 0)
+        dispatch_blockers = Map.get(snapshot, :dispatch_blockers, [])
         agent_count = length(running)
         max_agents = Config.max_concurrent_agents()
         running_event_width = running_event_width(terminal_columns_override)
         running_rows = format_running_rows(running, running_event_width)
         running_to_backoff_spacer = if(running == [], do: [], else: ["│"])
         backoff_rows = format_retry_rows(retrying)
+        blocker_rows = format_dispatch_blocker_rows(dispatch_blockers)
 
         ([
            colorize("╭─ RONDO STATUS", @ansi_bold),
@@ -369,6 +372,11 @@ defmodule Rondo.StatusDashboard do
            running_to_backoff_spacer ++
            [colorize("├─ Backoff queue", @ansi_bold), "│"] ++
            backoff_rows ++
+           if dispatch_blockers == [] do
+             []
+           else
+             [colorize("├─ Dispatch blockers", @ansi_bold), "│"] ++ blocker_rows
+           end ++
            [closing_border()])
         |> List.flatten()
         |> Enum.join("\n")
@@ -531,6 +539,12 @@ defmodule Rondo.StatusDashboard do
   def format_timestamp_for_test(%DateTime{} = datetime), do: format_timestamp(datetime)
 
   @doc false
+  @spec snapshot_with_samples_for_test([{integer(), integer()}], integer()) ::
+          {term(), [{integer(), integer()}]}
+  def snapshot_with_samples_for_test(token_samples, now_ms),
+    do: snapshot_with_samples(token_samples, now_ms)
+
+  @doc false
   @spec format_snapshot_content_for_test(term(), number()) :: String.t()
   def format_snapshot_content_for_test(snapshot_data, tps), do: format_snapshot_content(snapshot_data, tps)
 
@@ -560,7 +574,8 @@ defmodule Rondo.StatusDashboard do
              retrying: retrying,
              claude_totals: claude_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
-             polling: Map.get(snapshot, :polling)
+             polling: Map.get(snapshot, :polling),
+             dispatch_blockers: Map.get(snapshot, :dispatch_blockers, [])
            }}
 
         _ ->
@@ -739,6 +754,40 @@ defmodule Rondo.StatusDashboard do
   end
 
   defp format_retry_error(_), do: ""
+
+  defp format_dispatch_blocker_rows(dispatch_blockers) do
+    if dispatch_blockers == [] do
+      ["│  " <> colorize("No dispatch blockers are currently visible", @ansi_gray)]
+    else
+      dispatch_blockers
+      |> Enum.sort_by(fn blocker ->
+        {Map.get(blocker, :blocked_dispatch_reason) || Map.get(blocker, "blocked_dispatch_reason") || "",
+         Map.get(blocker, :issue_identifier) || Map.get(blocker, "issue_identifier") || Map.get(blocker, :issue_id) || Map.get(blocker, "issue_id") || ""}
+      end)
+      |> Enum.map(&format_dispatch_blocker_summary/1)
+    end
+  end
+
+  defp format_dispatch_blocker_summary(blocker) do
+    issue_id = Map.get(blocker, :issue_id) || Map.get(blocker, "issue_id") || "unknown"
+    identifier = Map.get(blocker, :issue_identifier) || Map.get(blocker, "issue_identifier") || issue_id
+    reason = Map.get(blocker, :blocked_dispatch_reason) || Map.get(blocker, "blocked_dispatch_reason") || "blocked"
+    detail = format_dispatch_blocker_detail(Map.get(blocker, :blocked_dispatch_detail) || Map.get(blocker, "blocked_dispatch_detail"))
+
+    "│  #{colorize("⚑", @ansi_orange)} " <>
+      colorize("#{identifier}", @ansi_red) <>
+      " " <>
+      colorize("reason=#{reason}", @ansi_yellow) <>
+      detail
+  end
+
+  defp format_dispatch_blocker_detail(nil), do: ""
+
+  defp format_dispatch_blocker_detail(detail) when is_binary(detail) do
+    " " <> colorize(truncate(detail, 96), @ansi_dim)
+  end
+
+  defp format_dispatch_blocker_detail(detail), do: " " <> colorize(truncate(inspect(detail), 96), @ansi_dim)
 
   defp format_runtime_seconds(seconds) when is_integer(seconds) do
     mins = div(seconds, 60)

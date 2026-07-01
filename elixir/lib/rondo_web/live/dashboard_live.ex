@@ -645,6 +645,43 @@ defmodule RondoWeb.DashboardLive do
           <% end %>
         </section>
 
+        <%= if Map.get(@payload, :dispatch_blockers, []) != [] do %>
+          <section class="section-card">
+            <div class="section-header">
+              <div>
+                <h2 class="section-title">Dispatch blockers</h2>
+                <p class="section-copy">Active issues that the poller is intentionally not starting right now.</p>
+              </div>
+            </div>
+
+            <div class="table-wrap">
+              <table class="data-table" style="min-width: 720px;">
+                <thead>
+                  <tr>
+                    <th>Issue</th>
+                    <th>Reason</th>
+                    <th>Detail</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr :for={entry <- Map.get(@payload, :dispatch_blockers, [])}>
+                    <td>
+                      <div class="issue-stack">
+                        <span class="issue-id"><%= entry.issue_identifier || entry.issue_id || "n/a" %></span>
+                        <a :if={entry.issue_identifier} class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON</a>
+                      </div>
+                    </td>
+                    <td>
+                      <span class="state-badge state-badge-warning"><%= entry.blocked_dispatch_reason || "blocked" %></span>
+                    </td>
+                    <td><%= entry.blocked_dispatch_detail || "n/a" %></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        <% end %>
+
         <section class="section-card">
           <div class="section-header">
             <div>

@@ -1,6 +1,17 @@
+defmodule Rondo.StatusDashboardSnapshotTest.FakeOrchestrator do
+  def start_link(snapshot) do
+    GenServer.start_link(__MODULE__, snapshot, name: Rondo.Orchestrator)
+  end
+
+  def init(snapshot), do: {:ok, snapshot}
+
+  def handle_call(:snapshot, _from, snapshot), do: {:reply, snapshot, snapshot}
+end
+
 defmodule Rondo.StatusDashboardSnapshotTest do
   use Rondo.TestSupport
 
+  alias Rondo.StatusDashboardSnapshotTest.FakeOrchestrator
   alias Rondo.TestSupport.Snapshot
 
   @terminal_columns 115
@@ -136,6 +147,100 @@ defmodule Rondo.StatusDashboardSnapshotTest do
        }}
 
     Snapshot.assert_dashboard_snapshot!("backoff_queue", render_snapshot(snapshot_data, 15.4))
+  end
+
+  test "snapshot projection preserves dispatch blockers for the terminal dashboard" do
+    orchestrator_pid = Process.whereis(Rondo.Orchestrator)
+
+    on_exit(fn ->
+      if is_nil(Process.whereis(Rondo.Orchestrator)) do
+        case Supervisor.restart_child(Rondo.Supervisor, Rondo.Orchestrator) do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+        end
+      end
+    end)
+
+    if is_pid(orchestrator_pid) do
+      assert :ok = Supervisor.terminate_child(Rondo.Supervisor, Rondo.Orchestrator)
+    end
+
+    snapshot =
+      %{
+        running: [],
+        retrying: [],
+        claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        rate_limits: nil,
+        polling: %{checking?: false, next_poll_in_ms: 2_000, poll_interval_ms: 30_000},
+        dispatch_blockers: [
+          %{
+            issue_id: "issue-blocked",
+            issue_identifier: "MT-BLOCKED",
+            state: "Todo",
+            blocked_dispatch_reason: "claimed",
+            blocked_dispatch_detail: "issue already claimed by a pending run"
+          }
+        ]
+      }
+
+    {:ok, _pid} = FakeOrchestrator.start_link(snapshot)
+
+    {snapshot_data, _samples} = StatusDashboard.snapshot_with_samples_for_test([], 0)
+    assert {:ok, projected} = snapshot_data
+    assert projected.dispatch_blockers == snapshot.dispatch_blockers
+
+    rendered = render_snapshot(snapshot_data, 0.0)
+    assert rendered =~ "Dispatch blockers"
+    assert rendered =~ "MT-BLOCKED"
+    assert rendered =~ "reason=claimed"
+    assert rendered =~ "issue already claimed by a pending run"
+  end
+
+  test "snapshot fixture: dispatch blockers" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         dispatch_blockers: [
+           %{issue_identifier: "MT-BLOCKED", blocked_dispatch_reason: "claimed", blocked_dispatch_detail: "issue already claimed by a pending run"}
+         ],
+         claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = render_snapshot(snapshot_data, 0.0)
+
+    assert rendered =~ "Dispatch blockers"
+    assert rendered =~ "MT-BLOCKED"
+    assert rendered =~ "reason=claimed"
+    assert rendered =~ "issue already claimed by a pending run"
+  end
+
+  test "snapshot fixture: poll-level dispatch blocker" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         dispatch_blockers: [
+           %{
+             issue_id: nil,
+             issue_identifier: nil,
+             state: nil,
+             blocked_dispatch_reason: "config_invalid",
+             blocked_dispatch_detail: "Invalid WORKFLOW.md config path=/tmp/WORKFLOW.md fields=tracker.kind errors=tracker.kind: must be linear, memory, or github"
+           }
+         ],
+         claude_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = render_snapshot(snapshot_data, 0.0)
+
+    assert rendered =~ "Dispatch blockers"
+    assert rendered =~ "reason=config_invalid"
+    assert rendered =~ "tracker.kind"
   end
 
   test "running summary exposes fallback model state" do
