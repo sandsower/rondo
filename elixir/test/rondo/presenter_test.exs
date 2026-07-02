@@ -524,6 +524,22 @@ defmodule Rondo.PresenterTest do
     assert "turn_started" in kinds
   end
 
+  test "run projection covers archived run payloads" do
+    projection =
+      RondoWeb.Presenter.run_projection(%{
+        issue_identifier: "MT-ARCHIVE",
+        session_id: "archived-session",
+        started_at: ~U[2026-05-10 15:30:00Z],
+        finished_at: ~U[2026-05-10 15:31:00Z],
+        exit_reason: "completed",
+        event_log: []
+      })
+
+    assert projection.identifier == "MT-ARCHIVE"
+    assert projection.archived == true
+    assert projection.status == "completed"
+  end
+
   test "state payload exposes provider, model, cost, and token metadata for logs" do
     snapshot = %{
       running: [

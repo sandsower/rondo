@@ -293,6 +293,15 @@ defmodule RondoWeb.DashboardLiveTest do
       }
     end
 
+    test "select_panel_tab ignores unexpected tab values" do
+      socket = event_stream_socket()
+      socket = %{socket | assigns: Map.put(socket.assigns, :panel_tab, "overview")}
+
+      {:noreply, updated} = DashboardLive.handle_event("select_panel_tab", %{"tab" => "unexpected"}, socket)
+
+      assert updated.assigns.panel_tab == "overview"
+    end
+
     test "event_stream_facet narrows rows to the clicked facet" do
       socket = event_stream_socket()
 

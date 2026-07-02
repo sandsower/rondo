@@ -751,7 +751,9 @@ defmodule RondoWeb.Presenter do
   defp archived_fingerprint([]), do: :empty
 
   defp archived_fingerprint(archived_window) when is_list(archived_window) do
-    Enum.map(archived_window, &archived_stamp/1)
+    archived_window
+    |> Enum.map(&archived_stamp/1)
+    |> :erlang.phash2()
   end
 
   defp archived_stamp(entry) do
@@ -764,13 +766,6 @@ defmodule RondoWeb.Presenter do
       payload_value(entry, :tokens),
       payload_value(entry, :model_routing)
     }
-  end
-
-  @spec archived_runs_table([map()]) :: [map()]
-  def archived_runs_table(archived) when is_list(archived) do
-    archived
-    |> archived_table_window()
-    |> archived_runs_table_from_window()
   end
 
   defp archived_runs_table_from_window(archived_window) do

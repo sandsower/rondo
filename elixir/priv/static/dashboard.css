@@ -599,7 +599,7 @@ summary:focus-visible,
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   padding: var(--space-3) var(--space-4);
-  overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+  overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere;
 }
 
 /* Structured "last result" block inside the slide-over panel */
@@ -612,7 +612,7 @@ summary:focus-visible,
 }
 .result-field-value {
   font-family: var(--font-mono); font-size: 12px;
-  white-space: pre-wrap; word-break: break-word;
+  white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .result-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-top: var(--space-2); }
 .result-raw-collapse > summary { color: var(--text-muted); font-size: 12px; }
@@ -836,7 +836,7 @@ summary:focus-visible,
   color: var(--text-muted); background: var(--surface-2); padding: 1px 6px; border-radius: var(--radius-pill);
 }
 .event-row-message {
-  color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; line-height: 1.45;
+  color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.45;
 }
 .event-row-message code { font-family: var(--font-mono); font-size: 11px; background: var(--surface-2); padding: 1px 4px; border-radius: 3px; }
 .event-row-message strong { font-weight: 600; color: var(--text-primary); }

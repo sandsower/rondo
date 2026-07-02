@@ -189,6 +189,9 @@ defmodule RondoWeb.DashboardLive do
   end
 
   @impl true
+  def handle_event("select_panel_tab", _params, socket), do: {:noreply, socket}
+
+  @impl true
   def handle_event("select_timeline_step", %{"index" => index_str}, socket) do
     projection = socket.assigns[:selected_run_projection]
 
@@ -3025,7 +3028,12 @@ defmodule RondoWeb.DashboardLive do
 
       tokens ->
         usage = token_usage_from_event(tokens)
-        usage.total_tokens || (usage.input_tokens || 0) + (usage.output_tokens || 0)
+
+        if usage.total_tokens > 0 do
+          usage.total_tokens
+        else
+          usage.input_tokens + usage.output_tokens
+        end
     end
   end
 

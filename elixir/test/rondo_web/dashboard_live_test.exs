@@ -139,7 +139,7 @@ defmodule RondoWeb.DashboardLiveArchivedSelectionTest do
         at: "2026-06-30T10:01:00Z",
         event: :system,
         message: "switching to sonnet",
-        tokens: %{input_tokens: 10, output_tokens: 5, total_tokens: 15},
+        tokens: %{input_tokens: 10, output_tokens: 5},
         model_change: %{provider: "anthropic", model: "claude-sonnet-5"}
       },
       %{at: "2026-06-30T10:02:00Z", event: :assistant, message: "turn 2", tokens: %{input_tokens: 200, output_tokens: 100, total_tokens: 300}},

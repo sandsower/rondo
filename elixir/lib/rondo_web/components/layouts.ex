@@ -150,14 +150,19 @@ defmodule RondoWeb.Layouts do
 
             Hooks.CopyButton = {
               mounted() {
-                this._onClick = (e) => {
+                this._label = this.el.dataset.label || this.el.textContent;
+                this._onClick = async (e) => {
                   e.stopPropagation();
                   var text = this.el.dataset.copy || '';
-                  navigator.clipboard.writeText(text);
-                  var label = this.el.dataset.label || this.el.textContent;
-                  this.el.textContent = 'Copied';
-                  clearTimeout(this._timer);
-                  this._timer = setTimeout(() => { this.el.textContent = label; }, 1200);
+
+                  try {
+                    await navigator.clipboard.writeText(text);
+                    this.el.textContent = 'Copied';
+                    clearTimeout(this._timer);
+                    this._timer = setTimeout(() => { this.el.textContent = this._label; }, 1200);
+                  } catch (_err) {
+                    this.el.textContent = this._label;
+                  }
                 };
                 this.el.addEventListener('click', this._onClick);
               },

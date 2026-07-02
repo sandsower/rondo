@@ -5,15 +5,14 @@ usage() {
   cat <<'USAGE'
 Usage: restart-rondo-services [--skip-build] [--no-wait]
 
-Rebuilds the local Rondo escript and restarts the three local Rondo services:
-  4000 -> /Users/vicvalenzuela/Personal/rondo/WORKFLOW.md
-  4001 -> /Users/vicvalenzuela/Projects/beislid/WORKFLOW.md
-  4002 -> /Users/vicvalenzuela/Personal/memento-vault/WORKFLOW.md
+Rebuilds the local Rondo escript and restarts three local Rondo services.
 
-Environment overrides:
-  RONDO_WORKFLOW_4000       Workflow path for port 4000
-  RONDO_WORKFLOW_4001       Workflow path for port 4001
-  RONDO_WORKFLOW_4002       Workflow path for port 4002
+Workflow paths:
+  RONDO_WORKFLOW_4000       Workflow path for port 4000 (default: this repo's WORKFLOW.md)
+  RONDO_WORKFLOW_4001       Workflow path for port 4001 (required)
+  RONDO_WORKFLOW_4002       Workflow path for port 4002 (required)
+
+Other environment overrides:
   RONDO_RESTART_LOG_DIR     Log/pid directory (default: /tmp/rondo-restarts)
   RONDO_STOP_TIMEOUT        Seconds to wait before SIGKILL (default: 30)
   RONDO_START_TIMEOUT       Seconds to wait for /api/v1/state (default: 90)
@@ -64,9 +63,9 @@ log_dir="${RONDO_RESTART_LOG_DIR:-/tmp/rondo-restarts}"
 stop_timeout="${RONDO_STOP_TIMEOUT:-30}"
 start_timeout="${RONDO_START_TIMEOUT:-90}"
 
-workflow_4000="${RONDO_WORKFLOW_4000:-/Users/vicvalenzuela/Personal/rondo/WORKFLOW.md}"
-workflow_4001="${RONDO_WORKFLOW_4001:-/Users/vicvalenzuela/Projects/beislid/WORKFLOW.md}"
-workflow_4002="${RONDO_WORKFLOW_4002:-/Users/vicvalenzuela/Personal/memento-vault/WORKFLOW.md}"
+workflow_4000="${RONDO_WORKFLOW_4000:-${repo_dir}/WORKFLOW.md}"
+workflow_4001="${RONDO_WORKFLOW_4001:-}"
+workflow_4002="${RONDO_WORKFLOW_4002:-}"
 
 services=(
   "4000:${workflow_4000}"
@@ -85,7 +84,7 @@ run_with_mise() {
 pids_for_port() {
   local port="$1"
   ps -axo pid=,command= | awk -v port="$port" '
-    $0 ~ /[b]in\/rondo/ && $0 ~ ("--port " port) { print $1 }
+    $0 ~ /[b]in\/rondo/ && $0 ~ ("--port " port "([[:space:]]|$)") { print $1 }
   '
 }
 
@@ -118,7 +117,10 @@ preflight_workflows() {
     port="${spec%%:*}"
     workflow="${spec#*:}"
 
-    if [[ ! -f "$workflow" ]]; then
+    if [[ -z "$workflow" ]]; then
+      echo "port ${port}: workflow path is required; set RONDO_WORKFLOW_${port}" >&2
+      missing=1
+    elif [[ ! -f "$workflow" ]]; then
       echo "port ${port}: workflow not found: ${workflow}" >&2
       missing=1
     fi
@@ -209,7 +211,8 @@ wait_for_service() {
   local url="http://127.0.0.1:${port}/api/v1/state"
 
   while (( waited < start_timeout )); do
-    if curl -fsS --max-time 30 -o /dev/null "$url"; then
+    response=""
+    if response="$(curl -fsS --max-time 30 "$url")" && ! grep -q '"error"' <<<"$response"; then
       echo "port ${port}: ready (${url})"
       return 0
     fi
@@ -235,11 +238,16 @@ for spec in "${services[@]}"; do
   stop_service "$port"
 done
 
+start_failed=0
 for spec in "${services[@]}"; do
   port="${spec%%:*}"
   workflow="${spec#*:}"
-  start_service "$port" "$workflow"
+  start_service "$port" "$workflow" || start_failed=1
 done
+
+if (( start_failed != 0 )); then
+  exit 1
+fi
 
 if [[ "$wait_for_ready" == true ]]; then
   ready_failed=0
