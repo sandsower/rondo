@@ -82,7 +82,7 @@ risk:
 
 ## Quality gates
 
-Cheap gates first for iteration; `elixir-ci` is the pre-PR aggregate matching CI. `dialyzer` runs standalone so static analysis isn't masked when `make all` aborts at the coverage gate on the RON-31 flake.
+Cheap gates first for iteration. Normal review/babysit runs format, credo, tests, dialyzer, and script syntax only; `elixir-exhaustive` keeps `make all` available as a manual/high-risk gate because it includes coverage and is intentionally heavier.
 
 ```beislid:gates
 - name: format
@@ -98,19 +98,24 @@ Cheap gates first for iteration; `elixir-ci` is the pre-PR aggregate matching CI
   cost: expensive
   failure:
     hint: 'known flaky: OrchestratorStatusTest (RON-31, two order-sensitive tests) — verify with a fixed seed against main before treating as a real red.'
-- name: elixir-ci
-  stage: pre-pr
-  command: 'cd elixir && make all'
-  cost: expensive
-  failure:
-    hint: 'known flaky: OrchestratorStatusTest (RON-31, two order-sensitive tests) — verify with a fixed seed against main before treating as a real red.'
 - name: dialyzer
   stage: pre-pr
   command: 'cd elixir && mix dialyzer --format short'
   cost: expensive
   parallel_safe: true
   failure:
-    hint: 'runs independently of elixir-ci/make-all (which aborts at coverage on the RON-31 flake before reaching dialyzer).'
+    hint: 'runs independently so static analysis is not masked by coverage threshold failures.'
+- name: scripts-syntax
+  stage: pre-pr
+  command: 'bash -n scripts/restart-rondo-services'
+  cost: cheap
+  parallel_safe: true
+- name: elixir-exhaustive
+  stage: exhaustive
+  command: 'cd elixir && make all'
+  cost: expensive
+  failure:
+    hint: 'exhaustive/manual gate only. Includes coverage with a 100% threshold that may fail on baseline; compare against origin/main before treating as a branch regression.'
 ```
 
 ## Model routing
