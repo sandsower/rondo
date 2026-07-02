@@ -477,13 +477,21 @@ defmodule RondoWeb.EventInspector do
     |> blank_to_nil()
   end
 
+  # Maps are shown as JSON rather than Elixir `inspect` syntax (`%{"k" => "v"}`);
+  # the underlying data is JSON to begin with.
   defp display_value(value) when is_map(value) do
     value
-    |> inspect(pretty: true, limit: @detail_event_limit, printable_limit: @detail_event_limit)
-    |> Rondo.Redaction.redact()
+    |> pretty_json()
+    |> truncate_display(@detail_event_limit)
   end
 
   defp display_value(value), do: inspect(value, pretty: true, limit: @detail_event_limit, printable_limit: @detail_event_limit) |> Rondo.Redaction.redact()
+
+  defp truncate_display(text, limit) when is_binary(text) and byte_size(text) > limit * 4 do
+    String.slice(text, 0, limit * 4) <> "…"
+  end
+
+  defp truncate_display(text, _limit), do: text
 
   defp redaction_note(raw) do
     if raw_redacted?(raw), do: "[REDACTED]", else: nil

@@ -437,6 +437,12 @@ defmodule RondoWeb.ResultSummary do
     _ -> inspect(value)
   end
 
+  defp normalize_json_value(%DateTime{} = value), do: DateTime.to_iso8601(value)
+  defp normalize_json_value(%NaiveDateTime{} = value), do: NaiveDateTime.to_iso8601(value)
+  defp normalize_json_value(%Date{} = value), do: Date.to_iso8601(value)
+  defp normalize_json_value(%Time{} = value), do: Time.to_iso8601(value)
+  defp normalize_json_value(%{__struct__: _} = value), do: inspect(value)
+
   defp normalize_json_value(value) when is_map(value) do
     Map.new(value, fn {key, nested} -> {to_string(key), normalize_json_value(nested)} end)
   end

@@ -51,6 +51,7 @@ defmodule Rondo.MixProject do
           RondoWeb.ObservabilityApiController,
           RondoWeb.ObservabilityPubSub,
           RondoWeb.Presenter,
+          RondoWeb.PresenterCache,
           RondoWeb.Router,
           RondoWeb.Router.Helpers,
           RondoWeb.StaticAssetController,

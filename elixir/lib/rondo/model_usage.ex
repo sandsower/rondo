@@ -343,6 +343,7 @@ defmodule Rondo.ModelUsage do
       String.starts_with?(model, "anthropic/") -> "anthropic"
       String.contains?(model, "codex") -> "codex"
       String.contains?(model, "openrouter") -> "openrouter"
+      String.contains?(model, "claude") -> "anthropic"
       true -> nil
     end
   end

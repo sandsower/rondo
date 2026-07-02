@@ -5,14 +5,13 @@ defmodule RondoWeb.Layouts do
 
   use Phoenix.Component
 
-  @css_version (
-                 path = Path.join([__DIR__, "..", "..", "..", "priv", "static", "dashboard.css"]) |> Path.expand()
+  @css_path Path.join([__DIR__, "..", "..", "..", "priv", "static", "dashboard.css"]) |> Path.expand()
+  @external_resource @css_path
 
-                 case File.read(path) do
-                   {:ok, content} -> content |> :erlang.md5() |> Base.encode16(case: :lower) |> binary_part(0, 8)
-                   {:error, _} -> "0"
-                 end
-               )
+  @css_version (case File.read(@css_path) do
+                  {:ok, content} -> content |> :erlang.md5() |> Base.encode16(case: :lower) |> binary_part(0, 8)
+                  {:error, _} -> "0"
+                end)
 
   @spec root(map()) :: Phoenix.LiveView.Rendered.t()
   def root(assigns) do
@@ -29,6 +28,7 @@ defmodule RondoWeb.Layouts do
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="csrf-token" content={@csrf_token} />
         <title>Rondo Observability</title>
+        <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f6ef7'/%3E%3Ccircle cx='16' cy='16' r='6' fill='none' stroke='white' stroke-width='3'/%3E%3C/svg%3E" />
         <script>
           // Dark mode: blocking script to prevent FOUC — runs before stylesheet
           (function() {
@@ -146,6 +146,30 @@ defmodule RondoWeb.Layouts do
                 if (cb) cb.checked = isDark;
               },
               destroyed() { document.removeEventListener('rondo:theme-changed', this._handler); }
+            };
+
+            Hooks.CopyButton = {
+              mounted() {
+                this._label = this.el.dataset.label || this.el.textContent;
+                this._onClick = async (e) => {
+                  e.stopPropagation();
+                  var text = this.el.dataset.copy || '';
+
+                  try {
+                    await navigator.clipboard.writeText(text);
+                    this.el.textContent = 'Copied';
+                    clearTimeout(this._timer);
+                    this._timer = setTimeout(() => { this.el.textContent = this._label; }, 1200);
+                  } catch (_err) {
+                    this.el.textContent = this._label;
+                  }
+                };
+                this.el.addEventListener('click', this._onClick);
+              },
+              destroyed() {
+                clearTimeout(this._timer);
+                this.el.removeEventListener('click', this._onClick);
+              }
             };
 
             Hooks.ScrollBottom = {
@@ -340,6 +364,33 @@ defmodule RondoWeb.Layouts do
   @spec app(map()) :: Phoenix.LiveView.Rendered.t()
   def app(assigns) do
     ~H"""
+    <header class="top-nav">
+      <div class="top-nav-inner">
+        <span class="top-nav-brand">
+          Rondo <span class="top-nav-brand-suffix">Observability</span>
+        </span>
+        <nav class="top-nav-links" aria-label="Dashboard sections">
+          <a class="top-nav-link" href="#logs">Logs</a>
+          <a class="top-nav-link" href="#guidance">Guidance</a>
+          <a class="top-nav-link" href="#sessions">Sessions</a>
+          <a class="top-nav-link" href="#retries">Retries</a>
+          <a class="top-nav-link" href="#archived">Archive</a>
+        </nav>
+        <div class="top-nav-status">
+          <span class="status-badge status-badge-live">
+            <span class="status-badge-dot"></span>
+            Live
+          </span>
+          <label class="theme-switch" id="theme-toggle" phx-hook="ThemeToggle" phx-update="ignore">
+            <input type="checkbox" aria-label="Toggle dark mode" onclick="RondoTheme.toggle()" />
+            <span class="theme-switch-track">
+              <svg class="theme-icon-sun" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+              <svg class="theme-icon-moon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+            </span>
+          </label>
+        </div>
+      </div>
+    </header>
     <main class="app-shell">
       {@inner_content}
     </main>

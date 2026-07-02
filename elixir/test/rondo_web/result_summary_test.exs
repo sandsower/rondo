@@ -139,6 +139,37 @@ defmodule RondoWeb.ResultSummaryTest do
     assert summary.copy_text =~ inspect(pid)
   end
 
+  test "normalizes date and time structs inside json payloads" do
+    started_at = ~U[2026-07-01 21:13:38.654696Z]
+    local_started_at = ~N[2026-07-01 21:13:38]
+    started_on = ~D[2026-07-01]
+    started_time = ~T[21:13:38]
+    uri = %URI{scheme: "https", host: "example.test", path: "/run"}
+
+    summary =
+      ResultSummary.describe(%{
+        status: "failed",
+        metadata: %{
+          started_at: started_at,
+          local_started_at: local_started_at,
+          started_on: started_on,
+          started_time: started_time,
+          uri: uri
+        }
+      })
+
+    assert summary.kind == :json
+    assert summary.preview == "JSON object · failed"
+    assert %{label: "Metadata", value: metadata} = Enum.find(summary.fields, &(&1.label == "Metadata"))
+    assert metadata =~ "2026-07-01T21:13:38.654696Z"
+    assert metadata =~ "2026-07-01T21:13:38"
+    assert metadata =~ "2026-07-01"
+    assert metadata =~ "21:13:38"
+    assert metadata =~ "example.test"
+    assert summary.pretty =~ "2026-07-01T21:13:38.654696Z"
+    assert summary.copy_text =~ "2026-07-01T21:13:38.654696Z"
+  end
+
   test "describes final report diagnostic summaries" do
     summary =
       ResultSummary.describe(%{

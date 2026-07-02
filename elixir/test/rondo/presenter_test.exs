@@ -64,7 +64,7 @@ defmodule Rondo.PresenterTest do
 
     payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
     running_entry = hd(payload.running)
-    archived_entry = payload.archived |> hd() |> Map.fetch!(:runs) |> hd()
+    archived_entry = RondoWeb.Presenter.archived_groups(payload.archived_table) |> hd() |> Map.fetch!(:runs) |> hd()
 
     assert running_entry.run_id == nil
     assert running_entry.run_dir == nil
@@ -135,7 +135,7 @@ defmodule Rondo.PresenterTest do
     assert running.last_message == "ready_for_review · Did the work"
     assert running.last_result_payload == Jason.encode!(report)
 
-    [archived_group] = payload.archived
+    [archived_group] = RondoWeb.Presenter.archived_groups(payload.archived_table)
     assert archived_group.latest_result_payload == report
 
     assert {:ok, issue_payload} = RondoWeb.Presenter.issue_payload("MT-RESULT", server_name, 1_000)
@@ -164,7 +164,7 @@ defmodule Rondo.PresenterTest do
     on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
 
     payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
-    outcomes = payload.archived |> Enum.map(&{&1.issue_identifier, &1.latest_outcome}) |> Map.new()
+    outcomes = RondoWeb.Presenter.archived_groups(payload.archived_table) |> Enum.map(&{&1.issue_identifier, &1.latest_outcome}) |> Map.new()
     rows = payload.archived_table |> Enum.map(&{&1.issue_identifier, &1}) |> Map.new()
 
     assert outcomes["MT-SUCCESS"] == %{
@@ -197,7 +197,7 @@ defmodule Rondo.PresenterTest do
     assert rows["MT-REVIEW"].outcome_display == outcomes["MT-REVIEW"]
     assert rows["MT-DONE"].status == "merged/done"
 
-    assert RondoWeb.Presenter.run_outcomes(payload.archived) == %{
+    assert RondoWeb.Presenter.run_outcomes(RondoWeb.Presenter.archived_groups(payload.archived_table)) == %{
              labels: ["MT-TERM", "MT-CANCELED", "MT-PAUSED", "MT-FAILED", "MT-DONE", "MT-REVIEW", "MT-SUCCESS"],
              values: [60, 55, 50, 40, 30, 20, 10],
              colors: ["terminated", "canceled", "blocked_paused", "failed", "merged_done", "review_handoff", "success"]
@@ -437,7 +437,7 @@ defmodule Rondo.PresenterTest do
     assert {:ok, issue_payload} = RondoWeb.Presenter.issue_payload("MT-LINKS-LINEAR", server_name, 1_000)
     assert Enum.any?(issue_payload.running.links.review.available, &(&1.kind == :pull_request))
 
-    [archived_group] = payload.archived
+    [archived_group] = RondoWeb.Presenter.archived_groups(payload.archived_table)
     assert Enum.any?(archived_group.links.tracker.available, &(&1.kind == :github_issue))
     assert Enum.any?(archived_group.links.review.unavailable, &String.contains?(Map.get(&1, :reason, ""), "no branch"))
 
@@ -506,13 +506,38 @@ defmodule Rondo.PresenterTest do
     on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
 
     payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
-    assert [%{identifier: "MT-PRESENTER-TL", timeline: timeline}] = payload.run_timelines
+
+    # Timelines are no longer eagerly shipped in the state payload; they are
+    # projected lazily per selected run.
+    refute Map.has_key?(payload, :run_timelines)
+    refute Map.has_key?(payload, :archived)
+
     [running_entry] = payload.running
     assert running_entry.run_id == ledger.run_id
     assert running_entry.run_dir == ledger.run_dir
+
+    assert %{identifier: "MT-PRESENTER-TL", timeline: timeline} =
+             RondoWeb.Presenter.run_projection(running_entry)
+
     kinds = Enum.map(timeline, & &1.kind)
     assert "dispatch" in kinds
     assert "turn_started" in kinds
+  end
+
+  test "run projection covers archived run payloads" do
+    projection =
+      RondoWeb.Presenter.run_projection(%{
+        issue_identifier: "MT-ARCHIVE",
+        session_id: "archived-session",
+        started_at: ~U[2026-05-10 15:30:00Z],
+        finished_at: ~U[2026-05-10 15:31:00Z],
+        exit_reason: "completed",
+        event_log: []
+      })
+
+    assert projection.identifier == "MT-ARCHIVE"
+    assert projection.archived == true
+    assert projection.status == "completed"
   end
 
   test "state payload exposes provider, model, cost, and token metadata for logs" do
@@ -585,7 +610,7 @@ defmodule Rondo.PresenterTest do
 
     payload = RondoWeb.Presenter.state_payload(server_name, 1_000)
     [running] = payload.running
-    [archived_group] = payload.archived
+    [archived_group] = RondoWeb.Presenter.archived_groups(payload.archived_table)
 
     assert running.provider == "openrouter"
     assert running.model == "openrouter/deepseek/deepseek-chat"
@@ -840,6 +865,15 @@ defmodule Rondo.PresenterTest do
     assert turn.tokens == %{input_tokens: 1, output_tokens: 2, total_tokens: 3, cache_read_tokens: 0, cache_write_tokens: 0, cached_tokens: 0, cost: nil}
     assert model_change.model_change == %{provider: "openrouter", model: "openrouter/moonshotai/kimi-k2.7-code"}
     assert model_change.tokens == %{input_tokens: 4, output_tokens: 5, total_tokens: 11, cache_read_tokens: 2, cache_write_tokens: 0, cached_tokens: 2, cost: nil}
+  end
+
+  test "format_event_log_public keeps string timestamps from archived JSON logs" do
+    log = [
+      %{at: "2026-07-01T10:05:00Z", event: :assistant, message: "archived turn", tokens: %{total_tokens: 3}}
+    ]
+
+    assert [entry] = RondoWeb.Presenter.format_event_log_public(log)
+    assert entry.at == "2026-07-01T10:05:00Z"
   end
 
   test "state API tolerates disk-reconstructed paused entries with missing or string keys" do

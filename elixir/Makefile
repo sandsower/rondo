@@ -1,9 +1,10 @@
-.PHONY: help all setup deps fmt fmt-check lint test coverage ci dialyzer e2e
+.PHONY: help all setup deps fmt fmt-check lint test coverage pre-pr ci exhaustive dialyzer e2e
 
 MIX ?= mix
+COVER_MAX_CASES ?= 8
 
 help:
-	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, ci, e2e"
+	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, pre-pr, ci, exhaustive, all, e2e"
 
 setup:
 	$(MIX) setup
@@ -21,7 +22,7 @@ lint:
 	$(MIX) lint
 
 coverage:
-	$(MIX) test --cover
+	$(MIX) test --cover --max-cases $(COVER_MAX_CASES)
 
 test:
 	$(MIX) test
@@ -36,14 +37,22 @@ e2e:
 	$(MIX) test --only live_e2e
 
 dialyzer:
-	$(MIX) deps.get
 	$(MIX) dialyzer --format short
 
-ci:
+pre-pr:
+	$(MAKE) deps
+	$(MAKE) fmt-check
+	$(MAKE) lint
+	$(MAKE) test
+	$(MAKE) dialyzer
+
+ci: pre-pr
+
+exhaustive:
 	$(MAKE) deps
 	$(MAKE) fmt-check
 	$(MAKE) lint
 	$(MAKE) coverage
 	$(MAKE) dialyzer
 
-all: ci
+all: exhaustive

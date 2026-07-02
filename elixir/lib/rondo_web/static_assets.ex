@@ -4,14 +4,13 @@ defmodule RondoWeb.StaticAssets do
   Assets are read at compile time when available for escript compatibility.
   """
 
-  @dashboard_css_content (
-                           path = Path.join([__DIR__, "..", "..", "priv", "static", "dashboard.css"]) |> Path.expand()
+  @dashboard_css_path Path.join([__DIR__, "..", "..", "priv", "static", "dashboard.css"]) |> Path.expand()
+  @external_resource @dashboard_css_path
 
-                           case File.read(path) do
-                             {:ok, content} -> content
-                             {:error, _} -> nil
-                           end
-                         )
+  @dashboard_css_content (case File.read(@dashboard_css_path) do
+                            {:ok, content} -> content
+                            {:error, _} -> nil
+                          end)
 
   @phoenix_html_js_content (case :code.priv_dir(:phoenix_html) do
                               {:error, _} ->
@@ -52,14 +51,13 @@ defmodule RondoWeb.StaticAssets do
                                      end
                                  end)
 
-  @chart_js_content (
-                      path = Path.join([__DIR__, "..", "..", "priv", "static", "chart.min.js"]) |> Path.expand()
+  @chart_js_path Path.join([__DIR__, "..", "..", "priv", "static", "chart.min.js"]) |> Path.expand()
+  @external_resource @chart_js_path
 
-                      case File.read(path) do
-                        {:ok, content} -> content
-                        {:error, _} -> nil
-                      end
-                    )
+  @chart_js_content (case File.read(@chart_js_path) do
+                       {:ok, content} -> content
+                       {:error, _} -> nil
+                     end)
 
   @spec fetch(String.t()) :: {:ok, String.t(), String.t()} | :error
   def fetch("/dashboard.css"), do: serve("text/css", @dashboard_css_content)
