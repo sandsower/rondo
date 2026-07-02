@@ -1,0 +1,74 @@
+{
+  "schema": "approved-slice-v1",
+  "slice_id": "ron-137-config-validation",
+  "source_ticket": "RON-137",
+  "prompt": "## Objective\nFix four validated-but-broken config paths: (1) tracker.assignee passes validation but extraction drops it so polling runs unfiltered; (2) merge.mode is validated against the wrong section map; (3) allowlist config extraction silently drops unknown/typo'd keys; (4) workflow-load failure silently falls back to full defaults.\n\n## Design summary\nConventions are pre-decided: unknown keys log a warning naming the key and its section; workflow-load failure logs at error level and makes the fallback-to-defaults explicit in output. Do not add new config keys and do not rewrite the validation framework - wire what exists. Defect sites: config.ex:1650 (assignee validated) vs config.ex:1208-1220 (extraction drops it); config.ex:1698 (merge.mode wrong section); extract_* helpers + config.ex:1152-1156 (silent drops / silent fallback).\n\n## File scope\nInclude: elixir/lib/rondo/config.ex, elixir/lib/rondo/orchestrator.ex (ONLY the point where tracker.assignee is applied to polling), new/updated tests under elixir/test/.\nExclude: all other modules.\n\n## Constraints\nIf the assignee application point turns out to live outside config.ex/orchestrator.ex, PAUSE and report - do not widen scope. No git push or PR creation - local branch/diff only. Environment: mix resolves via mise shims; if mix is not found, prepend $HOME/.local/share/mise/shims to PATH. Work test-first: one failing test per acceptance bullet before fixing. If any acceptance criterion is ambiguous, pause and ask.\n\n## Verification\nAll from the repo root:\n1. cd elixir && mix test  (new tests: assignee applied to polling; merge.mode validated in own section; unknown key warns; load failure loud)\n2. cd elixir && mix format --check-formatted\n3. cd elixir && mix credo --strict\nKnown flaky: OrchestratorStatusTest (RON-31) - fixed-seed verify against main before treating a failure as real.",
+  "boundaries": {
+    "include": ["elixir/lib/rondo/config.ex", "elixir/lib/rondo/orchestrator.ex (assignee application point only)", "elixir/test/"],
+    "exclude": ["all other modules", "new config keys", "validation framework rewrite"]
+  },
+  "dependencies": [
+    "config.ex and orchestrator.ex present at pinned base (probed in authoring session)",
+    "mix via mise shims (probed)"
+  ],
+  "proof_requirements": [
+    {
+      "kind": "proof-requirement-v1",
+      "id": "ron-137-gates",
+      "type": "command_gate",
+      "stage": "pre-pr",
+      "status": "required",
+      "success_criteria": [
+        "cd elixir && mix test exits 0 including one new test per acceptance bullet",
+        "cd elixir && mix format --check-formatted exits 0",
+        "cd elixir && mix credo --strict exits 0"
+      ],
+      "failure_policy": {"on_missing": "block", "on_failure": "block", "retryable": true},
+      "expected_artifact": {"kind": "gate_envelope", "reference": "gate transcript in run evidence"}
+    }
+  ],
+  "output_expectations": {
+    "summary": "Which of the four silent paths were fixed where, with the new diagnostics shown.",
+    "artifacts": ["changed_files", "proof_results"],
+    "next_step": "ready-for-review handoff; human reviews and opens the PR"
+  },
+  "parent_contract": {
+    "work_contract": "Teotl unification P0 integrity batch (approved 2026-07-02)",
+    "source": "~/Personal/teotl/plans/2026-07-02-debt-audit-p0-integrity-batch.md (RON 2, findings R5/R6)",
+    "ticket": "RON-137"
+  },
+  "repo": {
+    "url": "git@github.com:sandsower/rondo.git",
+    "base_ref": "main",
+    "base_sha": "e5689a81795629bf78fe3331fb0db63eda2a587b"
+  },
+  "allowed_actions": {
+    "run_mode": "supervised-auto",
+    "allow": [
+      "Edit files within the include scope and add/update tests under elixir/test/",
+      "Run the configured gates and slice verification commands",
+      "Create/commit on a local work branch (vic/ron-137-*)"
+    ],
+    "ask": [
+      "Any edit outside the include scope",
+      "Dependency installs or mix.exs changes"
+    ],
+    "deny": [
+      "git push, PR creation, or any remote write",
+      "Adding new config keys or rewriting the validation framework"
+    ]
+  },
+  "process_provider": {"name": "claude_code"},
+  "runner_extensions": {
+    "model_routing": {
+      "routing": [
+        {"boundary": "implementation", "tier": "standard", "mode": "prefer", "reason": "mechanical wiring with pinned defect sites"},
+        {"boundary": "review_fix", "tier": "standard", "mode": "prefer", "reason": "repo default"},
+        {"boundary": "gate_repair", "tier": "standard", "mode": "prefer", "reason": "exact commands given"}
+      ],
+      "tier": "standard",
+      "mode": "prefer",
+      "candidates": ["sonnet"]
+    }
+  }
+}

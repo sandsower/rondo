@@ -1,0 +1,77 @@
+{
+  "kind": "approved-slice-plan-export-v0",
+  "version": 1,
+  "status": "approved",
+  "supersedes": null,
+  "generated_from": "envelope skill batch run 2026-07-02, weak-tier P0 integrity tickets RON-136 RON-137 (teotl unification program)",
+  "source_work_contract": "~/Personal/teotl/plans/2026-07-02-teotl-unification-core-extraction-spec.md (approved 2026-07-02; companion debt audit 2026-07-02-debt-audit-p0-integrity-batch.md)",
+  "slice_plan": {
+    "phase": "P0 stop-the-bleeding integrity batch",
+    "parallel_groups": [["ron-136-claude-adapter-parity", "ron-137-config-validation"]]
+  },
+  "children": [
+    {"id": "ron-136-claude-adapter-parity", "source_ticket": "RON-136"},
+    {"id": "ron-137-config-validation", "source_ticket": "RON-137"}
+  ],
+  "dependency_graph": {
+    "ron-136-claude-adapter-parity": [],
+    "ron-137-config-validation": []
+  },
+  "proof_requirements": [
+    {
+      "kind": "proof-requirement-v1",
+      "id": "rondo-pre-pr-gates",
+      "type": "command_gate",
+      "stage": "pre-pr",
+      "status": "required",
+      "description": "Configured rondo gates: format, credo, test.",
+      "success_criteria": [
+        "cd elixir && mix format --check-formatted exits 0",
+        "cd elixir && mix credo --strict exits 0",
+        "cd elixir && mix test exits 0 (known flaky: OrchestratorStatusTest RON-31, verify with fixed seed against main before treating as real red)"
+      ],
+      "failure_policy": {"on_missing": "block", "on_failure": "block", "retryable": true},
+      "expected_artifact": {"kind": "gate_envelope", "reference": "run-ledger gate path or transcript-safe summary"}
+    }
+  ],
+  "guides_and_gates": {
+    "gates": ["format", "credo", "test"],
+    "gate_commands": {
+      "format": "cd elixir && mix format --check-formatted",
+      "credo": "cd elixir && mix credo --strict",
+      "test": "cd elixir && mix test"
+    },
+    "guides": ["TDD: failing test first per acceptance bullet; ticket AFK brief is the authoritative slice brief"]
+  },
+  "approval": {
+    "approved_at": "2026-07-02T17:10:23Z",
+    "approved_by": "Vic Valenzuela <victor@dala.care>",
+    "verdicts": {
+      "ron-136-claude-adapter-parity": "approve",
+      "ron-137-config-validation": "approve"
+    }
+  },
+  "runner_extensions": {
+    "model_routing": {
+      "routing": [
+        {"boundary": "implementation", "tier": "standard", "mode": "prefer", "reason": "weak-tier P0 batch: mechanical, evidence-pinned fixes routed cheap by design", "source": {"skill": "envelope", "phase": "execution"}},
+        {"boundary": "review_fix", "tier": "standard", "mode": "prefer", "reason": "review-fix iterations stay on the repo default tier", "source": {"skill": "envelope"}},
+        {"boundary": "gate_repair", "tier": "standard", "mode": "prefer", "reason": "gate repair is mechanical against exact commands", "source": {"skill": "envelope"}}
+      ],
+      "tier": "standard",
+      "mode": "prefer",
+      "candidates": ["sonnet"]
+    }
+  },
+  "validation": {
+    "schema_version": "approved-slice-plan-export-v0",
+    "rubric_version": "afk-rubric-v1",
+    "notes": "All include paths probed with test -f in the authoring session; mix probed via mise shims (~/.local/share/mise/shims/mix); repo pinned at main e5689a81795629bf78fe3331fb0db63eda2a587b; slices file-disjoint hence one parallel group."
+  },
+  "ownership": {
+    "beislid": "Defines planning, autonomy, and proof semantics of this bundle.",
+    "rondo": "Owns execution and run evidence produced while carrying out the envelopes.",
+    "memento": "Owns durable memory and learning captured from completed work.",
+    "teotl": "Program umbrella; no runtime responsibility."
+  }
+}
