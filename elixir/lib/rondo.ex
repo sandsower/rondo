@@ -26,6 +26,7 @@ defmodule Rondo.Application do
     children = [
       {Phoenix.PubSub, name: Rondo.PubSub},
       {Task.Supervisor, name: Rondo.TaskSupervisor},
+      RondoWeb.PresenterCache,
       Rondo.WorkflowStore,
       Rondo.Orchestrator,
       Rondo.HttpServer,

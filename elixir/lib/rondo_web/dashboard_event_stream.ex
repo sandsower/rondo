@@ -210,7 +210,10 @@ defmodule RondoWeb.DashboardEventStream do
         summary: summary,
         source: %{kind: "event_log", event_index: index},
         artifacts: artifacts,
-        run_meta: run_meta
+        tokens_delta: token_delta_total(entry[:tokens] || entry["tokens"]),
+        duration_ms: nil,
+        run_meta: run_meta,
+        step_index: index
       })
     end)
   end
@@ -229,6 +232,8 @@ defmodule RondoWeb.DashboardEventStream do
       summary: Map.get(step, :summary) || Map.get(step, "summary") || Map.get(step, :message) || Map.get(step, "message") || normalized_value(Map.get(step, :kind) || Map.get(step, "kind") || "event"),
       source: Map.get(step, :source) || Map.get(step, "source") || %{kind: "timeline", event_index: index},
       artifacts: Map.get(step, :artifacts) || Map.get(step, "artifacts") || [],
+      tokens_delta: token_delta_total(Map.get(step, :accounted_usage_delta) || Map.get(step, "accounted_usage_delta")),
+      duration_ms: Map.get(step, :duration_ms) || Map.get(step, "duration_ms"),
       run_meta: run_meta,
       step_index: index
     })
@@ -253,6 +258,7 @@ defmodule RondoWeb.DashboardEventStream do
 
     row = %{
       id: row_id(kind, at, Map.get(attrs, :step_index, 0)),
+      step_index: Map.get(attrs, :step_index),
       at: iso8601(at),
       sort_at: parse_dt(at),
       kind: kind,
@@ -261,6 +267,8 @@ defmodule RondoWeb.DashboardEventStream do
       status: status,
       outcome: outcome,
       summary: summary,
+      tokens_delta: Map.get(attrs, :tokens_delta),
+      duration_ms: Map.get(attrs, :duration_ms),
       issue_identifier: issue_identifier,
       issue_id: issue_id,
       run_state: run_state,
@@ -373,14 +381,24 @@ defmodule RondoWeb.DashboardEventStream do
     base |> String.replace(~r/[^A-Za-z0-9_-]+/, "-") |> String.replace(~r/-+/, "-")
   end
 
-  defp sort_rows(rows, "time_desc"), do: rows |> Enum.sort_by(fn row -> {Map.get(row, :sort_at), Map.get(row, :id)} end) |> Enum.reverse()
-  defp sort_rows(rows, "kind_asc"), do: Enum.sort_by(rows, fn row -> {Map.get(row, :kind), Map.get(row, :sort_at), Map.get(row, :id)} end)
-  defp sort_rows(rows, "kind_desc"), do: rows |> Enum.sort_by(fn row -> {Map.get(row, :kind), Map.get(row, :sort_at), Map.get(row, :id)} end) |> Enum.reverse()
-  defp sort_rows(rows, "status_asc"), do: Enum.sort_by(rows, fn row -> {Map.get(row, :status), Map.get(row, :sort_at), Map.get(row, :id)} end)
-  defp sort_rows(rows, "status_desc"), do: rows |> Enum.sort_by(fn row -> {Map.get(row, :status), Map.get(row, :sort_at), Map.get(row, :id)} end) |> Enum.reverse()
-  defp sort_rows(rows, "summary_asc"), do: Enum.sort_by(rows, fn row -> {String.downcase(to_string(Map.get(row, :summary) || "")), Map.get(row, :sort_at), Map.get(row, :id)} end)
-  defp sort_rows(rows, "summary_desc"), do: rows |> Enum.sort_by(fn row -> {String.downcase(to_string(Map.get(row, :summary) || "")), Map.get(row, :sort_at), Map.get(row, :id)} end) |> Enum.reverse()
-  defp sort_rows(rows, _), do: Enum.sort_by(rows, fn row -> {Map.get(row, :sort_at), Map.get(row, :id)} end)
+  defp sort_rows(rows, "time_desc"), do: Enum.sort_by(rows, fn row -> {descending_time_key(Map.get(row, :sort_at)), time_tiebreak(row)} end)
+  defp sort_rows(rows, "kind_asc"), do: Enum.sort_by(rows, fn row -> {Map.get(row, :kind), Map.get(row, :sort_at), time_tiebreak(row)} end)
+  defp sort_rows(rows, "kind_desc"), do: rows |> Enum.sort_by(fn row -> {Map.get(row, :kind), Map.get(row, :sort_at), time_tiebreak(row)} end) |> Enum.reverse()
+  defp sort_rows(rows, "status_asc"), do: Enum.sort_by(rows, fn row -> {Map.get(row, :status), Map.get(row, :sort_at), time_tiebreak(row)} end)
+  defp sort_rows(rows, "status_desc"), do: rows |> Enum.sort_by(fn row -> {Map.get(row, :status), Map.get(row, :sort_at), time_tiebreak(row)} end) |> Enum.reverse()
+  defp sort_rows(rows, "summary_asc"), do: Enum.sort_by(rows, fn row -> {String.downcase(to_string(Map.get(row, :summary) || "")), Map.get(row, :sort_at), time_tiebreak(row)} end)
+  defp sort_rows(rows, "summary_desc"), do: rows |> Enum.sort_by(fn row -> {String.downcase(to_string(Map.get(row, :summary) || "")), Map.get(row, :sort_at), time_tiebreak(row)} end) |> Enum.reverse()
+  defp sort_rows(rows, _), do: Enum.sort_by(rows, fn row -> {Map.get(row, :sort_at), time_tiebreak(row)} end)
+
+  # Rows sharing a timestamp keep their original timeline order instead of
+  # sorting alphabetically by the kind-prefixed row id.
+  defp time_tiebreak(row) do
+    index = Map.get(row, :step_index)
+    {if(is_integer(index), do: index, else: 0), Map.get(row, :id)}
+  end
+
+  defp descending_time_key(%DateTime{} = sort_at), do: -DateTime.to_unix(sort_at, :microsecond)
+  defp descending_time_key(_sort_at), do: 0
 
   defp match_filters?(row, filters) do
     matches_query?(row, filters.query) and
@@ -521,6 +539,26 @@ defmodule RondoWeb.DashboardEventStream do
       kind in @decision_kinds -> "decision"
       kind in @tool_kinds -> "tool"
       true -> "event"
+    end
+  end
+
+  defp token_delta_total(tokens) when is_map(tokens) do
+    case token_value(tokens, :total_tokens) do
+      total when is_integer(total) and total > 0 ->
+        total
+
+      _ ->
+        sum = (token_value(tokens, :input_tokens) || 0) + (token_value(tokens, :output_tokens) || 0)
+        if sum > 0, do: sum
+    end
+  end
+
+  defp token_delta_total(_tokens), do: nil
+
+  defp token_value(tokens, key) do
+    case Map.get(tokens, key) || Map.get(tokens, Atom.to_string(key)) do
+      value when is_integer(value) -> value
+      _ -> nil
     end
   end
 

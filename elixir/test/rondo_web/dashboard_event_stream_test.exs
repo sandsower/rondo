@@ -453,6 +453,56 @@ defmodule RondoWeb.DashboardEventStreamTest do
     assert [%{summary: "archived event"}] = view.rows
   end
 
+  test "build exposes per-step token deltas and durations from timeline steps" do
+    projection = %{
+      identifier: "MT-TOKENS",
+      timeline: [
+        %{
+          at: @start_one,
+          kind: "turn_completed",
+          phase: "turn",
+          status: "completed",
+          accounted_usage_delta: %{input_tokens: 100, output_tokens: 50, total_tokens: 150},
+          duration_ms: 12_000,
+          artifacts: []
+        },
+        %{
+          at: @start_two,
+          kind: "gates_completed",
+          status: "passed",
+          accounted_usage_delta: %{"input_tokens" => 20, "output_tokens" => 5},
+          artifacts: []
+        },
+        %{at: @start_three, kind: "completed", status: "completed", artifacts: []}
+      ]
+    }
+
+    view = DashboardEventStream.build(%{run_timelines: [projection]}, nil, nil, 0, %{})
+
+    assert [turn, gates, terminal] = view.rows
+    assert turn.tokens_delta == 150
+    assert turn.duration_ms == 12_000
+    # No total on the step: falls back to input + output.
+    assert gates.tokens_delta == 25
+    assert gates.duration_ms == nil
+    assert terminal.tokens_delta == nil
+  end
+
+  test "time descending sort preserves timeline order for equal timestamps" do
+    projection = %{
+      identifier: "MT-SORT",
+      timeline: [
+        %{at: @start_one, kind: "dispatch", summary: "first same-time step"},
+        %{at: @start_one, kind: "turn_started", summary: "second same-time step"},
+        %{at: @start_two, kind: "completed", summary: "newer step"}
+      ]
+    }
+
+    view = DashboardEventStream.build(%{run_timelines: [projection]}, nil, nil, 0, %{sort: "time_desc"})
+
+    assert Enum.map(view.rows, & &1.summary) == ["newer step", "first same-time step", "second same-time step"]
+  end
+
   test "dashboard query params keep only whitelisted values" do
     assert DashboardLive.dashboard_query_params(%{
              "issue" => "MT-500",

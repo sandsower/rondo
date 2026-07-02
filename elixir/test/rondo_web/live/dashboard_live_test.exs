@@ -111,13 +111,8 @@ defmodule RondoWeb.DashboardLiveTest do
     assert updated_socket.assigns.event_category == :prompt
   end
 
-  test "selects the matching run projection for live and archived selections" do
+  test "projects the selected run lazily for live and archived selections" do
     payload = %{
-      run_timelines: [
-        %{identifier: "MT-ARCHIVE", run_id: "run-old", session_id: "session-old", started_at: "2026-05-10T15:29:00Z", timeline: []},
-        %{identifier: "MT-ARCHIVE", run_id: "run-live", session_id: "session-live", started_at: "2026-05-10T15:30:00Z", timeline: []},
-        %{identifier: "MT-OTHER", run_id: "run-other", session_id: "session-other", started_at: "2026-05-10T15:31:00Z", timeline: []}
-      ],
       archived: [
         %{
           issue_identifier: "MT-ARCHIVE",
@@ -134,14 +129,13 @@ defmodule RondoWeb.DashboardLiveTest do
       ]
     }
 
-    assert %{run_id: "run-live"} =
-             DashboardLive.selected_run_projection_for_test(payload, %{identifier: "MT-ARCHIVE", run_id: "run-live"})
-
-    assert %{run_id: "run-live"} =
-             DashboardLive.selected_run_projection_for_test(payload, %{issue_identifier: "MT-ARCHIVE", session_id: "session-live"})
-
-    assert %{run_id: "run-live"} =
-             DashboardLive.selected_run_projection_for_test(payload, %{issue_identifier: "MT-ARCHIVE", started_at: "2026-05-10T15:30:00Z"})
+    assert %{identifier: "MT-ARCHIVE", archived: true} =
+             DashboardLive.selected_run_projection_for_test(%{
+               issue_identifier: "MT-ARCHIVE",
+               started_at: "2026-05-10T15:30:00Z",
+               finished_at: "2026-05-10T15:31:00Z",
+               exit_reason: "completed"
+             })
 
     socket = %Socket{
       assigns: %{
@@ -173,7 +167,8 @@ defmodule RondoWeb.DashboardLiveTest do
     assert [%{filename: "2026-05-10T15-30-00Z.json"}] = updated_socket.assigns.selected_runs
     assert updated_socket.assigns.selected_issue_data.finished_at == "2026-05-10T15:31:00Z"
     assert updated_socket.assigns.selected_issue_data.event_log == []
-    assert updated_socket.assigns.selected_run_projection.run_id == "run-live"
+    assert updated_socket.assigns.selected_run_projection.identifier == "MT-ARCHIVE"
+    assert updated_socket.assigns.selected_run_projection.archived == true
     assert updated_socket.assigns.selected_event_index == nil
     assert updated_socket.assigns.selected_event_view == :summary
     assert updated_socket.assigns.selected_event_detail == nil
@@ -186,26 +181,146 @@ defmodule RondoWeb.DashboardLiveTest do
     assert DashboardLive.archive_activity_style_for_test(%{tokens: %{total_tokens: nil}}) == "width: 8%"
   end
 
-  test "renders ledger browser metadata from run timeline steps" do
-    step = %{
-      status: "completed",
-      kind: "dispatch",
-      summary: "dispatch",
-      source: %{kind: "checkpoint", path: "checkpoints/0001-dispatch.json"},
-      artifacts: [
-        %{kind: "checkpoint", path: "checkpoints/0001-dispatch.json"},
-        %{kind: "final_report", path: "artifacts/final-report.json"}
+  test "select_timeline_step loads checkpoint detail and toggles closed on re-click" do
+    run_dir = Path.join(System.tmp_dir!(), "rondo-timeline-step-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.join(run_dir, "checkpoints"))
+    on_exit(fn -> File.rm_rf(run_dir) end)
+
+    File.write!(
+      Path.join(run_dir, "checkpoints/0001-dispatch.json"),
+      Jason.encode!(%{"kind" => "dispatch", "attempt" => 1, "note" => "checkpoint payload"})
+    )
+
+    projection = %{
+      identifier: "RON-1",
+      timeline: [
+        %{
+          kind: "dispatch",
+          status: "completed",
+          at: "2026-06-30T11:37:44Z",
+          run_dir: run_dir,
+          source: %{kind: "checkpoint", path: "checkpoints/0001-dispatch.json"},
+          artifacts: [%{kind: "checkpoint", path: "checkpoints/0001-dispatch.json"}]
+        }
       ]
     }
 
-    assert DashboardLive.ledger_step_class_for_test(step) =~ "state-badge"
-    assert DashboardLive.ledger_step_meta_for_test(step) =~ "checkpoint: checkpoints/0001-dispatch.json"
-    assert DashboardLive.ledger_step_meta_for_test(step) =~ "final_report: artifacts/final-report.json"
+    socket = %Socket{
+      assigns: %{
+        __changed__: %{},
+        selected_issue_data: %{event_log: []},
+        selected_run_projection: projection,
+        selected_event_index: nil,
+        selected_event_view: :summary,
+        selected_event_detail: nil
+      }
+    }
+
+    {:noreply, opened} = DashboardLive.handle_event("select_timeline_step", %{"index" => "0"}, socket)
+    detail = opened.assigns.selected_event_detail
+
+    assert opened.assigns.selected_event_index == 0
+    assert detail.category_label == "Checkpoint"
+    assert detail.raw_json =~ "checkpoint payload"
+    assert Enum.any?(detail.structured_fields, fn {label, _} -> label == "Kind" end)
+    assert [%{label: "checkpoint", path: "checkpoints/0001-dispatch.json"}] = detail.artifact_links
+
+    {:noreply, closed} = DashboardLive.handle_event("select_timeline_step", %{"index" => "0"}, opened)
+    assert closed.assigns.selected_event_index == nil
+    assert closed.assigns.selected_event_detail == nil
   end
 
-  test "formats event-log sources with one-based indices" do
-    step = %{source: %{kind: "event_log", event_index: 2}, artifacts: []}
+  test "select_timeline_step routes event_log-sourced steps through the event inspector" do
+    projection = %{
+      identifier: "RON-1",
+      timeline: [
+        %{
+          kind: "turn_completed",
+          at: "2026-06-29T22:00:00Z",
+          source: %{kind: "event_log", event_index: 0}
+        }
+      ]
+    }
 
-    assert DashboardLive.ledger_step_meta_for_test(step) == "event log #3"
+    socket = %Socket{
+      assigns: %{
+        __changed__: %{},
+        selected_issue_data: %{
+          session_id: "session-42",
+          event_log: [%{at: "2026-06-29T22:00:00Z", event: :result, message: "turn done"}]
+        },
+        selected_run_projection: projection,
+        selected_event_index: nil,
+        selected_event_view: :summary,
+        selected_event_detail: nil
+      }
+    }
+
+    {:noreply, updated} = DashboardLive.handle_event("select_timeline_step", %{"index" => "0"}, socket)
+    detail = updated.assigns.selected_event_detail
+
+    assert updated.assigns.selected_event_index == 0
+    assert detail.index == 0
+    assert detail.session_id == "session-42"
+    assert is_list(detail.structured_fields)
+  end
+
+  describe "event stream filter events" do
+    defp event_stream_socket do
+      projection = %{
+        identifier: "RON-1",
+        timeline: [
+          %{kind: "dispatch_requested", phase: "dispatch", status: "completed", at: "2026-06-30T10:00:00Z", artifacts: []},
+          %{kind: "completed", phase: "terminal", status: "completed", at: "2026-06-30T10:05:00Z", artifacts: []}
+        ]
+      }
+
+      selected_issue_data = %{
+        issue_identifier: "RON-1",
+        session_id: "session-1",
+        event_log: []
+      }
+
+      %Socket{
+        assigns: %{
+          __changed__: %{},
+          selected_issue_data: selected_issue_data,
+          selected_runs: nil,
+          selected_run_index: 0,
+          selected_run_projection: projection,
+          event_stream_view: RondoWeb.DashboardEventStream.build(%{run_timelines: [projection]}, selected_issue_data, nil, 0, %{})
+        }
+      }
+    end
+
+    test "event_stream_facet narrows rows to the clicked facet" do
+      socket = event_stream_socket()
+
+      {:noreply, updated} = DashboardLive.handle_event("event_stream_facet", %{"facet" => "terminal"}, socket)
+      view = updated.assigns.event_stream_view
+
+      assert view.filters.facet == "terminal"
+      assert Enum.map(view.rows, & &1.facet) == ["terminal"]
+    end
+
+    test "event_stream_sort reorders rows" do
+      socket = event_stream_socket()
+
+      {:noreply, updated} = DashboardLive.handle_event("event_stream_sort", %{"sort" => "time_desc"}, socket)
+      view = updated.assigns.event_stream_view
+
+      assert view.filters.sort == "time_desc"
+      assert Enum.map(view.rows, & &1.kind) == ["completed", "dispatch_requested"]
+    end
+
+    test "event_stream_filters applies form params" do
+      socket = event_stream_socket()
+
+      {:noreply, updated} = DashboardLive.handle_event("event_stream_filters", %{"kind" => "completed"}, socket)
+      view = updated.assigns.event_stream_view
+
+      assert view.filters.kind == "completed"
+      assert Enum.map(view.rows, & &1.kind) == ["completed"]
+    end
   end
 end

@@ -4,10 +4,18 @@ defmodule RondoWeb.Presenter do
   """
 
   alias Rondo.{Config, ModelUsage, Orchestrator, RunLedger, RunOutcome, RunTimeline}
-  alias RondoWeb.ResultSummary
+  alias RondoWeb.{PresenterCache, ResultSummary}
 
   @dialyzer {:nowarn_function, archived_cost: 1}
 
+  @doc """
+  Lightweight observability state projection.
+
+  Deliberately excludes run timelines and per-run detail: those are expensive
+  to build (disk reads per run) and are only needed once a specific run is
+  selected. Use `run_projection/1` for that, and `archived_groups/1` to derive
+  per-ticket groupings from `archived_table` where needed.
+  """
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
     generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
@@ -20,7 +28,7 @@ defmodule RondoWeb.Presenter do
         paused = Map.get(snapshot, :paused, [])
         dispatch_blockers = Map.get(snapshot, :dispatch_blockers, [])
         needs_guidance = Enum.filter(paused, &guidance_entry?/1)
-        archived_table = archived_runs_table(archived)
+        archived_table = archived_runs_table_cached(archived)
 
         %{
           generated_at: generated_at,
@@ -36,14 +44,7 @@ defmodule RondoWeb.Presenter do
           needs_guidance: Enum.map(needs_guidance, &needs_guidance_entry_payload/1),
           paused: Enum.map(paused, &paused_entry_payload/1),
           dispatch_blockers: Enum.map(dispatch_blockers, &dispatch_blocker_payload/1),
-          archived: group_archived_by_ticket(archived_table),
           archived_table: archived_table,
-          run_timelines:
-            RunTimeline.project(
-              running,
-              timeline_archived_runs(archived),
-              archived_loader: &Orchestrator.load_archived_run/2
-            ),
           model_usage: ModelUsage.aggregate(running, archived),
           claude_totals: Map.get(snapshot, :claude_totals, %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}),
           rate_limits: Map.get(snapshot, :rate_limits)
@@ -55,6 +56,31 @@ defmodule RondoWeb.Presenter do
       :unavailable ->
         %{generated_at: generated_at, error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}}
     end
+  end
+
+  @doc """
+  Lazily project the run timeline for a single payload entry (running row,
+  archived table row, or archived group run). Archived runs are hydrated from
+  the on-disk archive; live runs read their ledger from `run_dir`.
+  """
+  @spec run_projection(map() | nil) :: map() | nil
+  def run_projection(nil), do: nil
+
+  def run_projection(run) when is_map(run) do
+    entry = normalize_projection_entry(run)
+
+    if payload_value(run, :finished_at) do
+      RunTimeline.project_archived_run(entry, &Orchestrator.load_archived_run/2, [])
+    else
+      RunTimeline.project_run(entry)
+    end
+  end
+
+  def run_projection(_run), do: nil
+
+  defp normalize_projection_entry(run) do
+    identifier = payload_value(run, :identifier) || payload_value(run, :issue_identifier)
+    Map.put(run, :identifier, identifier)
   end
 
   @spec issue_payload(String.t(), GenServer.name(), timeout()) :: {:ok, map()} | {:error, :issue_not_found}
@@ -707,29 +733,50 @@ defmodule RondoWeb.Presenter do
     |> Enum.reject(&is_nil(&1.at))
   end
 
-  @timeline_recent_limit 10
-  @timeline_failure_limit 10
   @archived_table_recent_limit 500
   @archived_table_failure_limit 100
 
-  defp timeline_archived_runs(archived) do
-    recent = Enum.take(archived, @timeline_recent_limit)
+  # Archived data usually changes only when a run is archived, but repaired
+  # ledgers can update entries in-place. Fingerprint the same bounded source
+  # window used by the table so cache reuse stays correct without loading full
+  # archived event logs.
+  defp archived_runs_table_cached(archived) when is_list(archived) do
+    window = archived_table_window(archived)
 
-    failures =
-      archived
-      |> Enum.filter(&(RunOutcome.kind(&1) == :failed))
-      |> Enum.take(@timeline_failure_limit)
+    PresenterCache.fetch(:archived_table, archived_fingerprint(window), fn ->
+      archived_runs_table_from_window(window)
+    end)
+  end
 
-    (recent ++ failures)
-    |> Enum.uniq_by(&{Map.get(&1, :identifier), Map.get(&1, :started_at)})
+  defp archived_fingerprint([]), do: :empty
+
+  defp archived_fingerprint(archived_window) when is_list(archived_window) do
+    Enum.map(archived_window, &archived_stamp/1)
+  end
+
+  defp archived_stamp(entry) do
+    {
+      payload_value(entry, :identifier),
+      payload_value(entry, :started_at),
+      payload_value(entry, :finished_at),
+      payload_value(entry, :exit_reason),
+      payload_value(entry, :final_report),
+      payload_value(entry, :tokens),
+      payload_value(entry, :model_routing)
+    }
   end
 
   @spec archived_runs_table([map()]) :: [map()]
   def archived_runs_table(archived) when is_list(archived) do
-    defaults = %{project: Config.linear_project_slug(), repo: Config.tracker_repo()}
-
     archived
     |> archived_table_window()
+    |> archived_runs_table_from_window()
+  end
+
+  defp archived_runs_table_from_window(archived_window) do
+    defaults = %{project: Config.linear_project_slug(), repo: Config.tracker_repo()}
+
+    archived_window
     |> Enum.map(&archived_entry_payload(&1, defaults))
     |> Enum.sort_by(&(&1.finished_at || &1.started_at || ""), :desc)
   end
@@ -746,7 +793,12 @@ defmodule RondoWeb.Presenter do
     |> Enum.uniq_by(&{Map.get(&1, :identifier), Map.get(&1, :started_at)})
   end
 
-  defp group_archived_by_ticket(archived_rows) do
+  @doc """
+  Group archived-table rows by ticket. Derived on demand from
+  `archived_table` instead of being duplicated into the state payload.
+  """
+  @spec archived_groups([map()]) :: [map()]
+  def archived_groups(archived_rows) when is_list(archived_rows) do
     archived_rows
     |> Enum.group_by(& &1.issue_identifier)
     |> Enum.map(fn {identifier, runs} ->
@@ -768,6 +820,8 @@ defmodule RondoWeb.Presenter do
     end)
     |> Enum.sort_by(& &1.latest_finished_at, :desc)
   end
+
+  def archived_groups(_archived_rows), do: []
 
   defp archived_entry_payload(entry, defaults) do
     started_value = Map.get(entry, :started_at)
@@ -1114,6 +1168,10 @@ defmodule RondoWeb.Presenter do
     |> DateTime.to_iso8601()
   end
 
+  # Archived event logs round-trip through JSON, so timestamps arrive as
+  # ISO-8601 strings rather than DateTime structs.
+  defp iso8601(timestamp) when is_binary(timestamp), do: timestamp
+
   defp iso8601(_datetime), do: nil
 
   # --- Chart data projections ---
@@ -1156,12 +1214,24 @@ defmodule RondoWeb.Presenter do
     }
   end
 
+  # A bar per ticket stops being readable once the archive grows, so the
+  # chart shows the biggest token consumers only.
+  @outcome_chart_limit 20
+
+  @spec outcome_chart_limit() :: pos_integer()
+  def outcome_chart_limit, do: @outcome_chart_limit
+
   @spec run_outcomes(list()) :: map()
   def run_outcomes(archived_groups) when is_list(archived_groups) do
+    top =
+      archived_groups
+      |> Enum.sort_by(& &1.total_tokens, :desc)
+      |> Enum.take(@outcome_chart_limit)
+
     %{
-      labels: Enum.map(archived_groups, & &1.issue_identifier),
-      values: Enum.map(archived_groups, & &1.total_tokens),
-      colors: Enum.map(archived_groups, &archived_outcome_kind/1)
+      labels: Enum.map(top, & &1.issue_identifier),
+      values: Enum.map(top, & &1.total_tokens),
+      colors: Enum.map(top, &archived_outcome_kind/1)
     }
   end
 

@@ -22,6 +22,11 @@ defmodule Rondo.ModelUsageTest do
       assert ModelUsage.provider_from_model("anthropic/claude-sonnet-4-20250514") == "anthropic"
     end
 
+    test "maps bare claude model names to anthropic" do
+      assert ModelUsage.provider_from_model("claude-sonnet-5") == "anthropic"
+      assert ModelUsage.provider_from_model("claude-opus-4-8") == "anthropic"
+    end
+
     test "fuzzy matches codex and openrouter in model strings" do
       assert ModelUsage.provider_from_model("some-codex-model") == "codex"
       assert ModelUsage.provider_from_model("openrouter-variant") == "openrouter"

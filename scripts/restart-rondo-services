@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: restart-rondo-services [--skip-build] [--no-wait]
+
+Rebuilds the local Rondo escript and restarts the three local Rondo services:
+  4000 -> /Users/vicvalenzuela/Personal/rondo/WORKFLOW.md
+  4001 -> /Users/vicvalenzuela/Projects/beislid/WORKFLOW.md
+  4002 -> /Users/vicvalenzuela/Personal/memento-vault/WORKFLOW.md
+
+Environment overrides:
+  RONDO_WORKFLOW_4000       Workflow path for port 4000
+  RONDO_WORKFLOW_4001       Workflow path for port 4001
+  RONDO_WORKFLOW_4002       Workflow path for port 4002
+  RONDO_RESTART_LOG_DIR     Log/pid directory (default: /tmp/rondo-restarts)
+  RONDO_STOP_TIMEOUT        Seconds to wait before SIGKILL (default: 30)
+  RONDO_START_TIMEOUT       Seconds to wait for /api/v1/state (default: 90)
+USAGE
+}
+
+build=true
+wait_for_ready=true
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --skip-build)
+      build=false
+      shift
+      ;;
+    --no-wait)
+      wait_for_ready=false
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+script_source="${BASH_SOURCE[0]}"
+while [[ -L "$script_source" ]]; do
+  script_source_dir="$(cd -P -- "$(dirname -- "$script_source")" && pwd)"
+  script_target="$(readlink "$script_source")"
+
+  if [[ "$script_target" == /* ]]; then
+    script_source="$script_target"
+  else
+    script_source="${script_source_dir}/${script_target}"
+  fi
+done
+
+script_dir="$(cd -P -- "$(dirname -- "$script_source")" && pwd)"
+repo_dir="$(cd -P -- "${script_dir}/.." && pwd)"
+elixir_dir="${repo_dir}/elixir"
+log_dir="${RONDO_RESTART_LOG_DIR:-/tmp/rondo-restarts}"
+stop_timeout="${RONDO_STOP_TIMEOUT:-30}"
+start_timeout="${RONDO_START_TIMEOUT:-90}"
+
+workflow_4000="${RONDO_WORKFLOW_4000:-/Users/vicvalenzuela/Personal/rondo/WORKFLOW.md}"
+workflow_4001="${RONDO_WORKFLOW_4001:-/Users/vicvalenzuela/Projects/beislid/WORKFLOW.md}"
+workflow_4002="${RONDO_WORKFLOW_4002:-/Users/vicvalenzuela/Personal/memento-vault/WORKFLOW.md}"
+
+services=(
+  "4000:${workflow_4000}"
+  "4001:${workflow_4001}"
+  "4002:${workflow_4002}"
+)
+
+run_with_mise() {
+  if command -v mise >/dev/null 2>&1; then
+    mise exec -- "$@"
+  else
+    "$@"
+  fi
+}
+
+pids_for_port() {
+  local port="$1"
+  ps -axo pid=,command= | awk -v port="$port" '
+    $0 ~ /[b]in\/rondo/ && $0 ~ ("--port " port) { print $1 }
+  '
+}
+
+pid_file_for_port() {
+  local port="$1"
+  printf '%s/rondo-%s.pid' "$log_dir" "$port"
+}
+
+candidate_pids_for_port() {
+  local port="$1"
+  local pid_file
+  pid_file="$(pid_file_for_port "$port")"
+
+  if [[ -f "$pid_file" ]]; then
+    while IFS= read -r pid; do
+      if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        printf '%s\n' "$pid"
+      fi
+    done < "$pid_file"
+  fi
+
+  pids_for_port "$port"
+}
+
+preflight_workflows() {
+  local missing=0
+  local spec port workflow
+
+  for spec in "${services[@]}"; do
+    port="${spec%%:*}"
+    workflow="${spec#*:}"
+
+    if [[ ! -f "$workflow" ]]; then
+      echo "port ${port}: workflow not found: ${workflow}" >&2
+      missing=1
+    fi
+  done
+
+  if (( missing != 0 )); then
+    echo "Refusing to stop any service until all workflow paths are valid." >&2
+    exit 1
+  fi
+}
+
+wait_for_exit() {
+  local pid="$1"
+  local waited=0
+
+  while kill -0 "$pid" 2>/dev/null; do
+    if (( waited >= stop_timeout )); then
+      return 1
+    fi
+
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  return 0
+}
+
+stop_service() {
+  local port="$1"
+  local pids_text=""
+  local pids=()
+
+  pids_text="$(candidate_pids_for_port "$port" | sort -u | tr '\n' ' ')"
+  if [[ -z "${pids_text// }" ]]; then
+    echo "port ${port}: no existing Rondo process"
+    return 0
+  fi
+
+  read -r -a pids <<< "$pids_text"
+
+  echo "port ${port}: stopping PIDs ${pids[*]}"
+  kill -TERM "${pids[@]}" 2>/dev/null || true
+
+  local lingering=()
+  local pid
+  for pid in "${pids[@]}"; do
+    if ! wait_for_exit "$pid"; then
+      lingering+=("$pid")
+    fi
+  done
+
+  if (( ${#lingering[@]} > 0 )); then
+    echo "port ${port}: force-stopping lingering PIDs ${lingering[*]}"
+    kill -KILL "${lingering[@]}" 2>/dev/null || true
+  fi
+}
+
+start_service() {
+  local port="$1"
+  local workflow="$2"
+
+  if [[ ! -f "$workflow" ]]; then
+    echo "port ${port}: workflow not found: ${workflow}" >&2
+    return 1
+  fi
+
+  mkdir -p "$log_dir"
+
+  local log_file="${log_dir}/rondo-${port}.log"
+  local pid_file
+  pid_file="$(pid_file_for_port "$port")"
+
+  (
+    cd "$elixir_dir"
+    nohup bash -lc 'if command -v mise >/dev/null 2>&1; then exec mise exec -- ./bin/rondo --port "$1" "$2"; else exec ./bin/rondo --port "$1" "$2"; fi' \
+      bash "$port" "$workflow" >"$log_file" 2>&1 &
+    echo $! >"$pid_file"
+  )
+
+  local pid
+  pid="$(cat "$pid_file")"
+  echo "port ${port}: started PID ${pid} (log: ${log_file})"
+}
+
+wait_for_service() {
+  local port="$1"
+  local waited=0
+  local url="http://127.0.0.1:${port}/api/v1/state"
+
+  while (( waited < start_timeout )); do
+    if curl -fsS --max-time 30 -o /dev/null "$url"; then
+      echo "port ${port}: ready (${url})"
+      return 0
+    fi
+
+    sleep 2
+    waited=$((waited + 2))
+  done
+
+  echo "port ${port}: not ready after ${start_timeout}s (${url})" >&2
+  return 1
+}
+
+cd "$elixir_dir"
+preflight_workflows
+
+if [[ "$build" == true ]]; then
+  echo "Building Rondo escript..."
+  run_with_mise mix build
+fi
+
+for spec in "${services[@]}"; do
+  port="${spec%%:*}"
+  stop_service "$port"
+done
+
+for spec in "${services[@]}"; do
+  port="${spec%%:*}"
+  workflow="${spec#*:}"
+  start_service "$port" "$workflow"
+done
+
+if [[ "$wait_for_ready" == true ]]; then
+  ready_failed=0
+  for spec in "${services[@]}"; do
+    port="${spec%%:*}"
+    wait_for_service "$port" || ready_failed=1
+  done
+
+  if (( ready_failed != 0 )); then
+    exit 1
+  fi
+fi
+
+echo "Rondo services restarted."
