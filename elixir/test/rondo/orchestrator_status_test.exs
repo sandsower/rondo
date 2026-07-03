@@ -4324,12 +4324,29 @@ defmodule Rondo.OrchestratorStatusTest do
       File.rm_rf(workspace_root)
     end)
 
+    # Wait for the orchestrator's startup poll cycle (which runs against the
+    # empty memory tracker set above) to fully settle on a durable signal
+    # before injecting the capacity scenario. Otherwise that startup poll can
+    # still be in flight when we set the real issues below, letting it race
+    # our injected scenario and overwrite the issue-attributed blocker.
+    wait_until(fn ->
+      case :sys.get_state(pid) do
+        %{poll_check_in_progress: false, next_poll_due_at_ms: due} when is_integer(due) -> true
+        _ -> nil
+      end
+    end)
+
     initial_state = :sys.get_state(pid)
     state_with_dispatch = %{initial_state | max_concurrent_agents: 1, poll_interval_ms: 60_000}
     :sys.replace_state(pid, fn _ -> state_with_dispatch end)
 
     Application.put_env(:rondo, :memory_tracker_issues, [issue_a, issue_b])
-    send(pid, {:tick, state_with_dispatch.tick_token})
+
+    # Drive the poll cycle directly instead of racing the startup tick with a
+    # bare :tick/token pair (same idiom as the RON-143 stalled-worker fix):
+    # :run_poll_cycle runs unconditionally against current state, so it can't
+    # be silently dropped by a stale tick_token from the startup cycle above.
+    send(pid, :run_poll_cycle)
 
     snapshot =
       wait_until(fn ->
