@@ -96,8 +96,6 @@ Cheap gates first for iteration. Normal review/babysit runs format, credo, tests
 - name: test
   command: 'cd elixir && mix test'
   cost: expensive
-  failure:
-    hint: 'known flaky: OrchestratorStatusTest (RON-31, two order-sensitive tests) — verify with a fixed seed against main before treating as a real red.'
 - name: dialyzer
   stage: pre-pr
   command: 'cd elixir && mix dialyzer --format short'

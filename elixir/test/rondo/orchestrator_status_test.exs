@@ -694,6 +694,11 @@ defmodule Rondo.OrchestratorStatusTest do
   test "orchestrator accounts repeated pi cumulative snapshots once and records raw/accounted usage" do
     issue_id = "issue-pi-repeated-usage"
 
+    # Use the hermetic in-memory tracker so orchestrator poll cycles never make
+    # real tracker HTTP calls that can block the GenServer past sync-call deadlines.
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:rondo, :memory_tracker_issues, [])
+
     issue = %Issue{
       id: issue_id,
       identifier: "MT-PI-REPEAT",
@@ -765,19 +770,26 @@ defmodule Rondo.OrchestratorStatusTest do
       )
     end
 
+    events_path = Path.join(ledger.run_dir, "artifacts/agent-events.ndjson")
+
+    # Anchor on the durable ledger artifact before asserting in-memory state so
+    # slow worker-update processing under load cannot race the snapshot call.
+    [first, second] =
+      wait_until(fn ->
+        with {:ok, contents} <- File.read(events_path),
+             [_, _] = lines <- String.split(contents, "\n", trim: true),
+             [{:ok, first}, {:ok, second}] <- Enum.map(lines, &Jason.decode/1) do
+          [first, second]
+        else
+          _ -> nil
+        end
+      end)
+
     snapshot = GenServer.call(pid, :snapshot)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.claude_input_tokens == 80
     assert snapshot_entry.claude_output_tokens == 20
     assert snapshot_entry.claude_total_tokens == 100
-
-    events_path = Path.join(ledger.run_dir, "artifacts/agent-events.ndjson")
-
-    [first, second] =
-      events_path
-      |> File.read!()
-      |> String.split("\n", trim: true)
-      |> Enum.map(&Jason.decode!/1)
 
     assert first["usage"] == %{"cost" => 0.25, "input_tokens" => 80, "output_tokens" => 20, "total_tokens" => 100}
     assert first["accounted_usage"] == %{"cost" => 0.25, "input_tokens" => 80, "output_tokens" => 20, "total_tokens" => 100}
@@ -1812,9 +1824,20 @@ defmodule Rondo.OrchestratorStatusTest do
     end)
 
     before_tick_ms = System.monotonic_time(:millisecond)
-    send(pid, :tick)
-    Process.sleep(100)
-    state = :sys.get_state(pid)
+
+    # A bare :tick is ignored by the orchestrator, so trigger the poll cycle that
+    # runs stall reconciliation directly and poll for the reconciled retry state
+    # instead of racing the startup poll cycle with a fixed sleep.
+    send(pid, :run_poll_cycle)
+
+    state =
+      wait_until(fn ->
+        state = :sys.get_state(pid)
+
+        if Map.has_key?(state.retry_attempts, issue_id) and not Process.alive?(worker_pid) do
+          state
+        end
+      end)
 
     refute Process.alive?(worker_pid)
     refute Map.has_key?(state.running, issue_id)
@@ -3763,9 +3786,13 @@ defmodule Rondo.OrchestratorStatusTest do
     trace_file = Path.join(workspace_root, "claude-resume.trace")
     claude_script = Path.join(workspace_root, "fake-claude-guidance.sh")
 
+    # Each invocation writes its own trace file ($$ is the shell pid). The resumed
+    # run can be followed by a delivery-driven continuation run for the still
+    # In Progress issue, and two invocations truncate-writing one shared trace
+    # file interleave their bytes under load.
     File.write!(claude_script, """
     #!/bin/sh
-    printf '%s\n' "$@" > #{trace_file}
+    printf '%s\n' "$@" > "#{trace_file}.$$"
     echo '{"type":"system","subtype":"init","session_id":"operator-session","tools":[]}'
     echo '{"type":"result","subtype":"success","session_id":"operator-session","usage":{"input_tokens":1,"output_tokens":1}}'
     """)
@@ -3839,7 +3866,10 @@ defmodule Rondo.OrchestratorStatusTest do
 
     trace =
       wait_until(fn ->
-        if File.exists?(trace_file), do: File.read!(trace_file)
+        "#{trace_file}.*"
+        |> Path.wildcard()
+        |> Enum.map(&File.read!/1)
+        |> Enum.find(&String.contains?(&1, "--resume\npaused-session"))
       end)
 
     assert trace =~ "--resume\npaused-session"

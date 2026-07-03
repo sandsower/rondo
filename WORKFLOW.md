@@ -136,9 +136,8 @@ Instructions:
    for progress; bring it up to date before new implementation work.
 4. Treat any ticket-authored Validation/Test Plan section as non-negotiable
    acceptance input; execute it before considering the work complete.
-5. Project conventions live in `.beislid/workflow.md` (gates incl. known
-   RON-31 flake hints, action policy, tracker duality). Run the configured
-   gates before any push.
+5. Project conventions live in `.beislid/workflow.md` (gates, action policy,
+   tracker duality). Run the configured gates before any push.
 6. Out-of-scope discoveries become new Linear issues in the same project,
    linked `related`, never scope expansion.
 7. Final message reports completed actions and blockers only.
