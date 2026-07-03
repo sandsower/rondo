@@ -1,0 +1,65 @@
+[
+  {
+    "event_type": "session_started",
+    "model": "claude-opus-4-6",
+    "session_id": "SESSION-CLEAN-1",
+    "subtype": "init",
+    "tools": [],
+    "type": "system"
+  },
+  {
+    "event_type": "assistant",
+    "message": {
+      "content": [
+        {
+          "text": "Implementing the fix for TICKET-1 now.",
+          "type": "text"
+        }
+      ],
+      "id": "msg_01",
+      "role": "assistant",
+      "type": "message",
+      "usage": {
+        "cache_creation_input_tokens": 15,
+        "cache_read_input_tokens": 5,
+        "input_tokens": 120,
+        "output_tokens": 40
+      }
+    },
+    "session_id": "SESSION-CLEAN-1",
+    "type": "assistant"
+  },
+  {
+    "event_type": "assistant",
+    "message": {
+      "content": [
+        {
+          "text": "All checks pass. Delivering now.",
+          "type": "text"
+        }
+      ],
+      "id": "msg_02",
+      "role": "assistant",
+      "type": "message",
+      "usage": {
+        "input_tokens": 10,
+        "output_tokens": 5
+      }
+    },
+    "session_id": "SESSION-CLEAN-1",
+    "type": "assistant"
+  },
+  {
+    "event_type": "result",
+    "result": "Implemented TICKET-1: added the requested validation and confirmed gates are green.",
+    "session_id": "SESSION-CLEAN-1",
+    "subtype": "success",
+    "type": "result",
+    "usage": {
+      "cache_creation_input_tokens": 15,
+      "cache_read_input_tokens": 5,
+      "input_tokens": 130,
+      "output_tokens": 45
+    }
+  }
+]

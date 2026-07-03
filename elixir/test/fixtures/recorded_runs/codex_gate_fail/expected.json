@@ -1,0 +1,79 @@
+[
+  {
+    "diff": null,
+    "event_type": "session_started",
+    "message": null,
+    "run_ref": {
+      "adapter": "codex",
+      "provider_ref": "codex-thread-gatefail-1",
+      "provider_ref_kind": "thread_id",
+      "resumable?": true
+    },
+    "thread_id": "codex-thread-gatefail-1",
+    "type": "thread.started",
+    "usage": null
+  },
+  {
+    "diff": null,
+    "event_type": "tool_started",
+    "item": {
+      "aggregated_output": "",
+      "command": "mix test",
+      "exit_code": null,
+      "id": "tool-1",
+      "status": "in_progress",
+      "type": "command_execution"
+    },
+    "message": "mix test",
+    "run_ref": null,
+    "type": "item.started",
+    "usage": null
+  },
+  {
+    "diff": null,
+    "event_type": "tool_completed",
+    "item": {
+      "aggregated_output": "1 test, 1 failure",
+      "command": "mix test",
+      "exit_code": 1,
+      "id": "tool-1",
+      "status": "completed",
+      "type": "command_execution"
+    },
+    "message": "mix test: 1 test, 1 failure",
+    "run_ref": null,
+    "type": "item.completed",
+    "usage": null
+  },
+  {
+    "diff": null,
+    "event_type": "assistant_message",
+    "item": {
+      "id": "msg-1",
+      "text": "The gate failed: mix test reported 1 failure for TICKET-1. I was unable to fix it within this turn.",
+      "type": "agent_message"
+    },
+    "message": "The gate failed: mix test reported 1 failure for TICKET-1. I was unable to fix it within this turn.",
+    "run_ref": null,
+    "type": "item.completed",
+    "usage": null
+  },
+  {
+    "diff": null,
+    "error": {
+      "message": "Deterministic gate failed: mix test (1 failure)"
+    },
+    "event_type": "invocation_failed",
+    "message": "Deterministic gate failed: mix test (1 failure)",
+    "run_ref": null,
+    "type": "turn.failed",
+    "usage": {
+      "cache_read_tokens": 40,
+      "cache_write_tokens": 0,
+      "cost": null,
+      "input_tokens": 300,
+      "output_tokens": 100,
+      "total_tokens": 440
+    }
+  }
+]

@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"SESSION-RESUME-9","tools":[],"model":"claude-opus-4-6"}
+{"type":"assistant","message":{"id":"msg_11","type":"message","role":"assistant","content":[{"type":"text","text":"Resuming from the previous turn; continuing the patch for TICKET-1."}],"usage":{"input_tokens":200,"output_tokens":60}},"session_id":"SESSION-RESUME-9"}
+{"type":"result","subtype":"success","session_id":"SESSION-RESUME-9","result":"Resumed session completed: TICKET-1 changes verified.","usage":{"input_tokens":210,"output_tokens":65}}

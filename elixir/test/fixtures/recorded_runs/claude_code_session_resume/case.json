@@ -1,0 +1,8 @@
+{
+  "case_name": "claude_code_session_resume",
+  "adapter": "claude_code",
+  "archetype": "session_resume",
+  "synthetic": true,
+  "source": "Synthesized from the raw stream-json shapes used in test/rondo/claude_cli_test.exs's resumed-session fixtures (ClaudeCLI.resume passes --resume flag with session_id). No usable real recorded provider stream was found on this machine (see claude_code_clean_success/case.json for the search notes).",
+  "notes": "Models a `claude --resume <session_id>` continuation turn: the raw stream shape is identical to a first-turn transcript, but the session_id matches a prior dispatch and the assistant text references continuing prior work. Exercises that extract_session_id stays stable across a resumed turn."
+}

@@ -1,0 +1,8 @@
+{
+  "case_name": "claude_code_clean_success",
+  "adapter": "claude_code",
+  "archetype": "clean_success",
+  "synthetic": true,
+  "source": "Synthesized from the raw stream-json shapes used in test/rondo/claude_cli_test.exs (system/init, assistant with nested message.usage, result with top-level usage). No usable real recorded provider stream was found on this machine: existing .rondo_runs ledgers under /private/tmp/rondo_workspaces/.rondo_runs/ are ExUnit test fixtures with empty or already-redacted raw payloads (e.g. MT-302's agent-events.ndjson has raw:{} / raw:{reason:[REDACTED]}), not genuine CLI transcripts.",
+  "notes": "Two assistant turns then a successful result with a top-level usage block. Deliberately includes cache_creation_input_tokens/cache_read_input_tokens on the raw usage payloads (the real Anthropic usage schema, protected from redaction by Rondo.RunLedger's raw-sanitizer allowlist) to exercise the R2 drift: Rondo.Claude.StreamParser.extract_usage/1 does not surface cache or cost fields today, unlike the Codex and Pi parsers."
+}

@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"SESSION-CLEAN-1","tools":[],"model":"claude-opus-4-6"}
+{"type":"assistant","message":{"id":"msg_01","type":"message","role":"assistant","content":[{"type":"text","text":"Implementing the fix for TICKET-1 now."}],"usage":{"input_tokens":120,"output_tokens":40,"cache_creation_input_tokens":15,"cache_read_input_tokens":5}},"session_id":"SESSION-CLEAN-1"}
+{"type":"assistant","message":{"id":"msg_02","type":"message","role":"assistant","content":[{"type":"text","text":"All checks pass. Delivering now."}],"usage":{"input_tokens":10,"output_tokens":5}},"session_id":"SESSION-CLEAN-1"}
+{"type":"result","subtype":"success","session_id":"SESSION-CLEAN-1","result":"Implemented TICKET-1: added the requested validation and confirmed gates are green.","usage":{"input_tokens":130,"output_tokens":45,"cache_creation_input_tokens":15,"cache_read_input_tokens":5}}

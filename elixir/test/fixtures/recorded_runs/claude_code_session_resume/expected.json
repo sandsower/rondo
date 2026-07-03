@@ -1,0 +1,41 @@
+[
+  {
+    "event_type": "session_started",
+    "model": "claude-opus-4-6",
+    "session_id": "SESSION-RESUME-9",
+    "subtype": "init",
+    "tools": [],
+    "type": "system"
+  },
+  {
+    "event_type": "assistant",
+    "message": {
+      "content": [
+        {
+          "text": "Resuming from the previous turn; continuing the patch for TICKET-1.",
+          "type": "text"
+        }
+      ],
+      "id": "msg_11",
+      "role": "assistant",
+      "type": "message",
+      "usage": {
+        "input_tokens": 200,
+        "output_tokens": 60
+      }
+    },
+    "session_id": "SESSION-RESUME-9",
+    "type": "assistant"
+  },
+  {
+    "event_type": "result",
+    "result": "Resumed session completed: TICKET-1 changes verified.",
+    "session_id": "SESSION-RESUME-9",
+    "subtype": "success",
+    "type": "result",
+    "usage": {
+      "input_tokens": 210,
+      "output_tokens": 65
+    }
+  }
+]

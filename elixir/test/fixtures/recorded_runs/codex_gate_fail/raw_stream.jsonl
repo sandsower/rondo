@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"codex-thread-gatefail-1"}
+{"type":"item.started","item":{"id":"tool-1","type":"command_execution","command":"mix test","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"tool-1","type":"command_execution","command":"mix test","aggregated_output":"1 test, 1 failure","exit_code":1,"status":"completed"}}
+{"type":"item.completed","item":{"id":"msg-1","type":"agent_message","text":"The gate failed: mix test reported 1 failure for TICKET-1. I was unable to fix it within this turn."}}
+{"type":"turn.failed","error":{"message":"Deterministic gate failed: mix test (1 failure)"},"usage":{"input_tokens":300,"cached_input_tokens":40,"output_tokens":90,"reasoning_output_tokens":10}}

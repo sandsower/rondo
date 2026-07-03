@@ -1,0 +1,8 @@
+{
+  "case_name": "codex_gate_fail",
+  "adapter": "codex",
+  "archetype": "gate_fail",
+  "synthetic": true,
+  "source": "Synthesized from the raw event shapes used in test/rondo/codex_stream_parser_test.exs (thread.started, item.started/completed for command_execution and agent_message, turn.completed/turn.failed usage payloads). No usable real recorded provider stream was found on this machine (see claude_code_clean_success/case.json for the search notes).",
+  "notes": "Models a turn where the agent runs the repo's own deterministic gate (`mix test`), the gate fails, and the turn ends in turn.failed. The failed turn still carries a usage payload (as real Codex CLI turns do) so the R2 cross-adapter usage invariant has something to check against codex."
+}

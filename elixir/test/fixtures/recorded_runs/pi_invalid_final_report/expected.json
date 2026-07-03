@@ -1,0 +1,74 @@
+[
+  {
+    "cwd": "/workspace/repo",
+    "event_type": "session_started",
+    "id": "pi-session-invalid-1",
+    "type": "session",
+    "version": 3
+  },
+  {
+    "event_type": "invocation_started",
+    "type": "agent_start"
+  },
+  {
+    "event_type": "tool_started",
+    "id": "msg-1",
+    "message": {
+      "content": [
+        {
+          "arguments": {
+            "command": "mix test"
+          },
+          "name": "bash",
+          "type": "toolCall"
+        }
+      ],
+      "role": "assistant"
+    },
+    "type": "message",
+    "usage": {
+      "cacheRead": 5,
+      "cacheWrite": 2,
+      "cost": {
+        "total": 0.01
+      },
+      "input": 50,
+      "output": 10
+    }
+  },
+  {
+    "event_type": "tool_completed",
+    "id": "msg-2",
+    "message": {
+      "content": [
+        {
+          "text": "1 failure",
+          "type": "text"
+        }
+      ],
+      "role": "toolResult",
+      "toolName": "bash"
+    },
+    "type": "message"
+  },
+  {
+    "event_type": "invocation_completed",
+    "messages": [
+      {
+        "content": "please continue",
+        "role": "user"
+      },
+      {
+        "content": [
+          {
+            "text": "1 failure",
+            "type": "text"
+          }
+        ],
+        "role": "toolResult",
+        "toolName": "bash"
+      }
+    ],
+    "type": "agent_end"
+  }
+]

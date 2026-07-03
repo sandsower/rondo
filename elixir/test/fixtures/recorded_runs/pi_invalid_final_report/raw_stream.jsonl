@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"pi-session-invalid-1","cwd":"/workspace/repo"}
+{"type":"agent_start"}
+{"type":"message","id":"msg-1","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"mix test"}}]},"usage":{"input":50,"output":10,"cacheRead":5,"cacheWrite":2,"cost":{"total":0.01}}}
+{"type":"message","id":"msg-2","message":{"role":"toolResult","toolName":"bash","content":[{"type":"text","text":"1 failure"}]}}
+{"type":"agent_end","messages":[{"role":"user","content":"please continue"},{"role":"toolResult","toolName":"bash","content":[{"type":"text","text":"1 failure"}]}]}

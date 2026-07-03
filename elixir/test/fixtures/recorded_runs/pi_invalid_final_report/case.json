@@ -1,0 +1,8 @@
+{
+  "case_name": "pi_invalid_final_report",
+  "adapter": "pi",
+  "archetype": "invalid_final_report",
+  "synthetic": true,
+  "source": "Synthesized from the raw event shapes used in test/rondo/pi_stream_parser_test.exs (session, message with toolCall/toolResult, agent_end with a messages list). No usable real recorded provider stream was found on this machine (see claude_code_clean_success/case.json for the search notes).",
+  "notes": "Models the 'final report missing or not parseable' failure mode observed in real run manifests (e.g. a completed run whose final_report.status is 'missing'): the agent_end event's messages list contains only user/toolResult entries, so neither StreamParser.assistant_text/1 nor StreamParser.explicit_result/1 can recover any final text. Distinct from codex_gate_fail, which fails the run but still leaves a usable final assistant message."
+}
