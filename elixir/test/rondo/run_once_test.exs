@@ -305,6 +305,33 @@ defmodule Rondo.RunOnceTest do
     assert reason in [:eisdir, :eacces]
   end
 
+  test "clean eval record failures do not mask the original run result" do
+    parent = self()
+
+    agent_runner = fn _issue, agent_opts ->
+      manifest_path = Path.join(Keyword.fetch!(agent_opts, :run_dir), "manifest.json")
+      File.rm!(manifest_path)
+      File.mkdir_p!(manifest_path)
+      :ok
+    end
+
+    log =
+      capture_log(fn ->
+        # Clean eval is enabled by default and cannot persist its record on the
+        # corrupted manifest; the recording failure must stay a warning and the
+        # surfaced completion failure must carry the original :ok agent result,
+        # not a rewritten clean-eval error.
+        assert {:error, {:run_once_ledger_completion_failed, reason, :ok}} =
+                 RunOnce.run("issue-1",
+                   deps: deps(issue("issue-1", state: "In Progress"), parent, agent_runner: agent_runner)
+                 )
+
+        assert reason in [:eisdir, :eacces]
+      end)
+
+    assert log =~ "Failed to record run-once clean eval"
+  end
+
   test "logs run context when agent event persistence fails" do
     parent = self()
 
@@ -653,9 +680,28 @@ defmodule Rondo.RunOnceTest do
     assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "failed"))
   end
 
-  test "does not run clean eval when disabled" do
+  test "does not run clean eval when explicitly opted out via config" do
     parent = self()
     workspace_root = tmp_dir("run-once-clean-eval-disabled")
+    on_exit(fn -> File.rm_rf(workspace_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      clean_eval_enabled: false
+    )
+
+    assert :ok =
+             RunOnce.run("issue-1",
+               deps: deps(issue("issue-1", state: "In Progress"), parent)
+             )
+
+    manifest = latest_run_manifest!(workspace_root, "GH-1")
+    refute Map.has_key?(manifest, "clean_eval")
+  end
+
+  test "runs clean eval by default (no config) and records skipped when the run has no patch artifact" do
+    parent = self()
+    workspace_root = tmp_dir("run-once-clean-eval-default-skipped")
     on_exit(fn -> File.rm_rf(workspace_root) end)
     write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
 
@@ -665,7 +711,8 @@ defmodule Rondo.RunOnceTest do
              )
 
     manifest = latest_run_manifest!(workspace_root, "GH-1")
-    refute Map.has_key?(manifest, "clean_eval")
+    assert manifest["clean_eval"] == %{"status" => "skipped", "result_path" => "clean_eval/result.json"}
+    assert manifest["status"] != "failed"
   end
 
   test "captures patch and final report artifacts for completed runs with local changes" do

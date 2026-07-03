@@ -339,8 +339,11 @@ defmodule Rondo.RunOnce do
         {ledger, {:error, {:clean_eval_failed, status, clean_eval_failure_summary(result)}}}
 
       {:error, reason} ->
+        # Recording the clean-eval outcome is best-effort: a failure to persist
+        # the clean-eval record is an infrastructure problem in the ledger, not
+        # a verdict on the run, and must not rewrite the run result.
         Logger.warning("Failed to record run-once clean eval #{ledger_context(ledger)} reason=#{inspect(reason)}")
-        {ledger, {:error, {:clean_eval_record_failed, reason}}}
+        {ledger, :ok}
     end
   rescue
     error ->

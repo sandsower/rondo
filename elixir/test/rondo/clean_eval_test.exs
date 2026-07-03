@@ -149,11 +149,11 @@ defmodule Rondo.CleanEvalTest do
     assert CleanEval.result_relative_path() == "clean_eval/result.json"
   end
 
-  test "is disabled by default and enabled via clean_eval config" do
-    refute CleanEval.enabled?()
-
-    write_workflow_file!(Workflow.workflow_file_path(), clean_eval_enabled: true)
+  test "is enabled by default and disabled via explicit clean_eval opt-out" do
     assert CleanEval.enabled?()
+
+    write_workflow_file!(Workflow.workflow_file_path(), clean_eval_enabled: false)
+    refute CleanEval.enabled?()
   end
 
   test "clean_eval gates fall back to top-level gates when unset" do

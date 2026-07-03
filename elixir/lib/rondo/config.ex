@@ -82,7 +82,7 @@ defmodule Rondo.Config do
   @default_release_loop_review_policy_high_risk_total_changes 500
   @default_release_loop_review_policy_low_risk_file_count 3
   @default_release_loop_review_policy_low_risk_total_changes 120
-  @default_clean_eval_enabled false
+  @default_clean_eval_enabled true
   @default_debug false
   @default_observability_enabled true
   @default_observability_refresh_ms 1_000

@@ -751,9 +751,10 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `process_provider.kind`: string, default `native`; supports `native` and fixture-backed `beislid`
 - `process_provider.required`: boolean, default `false`
 - `process_provider.artifact_path`: string or null, optional Beislið process artifact path
-- `clean_eval.enabled`: boolean, default `false`; when true, successful run-once executions re-apply
-  the recorded patch in a detached clean worktree, select `pre_pr` gates through the configured
-  process provider, and block completion on clean-eval `fail` or `error` outcomes
+- `clean_eval.enabled`: boolean, default `true` (fail-closed standing policy; set `enabled: false`
+  to opt out explicitly); when enabled, successful run-once executions re-apply the recorded patch
+  in a detached clean worktree, select `pre_pr` gates through the configured process provider, and
+  block completion on clean-eval `fail` or `error` outcomes
 - `clean_eval.base_ref`: string or null, optional override for the patch metadata base ref
 - `clean_eval.gates`: list of gate maps or null; native-provider override for pre-PR clean-eval
   gates, where null falls back to top-level `gates` and `[]` means apply-only evaluation
