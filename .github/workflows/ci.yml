@@ -1,0 +1,100 @@
+# CI for the Elixir app under elixir/.
+#
+# SCOPE - deliberately NOT `make all`:
+# `make all` (= exhaustive) adds the coverage gate and dialyzer on top of the
+# regular test run. The coverage run is known to abort on the seed-dependent
+# OrchestratorStatusTest flake under load (RON-143), and dialyzer PLT builds
+# are slow on cold runners (RON-145). A red-but-ignored workflow is worse
+# than a scoped green one, so:
+#   - the blocking `ci` job runs the stable deterministic gate set
+#     (deps, fmt-check, lint, test - i.e. `make pre-pr` minus dialyzer)
+#   - dialyzer runs as a separate cached, non-blocking job
+# Fold coverage and dialyzer back into the blocking job once RON-143 (flake)
+# and RON-145 (dialyzer CI speed) are resolved.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: elixir
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up mise tools
+        uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+          working_directory: elixir
+
+      - name: Cache deps and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            elixir/deps
+            elixir/_build
+          key: ${{ runner.os }}-mix-ci-${{ hashFiles('elixir/mise.toml', 'elixir/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-ci-
+
+      - name: Deps
+        run: make deps
+
+      - name: Format check
+        run: make fmt-check
+
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test
+
+  # Non-blocking (RON-145): dialyzer PLT builds take a long time on cold
+  # runners. Informational only - do NOT add this job to required status
+  # checks until PLT caching has proven fast and stable.
+  dialyzer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: elixir
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up mise tools
+        uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+          working_directory: elixir
+
+      - name: Cache deps, build, and PLTs
+        uses: actions/cache@v4
+        with:
+          path: |
+            elixir/deps
+            elixir/_build
+          key: ${{ runner.os }}-mix-dialyzer-${{ hashFiles('elixir/mise.toml', 'elixir/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-dialyzer-
+
+      - name: Deps
+        run: make deps
+
+      - name: Dialyzer
+        run: make dialyzer
