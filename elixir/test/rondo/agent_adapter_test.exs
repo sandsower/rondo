@@ -847,7 +847,7 @@ defmodule Rondo.AgentAdapterTest do
                })
 
       assert result.run_ref == Adapter.run_ref("claude_code", "session-adapter", "session_id", true)
-      assert result.usage == %{input_tokens: 10, output_tokens: 5, total_tokens: 15}
+      assert result.usage == %{input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0, total_tokens: 15, cost: nil}
       assert result.final_report == "final from claude"
       assert result.capabilities.resume == :session_id
 

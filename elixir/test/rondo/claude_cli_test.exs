@@ -239,6 +239,49 @@ defmodule Rondo.Claude.CLITest do
     end
   end
 
+  test "ClaudeCLI.run flushes final buffered JSON without a trailing newline (R1 exit-drain)" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-claude-cli-noeol-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-114")
+      claude_binary = Path.join(test_root, "fake-claude")
+      File.mkdir_p!(workspace)
+
+      # No trailing newline on the final line: the process exits with output
+      # still sitting in the port's {:noeol, chunk} buffer. Without draining
+      # on :exit_status, this result (and its usage) would be silently lost.
+      File.write!(claude_binary, """
+      #!/bin/sh
+      echo '{"type":"system","subtype":"init","session_id":"noeol-session","tools":[]}'
+      printf '{"type":"result","subtype":"success","session_id":"noeol-session","usage":{"input_tokens":10,"output_tokens":5}}'
+      exit 0
+      """)
+
+      File.chmod!(claude_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        claude_command: claude_binary
+      )
+
+      test_pid = self()
+      on_event = fn event -> send(test_pid, {:claude_event, event}) end
+
+      assert {:ok, result} = ClaudeCLI.run("No newline test", workspace, on_event: on_event)
+      assert result.session_id == "noeol-session"
+      assert result.usage.input_tokens == 10
+      assert result.usage.output_tokens == 5
+      assert_receive {:claude_event, %{"type" => "result", "subtype" => "success"}}, 500
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "ClaudeCLI.run buffers partial JSON lines until newline terminator" do
     test_root =
       Path.join(

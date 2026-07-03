@@ -114,6 +114,8 @@ defmodule Rondo.Claude.CLI do
             stream_loop(port, deadline, new_stall_deadline, stall_timeout_ms, on_event, %{state | buffer: state.buffer <> chunk})
 
           {^port, {:exit_status, 0}} ->
+            state = flush_buffer(on_event, drain_port_data(port, on_event, state))
+
             {:ok,
              %{
                session_id: state.session_id,
@@ -122,6 +124,7 @@ defmodule Rondo.Claude.CLI do
              }}
 
           {^port, {:exit_status, code}} ->
+            _state = flush_buffer(on_event, drain_port_data(port, on_event, state))
             {:error, {:subprocess_exit, code, Enum.reverse(state.failure_lines)}}
         after
           remaining_ms ->
@@ -164,6 +167,21 @@ defmodule Rondo.Claude.CLI do
   end
 
   defp record_failure_line(failure_lines, _line), do: failure_lines
+
+  defp drain_port_data(port, on_event, state) do
+    receive do
+      {^port, {:data, {:eol, line}}} ->
+        drain_port_data(port, on_event, handle_line(line, on_event, state))
+
+      {^port, {:data, {:noeol, chunk}}} ->
+        drain_port_data(port, on_event, %{state | buffer: state.buffer <> chunk})
+    after
+      0 -> state
+    end
+  end
+
+  defp flush_buffer(_on_event, %{buffer: ""} = state), do: state
+  defp flush_buffer(on_event, state), do: handle_line("", on_event, state)
 
   defp provider_failure_line?(line) when is_binary(line) do
     normalized = String.downcase(line)

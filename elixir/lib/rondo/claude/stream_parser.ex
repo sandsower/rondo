@@ -27,7 +27,9 @@ defmodule Rondo.Claude.StreamParser do
 
   @doc """
   Extract usage data from a parsed event.
-  Returns a map with :input_tokens, :output_tokens, :total_tokens or nil.
+  Returns a map with :input_tokens, :output_tokens, :cache_read_tokens,
+  :cache_write_tokens, :total_tokens, :cost (normalized at parity with the
+  Codex and Pi stream parsers) or nil.
   """
   @spec extract_usage(map()) :: map() | nil
   def extract_usage(event) do
@@ -38,7 +40,9 @@ defmodule Rondo.Claude.StreamParser do
         Map.get(event, :usage) ||
         nested_message_usage(event)
 
-    normalize_usage(usage)
+    # total_cost_usd is a sibling of usage on the top-level "result" event,
+    # not nested inside it, so it's extracted from the full event separately.
+    normalize_usage(usage, extract_cost(event))
   end
 
   defp nested_message_usage(event) do
@@ -46,21 +50,47 @@ defmodule Rondo.Claude.StreamParser do
     if is_map(msg), do: Map.get(msg, "usage") || Map.get(msg, :usage)
   end
 
-  defp normalize_usage(%{} = usage) do
-    input = integer_field(usage, ["input_tokens", :input_tokens])
-    output = integer_field(usage, ["output_tokens", :output_tokens])
-    total = integer_field(usage, ["total_tokens", :total_tokens])
-
-    if input || output || total do
-      %{
-        input_tokens: input || 0,
-        output_tokens: output || 0,
-        total_tokens: total || (input || 0) + (output || 0)
-      }
-    end
+  defp extract_cost(event) do
+    number_field(event, ["total_cost_usd", :total_cost_usd])
   end
 
-  defp normalize_usage(_), do: nil
+  defp normalize_usage(%{} = usage, cost) do
+    usage_fields = %{
+      input_tokens: integer_field(usage, ["input_tokens", :input_tokens]),
+      output_tokens: integer_field(usage, ["output_tokens", :output_tokens]),
+      cache_read_tokens: integer_field(usage, ["cache_read_input_tokens", :cache_read_input_tokens]),
+      cache_write_tokens: integer_field(usage, ["cache_creation_input_tokens", :cache_creation_input_tokens]),
+      total_tokens: integer_field(usage, ["total_tokens", :total_tokens]),
+      cost: cost
+    }
+
+    if usage_fields_present?(usage_fields), do: usage_summary(usage_fields)
+  end
+
+  defp normalize_usage(_usage, _cost), do: nil
+
+  defp usage_fields_present?(usage_fields) do
+    usage_fields
+    |> Map.drop([:cost])
+    |> Map.values()
+    |> Enum.any?(&(!is_nil(&1)))
+  end
+
+  defp usage_summary(usage_fields) do
+    input = usage_fields.input_tokens || 0
+    output = usage_fields.output_tokens || 0
+    cache_read = usage_fields.cache_read_tokens || 0
+    cache_write = usage_fields.cache_write_tokens || 0
+
+    %{
+      input_tokens: input,
+      output_tokens: output,
+      cache_read_tokens: cache_read,
+      cache_write_tokens: cache_write,
+      total_tokens: usage_fields.total_tokens || input + output + cache_read + cache_write,
+      cost: usage_fields.cost
+    }
+  end
 
   defp normalize_event(payload) do
     type = Map.get(payload, "type") || Map.get(payload, :type)
@@ -93,4 +123,15 @@ defmodule Rondo.Claude.StreamParser do
       end
     end)
   end
+
+  defp number_field(map, keys) when is_map(map) and is_list(keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.get(map, key) do
+        value when is_number(value) and value >= 0 -> value
+        _other -> nil
+      end
+    end)
+  end
+
+  defp number_field(_map, _keys), do: nil
 end

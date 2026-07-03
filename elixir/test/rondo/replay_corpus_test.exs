@@ -28,14 +28,12 @@ defmodule Rondo.ReplayCorpusTest do
 
   ## Known drift
 
-  This suite documents, but does not fix, real drift between adapters found
-  while building it (see RON-141 for the shared PortRunner work that is
-  expected to close it):
-
-    * R2 - `Rondo.Claude.StreamParser.extract_usage/1` does not surface
-      `cache_read_tokens` / `cache_write_tokens` / `cost`, unlike the Codex
-      and Pi parsers. See the "KNOWN DRIFT (R2..." test below, which pins
-      today's (missing) behavior on purpose.
+  RON-136 closed the R2 drift documented here previously:
+  `Rondo.Claude.StreamParser.extract_usage/1` now surfaces
+  `cache_read_tokens` / `cache_write_tokens` / `cost` at parity with the
+  Codex and Pi parsers. The cross-adapter invariant tests below assert that
+  parity for all three adapters; there is no remaining known-drift exclusion
+  in this suite.
   """
 
   use ExUnit.Case, async: true
@@ -84,33 +82,30 @@ defmodule Rondo.ReplayCorpusTest do
       end
     end
 
-    @tag :known_drift
-    test "KNOWN DRIFT (R2, tracked by RON-141): claude_code usage events do NOT carry cache-token/cost fields today" do
-      # This is a documented known-drift exclusion, not a bug this suite
-      # fixes. Rondo.Claude.StreamParser.extract_usage/1 only ever returns
-      # input_tokens/output_tokens/total_tokens, even though the raw Claude
-      # usage payload carries cache_creation_input_tokens and
-      # cache_read_input_tokens (see the allowlist in
-      # Rondo.RunLedger.secret_key?/1 and content_key?/1, which explicitly
-      # protects those two keys from redaction). Codex and Pi's parsers both
-      # normalize cache_read_tokens/cache_write_tokens/cost onto every usage
-      # map. This assertion pins TODAY's asymmetric behavior on purpose: if
-      # it starts failing because claude_code usage maps suddenly gained
-      # these keys, update this test (and the case.json note) to match - do
-      # not "fix" it by editing the parser here (out of scope; see RON-141).
+    test "claude_code usage events carry cache-token and cost fields at parity (R2 fixed by RON-136)" do
+      # This test used to pin a documented known-drift exclusion (tagged
+      # :known_drift, tracked by RON-141): Rondo.Claude.StreamParser
+      # .extract_usage/1 only returned input_tokens/output_tokens/
+      # total_tokens, even though the raw Claude usage payload carries
+      # cache_creation_input_tokens and cache_read_input_tokens (see the
+      # allowlist in Rondo.RunLedger.secret_key?/1 and content_key?/1, which
+      # explicitly protects those two keys from redaction). RON-136 ported
+      # the Codex/Pi cache-token + cost normalization into the Claude parser,
+      # closing the drift, so this now asserts parity instead of pinning the
+      # gap.
       usages = usage_events("claude_code_clean_success")
 
       assert usages != [], "expected at least one usage-bearing event in claude_code_clean_success"
 
       for usage <- usages do
-        refute Map.has_key?(usage, :cache_read_tokens),
-               "claude_code usage unexpectedly has cache_read_tokens - R2 drift may be fixed, update this test: #{inspect(usage)}"
+        assert Map.has_key?(usage, :cache_read_tokens),
+               "claude_code usage is missing cache_read_tokens: #{inspect(usage)}"
 
-        refute Map.has_key?(usage, :cache_write_tokens),
-               "claude_code usage unexpectedly has cache_write_tokens - R2 drift may be fixed, update this test: #{inspect(usage)}"
+        assert Map.has_key?(usage, :cache_write_tokens),
+               "claude_code usage is missing cache_write_tokens: #{inspect(usage)}"
 
-        refute Map.has_key?(usage, :cost),
-               "claude_code usage unexpectedly has cost - R2 drift may be fixed, update this test: #{inspect(usage)}"
+        assert Map.has_key?(usage, :cost),
+               "claude_code usage is missing cost: #{inspect(usage)}"
       end
     end
 
