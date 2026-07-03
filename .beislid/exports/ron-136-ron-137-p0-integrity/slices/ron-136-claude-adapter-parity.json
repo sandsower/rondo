@@ -4,8 +4,17 @@
   "source_ticket": "RON-136",
   "prompt": "## Objective\nBring the claude adapter to parity with its codex/pi siblings: the CLI must drain output emitted at process exit (currently dropped on :exit_status), and the stream parser must emit cache tokens and cost in usage (currently dropped, so claude runs undercount spend on the dashboard).\n\n## Design summary\nDecisions are already made - this is a pattern port, not a design task. Copy the exit-drain pattern from lib/rondo/codex/cli.ex:107,118 and lib/rondo/pi/cli.ex:106,116 into lib/rondo/claude/cli.ex (defect at :116-125). Copy the cache-token/cost parsing shape from codex/stream_parser.ex:133-153 and pi/stream_parser.ex:162-205 into claude/stream_parser.ex (defect at :49-61). Match the siblings' emitted usage fields exactly so downstream spend accounting is uniform.\n\n## File scope\nInclude: elixir/lib/rondo/claude/cli.ex, elixir/lib/rondo/claude/stream_parser.ex, new/updated tests under elixir/test/.\nExclude: everything else. The codex/pi adapter files are read-only reference implementations - do NOT edit them.\n\n## Constraints\nDeny rationale: editing codex/pi siblings risks the exact sibling-drift disease this fix treats; no shared abstraction extraction (that is ticket RON-141); no git push or PR creation - deliver a local branch/diff only. Environment: mix resolves via mise shims; if mix is not found, prepend $HOME/.local/share/mise/shims to PATH. Work test-first: write the failing tests (output-at-exit dropped; cache tokens/cost absent) before porting the patterns. If any acceptance criterion is ambiguous, pause and ask - do not invent behavior.\n\n## Verification\nAll from the repo root:\n1. cd elixir && mix test  (must include the new drain and cache-token tests, all green)\n2. cd elixir && mix format --check-formatted\n3. cd elixir && mix credo --strict\nKnown flaky: OrchestratorStatusTest (RON-31, two order-sensitive tests) - verify with a fixed seed against main before treating a failure as real.",
   "boundaries": {
-    "include": ["elixir/lib/rondo/claude/cli.ex", "elixir/lib/rondo/claude/stream_parser.ex", "elixir/test/"],
-    "exclude": ["elixir/lib/rondo/codex/", "elixir/lib/rondo/pi/", "any shared adapter abstraction (RON-141)", "all other files"]
+    "include": [
+      "elixir/lib/rondo/claude/cli.ex",
+      "elixir/lib/rondo/claude/stream_parser.ex",
+      "elixir/test/"
+    ],
+    "exclude": [
+      "elixir/lib/rondo/codex/",
+      "elixir/lib/rondo/pi/",
+      "any shared adapter abstraction (RON-141)",
+      "all other files"
+    ]
   },
   "dependencies": [
     "Reference implementations present at pinned base: codex/cli.ex, pi/cli.ex, codex/stream_parser.ex, pi/stream_parser.ex (probed in authoring session)",
@@ -23,13 +32,23 @@
         "cd elixir && mix format --check-formatted exits 0",
         "cd elixir && mix credo --strict exits 0"
       ],
-      "failure_policy": {"on_missing": "block", "on_failure": "block", "retryable": true},
-      "expected_artifact": {"kind": "gate_envelope", "reference": "gate transcript in run evidence"}
+      "failure_policy": {
+        "on_missing": "block",
+        "on_failure": "block",
+        "retryable": true
+      },
+      "expected_artifact": {
+        "kind": "gate_envelope",
+        "reference": "gate transcript in run evidence"
+      }
     }
   ],
   "output_expectations": {
     "summary": "What changed in the claude adapter and parser, with before/after usage fields.",
-    "artifacts": ["changed_files", "proof_results"],
+    "artifacts": [
+      "changed_files",
+      "proof_results"
+    ],
     "next_step": "ready-for-review handoff; human reviews and opens the PR"
   },
   "parent_contract": {
@@ -60,17 +79,38 @@
       "Shared adapter abstraction work (RON-141)"
     ]
   },
-  "process_provider": {"name": "claude_code"},
+  "process_provider": {
+    "name": "codex"
+  },
   "runner_extensions": {
     "model_routing": {
       "routing": [
-        {"boundary": "implementation", "tier": "standard", "mode": "prefer", "reason": "mechanical pattern port with pinned references"},
-        {"boundary": "review_fix", "tier": "standard", "mode": "prefer", "reason": "repo default"},
-        {"boundary": "gate_repair", "tier": "standard", "mode": "prefer", "reason": "exact commands given"}
+        {
+          "boundary": "implementation",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "mechanical pattern port with pinned references"
+        },
+        {
+          "boundary": "review_fix",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "repo default"
+        },
+        {
+          "boundary": "gate_repair",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "exact commands given"
+        }
       ],
       "tier": "standard",
       "mode": "prefer",
-      "candidates": ["sonnet"]
+      "candidates": [
+        "openai:gpt-5.1-codex",
+        "anthropic:claude-sonnet-4.6",
+        "google:gemini-2.5-pro"
+      ]
     }
   }
 }

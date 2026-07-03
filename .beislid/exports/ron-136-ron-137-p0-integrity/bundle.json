@@ -1,17 +1,28 @@
 {
   "kind": "approved-slice-plan-export-v0",
-  "version": 1,
+  "version": 2,
   "status": "approved",
-  "supersedes": null,
+  "supersedes": "69996b550b5d4d7a95a518c2487233d6f096f0506020a4bc01df43e58eedd8da",
   "generated_from": "envelope skill batch run 2026-07-02, weak-tier P0 integrity tickets RON-136 RON-137 (teotl unification program)",
   "source_work_contract": "~/Personal/teotl/plans/2026-07-02-teotl-unification-core-extraction-spec.md (approved 2026-07-02; companion debt audit 2026-07-02-debt-audit-p0-integrity-batch.md)",
   "slice_plan": {
     "phase": "P0 stop-the-bleeding integrity batch",
-    "parallel_groups": [["ron-136-claude-adapter-parity", "ron-137-config-validation"]]
+    "parallel_groups": [
+      [
+        "ron-136-claude-adapter-parity",
+        "ron-137-config-validation"
+      ]
+    ]
   },
   "children": [
-    {"id": "ron-136-claude-adapter-parity", "source_ticket": "RON-136"},
-    {"id": "ron-137-config-validation", "source_ticket": "RON-137"}
+    {
+      "id": "ron-136-claude-adapter-parity",
+      "source_ticket": "RON-136"
+    },
+    {
+      "id": "ron-137-config-validation",
+      "source_ticket": "RON-137"
+    }
   ],
   "dependency_graph": {
     "ron-136-claude-adapter-parity": [],
@@ -30,21 +41,34 @@
         "cd elixir && mix credo --strict exits 0",
         "cd elixir && mix test exits 0 (known flaky: OrchestratorStatusTest RON-31, verify with fixed seed against main before treating as real red)"
       ],
-      "failure_policy": {"on_missing": "block", "on_failure": "block", "retryable": true},
-      "expected_artifact": {"kind": "gate_envelope", "reference": "run-ledger gate path or transcript-safe summary"}
+      "failure_policy": {
+        "on_missing": "block",
+        "on_failure": "block",
+        "retryable": true
+      },
+      "expected_artifact": {
+        "kind": "gate_envelope",
+        "reference": "run-ledger gate path or transcript-safe summary"
+      }
     }
   ],
   "guides_and_gates": {
-    "gates": ["format", "credo", "test"],
+    "gates": [
+      "format",
+      "credo",
+      "test"
+    ],
     "gate_commands": {
       "format": "cd elixir && mix format --check-formatted",
       "credo": "cd elixir && mix credo --strict",
       "test": "cd elixir && mix test"
     },
-    "guides": ["TDD: failing test first per acceptance bullet; ticket AFK brief is the authoritative slice brief"]
+    "guides": [
+      "TDD: failing test first per acceptance bullet; ticket AFK brief is the authoritative slice brief"
+    ]
   },
   "approval": {
-    "approved_at": "2026-07-02T17:10:23Z",
+    "approved_at": "2026-07-03T10:06:41Z",
     "approved_by": "Vic Valenzuela <victor@dala.care>",
     "verdicts": {
       "ron-136-claude-adapter-parity": "approve",
@@ -54,19 +78,48 @@
   "runner_extensions": {
     "model_routing": {
       "routing": [
-        {"boundary": "implementation", "tier": "standard", "mode": "prefer", "reason": "weak-tier P0 batch: mechanical, evidence-pinned fixes routed cheap by design", "source": {"skill": "envelope", "phase": "execution"}},
-        {"boundary": "review_fix", "tier": "standard", "mode": "prefer", "reason": "review-fix iterations stay on the repo default tier", "source": {"skill": "envelope"}},
-        {"boundary": "gate_repair", "tier": "standard", "mode": "prefer", "reason": "gate repair is mechanical against exact commands", "source": {"skill": "envelope"}}
+        {
+          "boundary": "implementation",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "weak-tier P0 batch: mechanical, evidence-pinned fixes routed cheap by design",
+          "source": {
+            "skill": "envelope",
+            "phase": "execution"
+          }
+        },
+        {
+          "boundary": "review_fix",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "review-fix iterations stay on the repo default tier",
+          "source": {
+            "skill": "envelope"
+          }
+        },
+        {
+          "boundary": "gate_repair",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "gate repair is mechanical against exact commands",
+          "source": {
+            "skill": "envelope"
+          }
+        }
       ],
       "tier": "standard",
       "mode": "prefer",
-      "candidates": ["sonnet"]
+      "candidates": [
+        "openai:gpt-5.1-codex",
+        "anthropic:claude-sonnet-4.6",
+        "google:gemini-2.5-pro"
+      ]
     }
   },
   "validation": {
     "schema_version": "approved-slice-plan-export-v0",
     "rubric_version": "afk-rubric-v1",
-    "notes": "All include paths probed with test -f in the authoring session; mix probed via mise shims (~/.local/share/mise/shims/mix); repo pinned at main e5689a81795629bf78fe3331fb0db63eda2a587b; slices file-disjoint hence one parallel group."
+    "notes": "All include paths probed with test -f in the authoring session; mix probed via mise shims (~/.local/share/mise/shims/mix); repo pinned at main e5689a81795629bf78fe3331fb0db63eda2a587b; slices file-disjoint hence one parallel group. REVISED to v2 on 2026-07-03 per Vic's directive: process_provider claude_code -> codex on every slice; model_routing.candidates corrected from hand-picked ['sonnet'] to the research-v1 shipped-defaults projection for tier standard (no repo tiers block). Tier remains the authoritative capability declaration (see BEI-132). Slice substance, scope, proofs, and autonomy unchanged; original approval 2026-07-02 carried forward for the unchanged substance."
   },
   "ownership": {
     "beislid": "Defines planning, autonomy, and proof semantics of this bundle.",
