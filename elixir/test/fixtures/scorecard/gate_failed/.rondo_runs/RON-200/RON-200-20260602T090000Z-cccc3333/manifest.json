@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "run_id": "RON-200-20260602T090000Z-cccc3333",
+  "status": "failed",
+  "run_dir": "/tmp/rondo_workspaces/.rondo_runs/RON-200/RON-200-20260602T090000Z-cccc3333",
+  "failure_classification": "task_failure",
+  "issue": {
+    "id": "issue-200",
+    "identifier": "RON-200",
+    "title": "Migrate scorecard aggregation",
+    "description": "Broke on an existing gate",
+    "state": "In Progress",
+    "url": "https://linear.app/rondo/issue/RON-200",
+    "labels": [],
+    "priority": 1
+  },
+  "repo": {
+    "workspace_root": "/tmp/rondo_workspaces",
+    "workspace": "/tmp/rondo_workspaces/RON-200",
+    "workspace_path": "/tmp/rondo_workspaces/RON-200",
+    "worker_host": null,
+    "base_commit": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+    "base_branch": "main"
+  },
+  "tracker": { "adapter": "linear" },
+  "agent": {
+    "adapter": "claude_code",
+    "session_id": "session-200",
+    "run_ref": null,
+    "capabilities": null,
+    "final_report": null,
+    "diff_source": null,
+    "model_routing": { "status": "honored", "requested_tier": "standard", "resolved": { "adapter": "claude_code", "model": "sonnet" } },
+    "usage": { "input_tokens": 20000, "output_tokens": 5000, "total_tokens": 25000 }
+  },
+  "process_provider": { "kind": "native", "capabilities": { "gate_selection": "native_flat_gates" }, "probe": { "checks": {} } },
+  "mode": {
+    "agent_max_turns": 40,
+    "claude_max_turns": 40,
+    "claude_permission_mode": "acceptEdits",
+    "claude_dangerously_skip_permissions": false,
+    "claude_model": "sonnet",
+    "claude_allowed_tools": null
+  },
+  "action_policy": { "provider": "beislid", "run_mode": "enforce", "policy_file": null, "policy_file_source": null, "policy_file_sha256": null },
+  "release_loop": null,
+  "escalation": {
+    "attempt_chain": [
+      { "run_id": "RON-200-20260602T083000Z-cccc0000", "tier": "standard", "reason": "initial", "status": "failed", "failure_classification": "task_failure" },
+      { "run_id": "RON-200-20260602T090000Z-cccc3333", "tier": "standard", "reason": "escalation", "status": "failed", "failure_classification": "task_failure" }
+    ]
+  },
+  "timestamps": {
+    "created_at": "2026-06-02T09:00:00Z",
+    "updated_at": "2026-06-02T09:18:00Z",
+    "started_at": "2026-06-02T09:00:00Z",
+    "finished_at": "2026-06-02T09:18:00Z"
+  },
+  "checkpoints": [
+    { "seq": 1, "kind": "turn_started", "path": "checkpoints/0001-turn_started.json", "timestamp": "2026-06-02T09:00:05Z" },
+    { "seq": 2, "kind": "gates_completed", "path": "checkpoints/0002-gates_completed.json", "timestamp": "2026-06-02T09:12:00Z" },
+    { "seq": 3, "kind": "final_report_validated", "path": "checkpoints/0003-final_report_validated.json", "timestamp": "2026-06-02T09:12:30Z" },
+    { "seq": 4, "kind": "clean_eval_completed", "path": "checkpoints/0004-clean_eval_completed.json", "timestamp": "2026-06-02T09:17:50Z" },
+    { "seq": 5, "kind": "escalation_chain", "path": "checkpoints/0005-escalation_chain.json", "timestamp": "2026-06-02T09:18:00Z" },
+    { "seq": 6, "kind": "failed", "path": "checkpoints/0006-failed.json", "timestamp": "2026-06-02T09:18:00Z" }
+  ],
+  "artifacts": [
+    { "kind": "agent_events", "path": "artifacts/agent-events.ndjson", "status": "present" },
+    { "kind": "gate_results", "path": "artifacts/gates/results.json", "status": "present" },
+    { "kind": "clean_eval_result", "path": "clean_eval/result.json", "status": "present" }
+  ],
+  "final_report": { "status": "invalid", "errors": ["missing required field: summary"] },
+  "clean_eval": { "status": "fail", "result_path": "clean_eval/result.json" }
+}

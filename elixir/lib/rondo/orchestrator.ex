@@ -1766,7 +1766,10 @@ defmodule Rondo.Orchestrator do
 
     case load_run_manifest(run_dir) do
       {:ok, manifest} ->
-        case Escalation.after_attempt(manifest, attempt_chain, nil) do
+        decision = Escalation.after_attempt(manifest, attempt_chain, nil)
+        Rondo.Telemetry.escalation_decision(manifest["run_id"], decision)
+
+        case decision do
           {:done, _chain} ->
             complete_issue(state, issue_id)
             |> schedule_issue_retry(issue_id, 1, %{

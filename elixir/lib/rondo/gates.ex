@@ -174,34 +174,38 @@ defmodule Rondo.Gates do
     exit_abs = Path.join(run_dir, Path.join(relative_gates_dir, "#{safe_name}-exit-status"))
     started_ms = System.monotonic_time(:millisecond)
 
-    case evaluate_gate_policy(gate, policy_opts) do
-      {:ok, policy_decision} ->
-        gate_mode = gate_execution_mode(policy_opts)
+    result =
+      case evaluate_gate_policy(gate, policy_opts) do
+        {:ok, policy_decision} ->
+          gate_mode = gate_execution_mode(policy_opts)
 
-        task =
-          Task.async(fn ->
-            gate_exit_status(command, workspace, stdout_abs, stderr_abs, exit_abs, policy_opts, gate_mode)
-          end)
+          task =
+            Task.async(fn ->
+              gate_exit_status(command, workspace, stdout_abs, stderr_abs, exit_abs, policy_opts, gate_mode)
+            end)
 
-        status = await_gate(task, timeout_ms, if(gate_mode == :remote, do: nil, else: exit_abs))
-        duration_ms = System.monotonic_time(:millisecond) - started_ms
+          status = await_gate(task, timeout_ms, if(gate_mode == :remote, do: nil, else: exit_abs))
+          duration_ms = System.monotonic_time(:millisecond) - started_ms
 
-        build_result(name, command, status, duration_ms, workspace, stdout_path, stderr_path, policy_decision)
+          build_result(name, command, status, duration_ms, workspace, stdout_path, stderr_path, policy_decision)
 
-      {:error, reason, policy_decision} ->
-        duration_ms = System.monotonic_time(:millisecond) - started_ms
+        {:error, reason, policy_decision} ->
+          duration_ms = System.monotonic_time(:millisecond) - started_ms
 
-        build_result(
-          name,
-          command,
-          %{status: policy_block_status(reason), exit_status: nil},
-          duration_ms,
-          workspace,
-          stdout_path,
-          stderr_path,
-          blocked_policy_decision(reason, policy_decision)
-        )
-    end
+          build_result(
+            name,
+            command,
+            %{status: policy_block_status(reason), exit_status: nil},
+            duration_ms,
+            workspace,
+            stdout_path,
+            stderr_path,
+            blocked_policy_decision(reason, policy_decision)
+          )
+      end
+
+    Rondo.Telemetry.gate_stop(Path.basename(run_dir), result.name, result.status, result.duration_ms)
+    result
   end
 
   defp gate_shell(command, stdout_abs, stderr_abs, exit_abs) do

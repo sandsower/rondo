@@ -21,6 +21,30 @@ defmodule Rondo.RunOnceTest do
     refute_received {:update_issue_state, _, _}
   end
 
+  test "emits [:rondo, :run, :start] and [:rondo, :run, :stop] telemetry for a completed run" do
+    test_pid = self()
+    handler_id = "run-once-telemetry-#{inspect(test_pid)}"
+
+    :telemetry.attach_many(
+      handler_id,
+      [[:rondo, :run, :start], [:rondo, :run, :stop]],
+      fn event, measurements, metadata, _config -> send(test_pid, {:telemetry, event, measurements, metadata}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    issue = issue("issue-telemetry", state: "In Progress")
+
+    assert :ok = RunOnce.run("issue-telemetry", deps: deps(issue, test_pid))
+
+    assert_receive {:telemetry, [:rondo, :run, :start], %{}, %{adapter: "claude_code", run_id: run_id}}
+    assert_receive {:telemetry, [:rondo, :run, :stop], stop_measurements, stop_metadata}
+
+    assert stop_metadata == %{run_id: run_id, status: "completed", adapter: "claude_code"}
+    assert is_integer(stop_measurements.duration) or is_nil(stop_measurements.duration)
+  end
+
   test "returns clear error when issue is missing or not visible" do
     parent = self()
 

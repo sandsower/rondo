@@ -93,6 +93,7 @@ defmodule Rondo.MixProject do
       {:phoenix_live_view, "~> 1.0"},
       {:bandit, "~> 1.0"},
       {:phoenix_pubsub, "~> 2.1"},
+      {:telemetry, "~> 1.3"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]

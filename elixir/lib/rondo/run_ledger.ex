@@ -575,8 +575,12 @@ defmodule Rondo.RunLedger do
            source: %{validator: FinalReport.schema()},
            manifest_update: manifest_update
          ) do
-      {:ok, ledger} -> {:ok, ledger, status}
-      {:error, reason} -> {:error, reason}
+      {:ok, ledger} ->
+        Rondo.Telemetry.final_report_recorded(ledger.run_id, status_string)
+        {:ok, ledger, status}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

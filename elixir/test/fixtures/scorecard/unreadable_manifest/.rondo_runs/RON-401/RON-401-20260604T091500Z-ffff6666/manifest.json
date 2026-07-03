@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "run_id": "RON-401-20260604T091500Z-ffff6666",
+  "status": "failed",
+  this is not valid json and should fail to decode
+}

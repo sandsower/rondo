@@ -80,7 +80,15 @@ defmodule Rondo.CleanEval do
     started_at = Keyword.get(opts, :now, DateTime.utc_now())
     context = build_context(ledger, opts)
     result = evaluate(context)
-    persist(ledger, result, started_at)
+
+    case persist(ledger, result, started_at) do
+      {:ok, persisted_ledger, persisted_result} = ok ->
+        Rondo.Telemetry.clean_eval_stop(persisted_ledger.run_id, persisted_result.status)
+        ok
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   defp build_context(ledger, opts) do

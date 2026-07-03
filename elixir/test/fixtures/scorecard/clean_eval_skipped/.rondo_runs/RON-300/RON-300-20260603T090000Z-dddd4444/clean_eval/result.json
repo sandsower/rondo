@@ -1,0 +1,7 @@
+{
+  "schema": "rondo.clean_eval/v0",
+  "status": "skipped",
+  "reason": "missing_patch_artifact",
+  "started_at": "2026-06-03T09:04:40Z",
+  "finished_at": "2026-06-03T09:04:50Z"
+}

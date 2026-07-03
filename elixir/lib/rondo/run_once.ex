@@ -265,7 +265,14 @@ defmodule Rondo.RunOnce do
 
   @spec create_run_once_ledger(Issue.t(), keyword()) :: {:ok, RunLedger.t()} | {:error, term()}
   defp create_run_once_ledger(issue, ledger_opts \\ []) do
-    RunLedger.create_run(issue, ledger_opts)
+    case RunLedger.create_run(issue, ledger_opts) do
+      {:ok, ledger} = ok ->
+        Rondo.Telemetry.run_start(ledger.run_id, %{adapter: get_in(ledger.manifest, ["agent", "adapter"])})
+        ok
+
+      other ->
+        other
+    end
   end
 
   @spec run_agent(Issue.t(), deps(), keyword(), keyword()) :: run_result()
@@ -397,7 +404,8 @@ defmodule Rondo.RunOnce do
 
   defp complete_run_once_ledger_result(ledger, result) do
     case complete_run_once_ledger(ledger, result) do
-      {:ok, _ledger} ->
+      {:ok, ledger} ->
+        emit_run_stop_telemetry(ledger)
         result
 
       {:error, reason} ->
@@ -407,6 +415,24 @@ defmodule Rondo.RunOnce do
 
   defp complete_run_once_ledger(ledger, :ok), do: RunLedger.complete_run(ledger, :completed, %{mode: "run_once"})
   defp complete_run_once_ledger(ledger, {:error, reason}), do: RunLedger.complete_run(ledger, :failed, %{mode: "run_once", reason: inspect(reason)})
+
+  defp emit_run_stop_telemetry(ledger) do
+    status = Map.get(ledger.manifest, "status", "unknown")
+    adapter = get_in(ledger.manifest, ["agent", "adapter"])
+    Rondo.Telemetry.run_stop(ledger.run_id, manifest_duration_ms(ledger.manifest), status, %{adapter: adapter})
+  end
+
+  defp manifest_duration_ms(manifest) do
+    with timestamps when is_map(timestamps) <- Map.get(manifest, "timestamps"),
+         started when is_binary(started) <- Map.get(timestamps, "started_at"),
+         finished when is_binary(finished) <- Map.get(timestamps, "finished_at"),
+         {:ok, started_dt, _offset} <- DateTime.from_iso8601(started),
+         {:ok, finished_dt, _offset} <- DateTime.from_iso8601(finished) do
+      DateTime.diff(finished_dt, started_dt, :millisecond)
+    else
+      _other -> nil
+    end
+  end
 
   defp pause_run_once_ledger(ledger, interrupt, opts \\ [source: %{interrupt: "action_policy"}]) do
     case RunLedger.pause_run(ledger, interrupt, opts) do

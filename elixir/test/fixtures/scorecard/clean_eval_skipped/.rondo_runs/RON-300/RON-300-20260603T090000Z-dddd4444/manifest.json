@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "run_id": "RON-300-20260603T090000Z-dddd4444",
+  "status": "completed",
+  "run_dir": "/tmp/rondo_workspaces/.rondo_runs/RON-300/RON-300-20260603T090000Z-dddd4444",
+  "issue": {
+    "id": "issue-300",
+    "identifier": "RON-300",
+    "title": "Docs-only update",
+    "description": "No code changes, so there is no patch artifact to clean-eval",
+    "state": "In Progress",
+    "url": "https://linear.app/rondo/issue/RON-300",
+    "labels": [],
+    "priority": 4
+  },
+  "repo": {
+    "workspace_root": "/tmp/rondo_workspaces",
+    "workspace": "/tmp/rondo_workspaces/RON-300",
+    "workspace_path": "/tmp/rondo_workspaces/RON-300",
+    "worker_host": null,
+    "base_commit": "d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5",
+    "base_branch": "main"
+  },
+  "tracker": { "adapter": "linear" },
+  "agent": {
+    "adapter": "claude_code",
+    "session_id": "session-300",
+    "run_ref": null,
+    "capabilities": null,
+    "final_report": null,
+    "diff_source": null,
+    "model_routing": null,
+    "usage": { "input_tokens": 3000, "output_tokens": 500, "total_tokens": 3500 }
+  },
+  "process_provider": { "kind": "native", "capabilities": { "gate_selection": "native_flat_gates" }, "probe": { "checks": {} } },
+  "mode": {
+    "agent_max_turns": 40,
+    "claude_max_turns": 40,
+    "claude_permission_mode": "acceptEdits",
+    "claude_dangerously_skip_permissions": false,
+    "claude_model": "sonnet",
+    "claude_allowed_tools": null
+  },
+  "action_policy": { "provider": "beislid", "run_mode": "enforce", "policy_file": null, "policy_file_source": null, "policy_file_sha256": null },
+  "release_loop": null,
+  "timestamps": {
+    "created_at": "2026-06-03T09:00:00Z",
+    "updated_at": "2026-06-03T09:05:00Z",
+    "started_at": "2026-06-03T09:00:00Z",
+    "finished_at": "2026-06-03T09:05:00Z"
+  },
+  "checkpoints": [
+    { "seq": 1, "kind": "turn_started", "path": "checkpoints/0001-turn_started.json", "timestamp": "2026-06-03T09:00:05Z" },
+    { "seq": 2, "kind": "clean_eval_completed", "path": "checkpoints/0002-clean_eval_completed.json", "timestamp": "2026-06-03T09:04:50Z" },
+    { "seq": 3, "kind": "completed", "path": "checkpoints/0003-completed.json", "timestamp": "2026-06-03T09:05:00Z" }
+  ],
+  "artifacts": [
+    { "kind": "agent_events", "path": "artifacts/agent-events.ndjson", "status": "present" },
+    { "kind": "clean_eval_result", "path": "clean_eval/result.json", "status": "present" },
+    { "kind": "gate_results", "path": "artifacts/gates/results.json", "status": "missing" },
+    { "kind": "gate_results", "status": "missing" }
+  ],
+  "clean_eval": { "status": "skipped", "result_path": "clean_eval/result.json" }
+}

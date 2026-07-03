@@ -1427,6 +1427,49 @@ defmodule Rondo.RunLedgerTest do
     assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "final_report_validated"))
   end
 
+  test "record_final_report emits [:rondo, :final_report, :recorded] telemetry" do
+    test_pid = self()
+    handler_id = "final-report-telemetry-#{inspect(test_pid)}"
+
+    :telemetry.attach(
+      handler_id,
+      [:rondo, :final_report, :recorded],
+      fn event, measurements, metadata, _config -> send(test_pid, {:telemetry, event, measurements, metadata}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    workspace_root = tmp_dir("ledger-final-report-telemetry")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "7e1eba7a"
+             )
+
+    report = %{
+      "schema" => "rondo.final_report/v0",
+      "summary" => "Did the work",
+      "changed_files" => ["lib/a.ex"],
+      "gates_run" => [%{"name" => "elixir-ci", "status" => "pass"}],
+      "failures" => [],
+      "risks" => [],
+      "next_state" => "ready_for_review"
+    }
+
+    final_report_text = "All done.\n```json\n#{Jason.encode!(report)}\n```\n"
+
+    assert {:ok, ledger, :valid} = RunLedger.record_final_report(ledger, final_report_text)
+    run_id = ledger.run_id
+
+    assert_receive {:telemetry, [:rondo, :final_report, :recorded], %{}, %{run_id: ^run_id, status: "valid"}}
+
+    assert {:ok, _ledger, :missing} = RunLedger.record_final_report(ledger, "no report here")
+    assert_receive {:telemetry, [:rondo, :final_report, :recorded], %{}, %{run_id: ^run_id, status: "missing"}}
+  end
+
   test "record_final_report classifies missing and invalid reports distinctly" do
     workspace_root = tmp_dir("ledger-final-report-bad")
 

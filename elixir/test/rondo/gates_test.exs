@@ -35,6 +35,39 @@ defmodule Rondo.GatesTest do
     assert [%{"name" => "unit", "status" => "pass"}] = results_json["results"]
   end
 
+  test "emits [:rondo, :gate, :stop] telemetry for each gate result" do
+    test_pid = self()
+    handler_id = "gate-stop-telemetry-#{inspect(test_pid)}"
+
+    :telemetry.attach(
+      handler_id,
+      [:rondo, :gate, :stop],
+      fn event, measurements, metadata, _config -> send(test_pid, {:telemetry, event, measurements, metadata}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    test_root = tmp_dir("gates-telemetry")
+    on_exit(fn -> File.rm_rf(test_root) end)
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "MT-TELEMETRY")
+    run_dir = Path.join(workspace_root, ".rondo_runs/MT-TELEMETRY/run-telemetry-1")
+
+    File.mkdir_p!(workspace)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    assert {:ok, _summary} =
+             Gates.run(
+               [%{name: "unit", command: "true", timeout_ms: 1_000}],
+               workspace,
+               run_dir: run_dir
+             )
+
+    assert_receive {:telemetry, [:rondo, :gate, :stop], %{duration: duration}, %{run_id: "run-telemetry-1", gate: "unit", status: "pass"}}
+    assert is_integer(duration) and duration >= 0
+  end
+
   test "persists provider gate selection explanations with results" do
     test_root = tmp_dir("gates-selection")
     workspace_root = Path.join(test_root, "workspaces")

@@ -244,6 +244,31 @@ defmodule Rondo.CleanEvalTest do
     assert "clean_eval_gate_results" in artifact_kinds
   end
 
+  test "emits [:rondo, :clean_eval, :stop] telemetry with the outcome status" do
+    test_pid = self()
+    handler_id = "clean-eval-stop-telemetry-#{inspect(test_pid)}"
+
+    :telemetry.attach(
+      handler_id,
+      [:rondo, :clean_eval, :stop],
+      fn event, measurements, metadata, _config -> send(test_pid, {:telemetry, event, measurements, metadata}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    context = setup_run("clean-eval-telemetry")
+    write_patch_artifacts!(context)
+
+    gates = [%{name: "check files", command: "grep -q added file.txt && test -f new.txt", timeout_ms: 10_000}]
+    run_id = context.ledger.run_id
+
+    assert {:ok, _ledger, result} = CleanEval.run(context.ledger, gates: gates)
+    assert result.status == :pass
+
+    assert_receive {:telemetry, [:rondo, :clean_eval, :stop], %{}, %{run_id: ^run_id, status: "pass"}}
+  end
+
   test "uses the configured process provider pre-PR gate selection in the clean worktree" do
     context = setup_run("clean-eval-provider-pre-pr", clean_eval_enabled: true)
     write_patch_artifacts!(context)

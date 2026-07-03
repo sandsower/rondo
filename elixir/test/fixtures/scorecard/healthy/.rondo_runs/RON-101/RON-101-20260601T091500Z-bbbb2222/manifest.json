@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "run_id": "RON-101-20260601T091500Z-bbbb2222",
+  "status": "completed",
+  "run_dir": "/tmp/rondo_workspaces/.rondo_runs/RON-101/RON-101-20260601T091500Z-bbbb2222",
+  "issue": {
+    "id": "issue-101",
+    "identifier": "RON-101",
+    "title": "Fix flaky orchestrator test",
+    "description": "Seed-dependent flake in orchestrator status test",
+    "state": "In Progress",
+    "url": "https://linear.app/rondo/issue/RON-101",
+    "labels": [],
+    "priority": 3
+  },
+  "repo": {
+    "workspace_root": "/tmp/rondo_workspaces",
+    "workspace": "/tmp/rondo_workspaces/RON-101",
+    "workspace_path": "/tmp/rondo_workspaces/RON-101",
+    "worker_host": null,
+    "base_commit": "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3",
+    "base_branch": "main"
+  },
+  "tracker": { "adapter": "linear" },
+  "agent": {
+    "adapter": "codex",
+    "session_id": "session-101",
+    "run_ref": null,
+    "capabilities": null,
+    "final_report": null,
+    "diff_source": null,
+    "model_routing": null,
+    "usage": { "input_tokens": 8000, "output_tokens": 2000, "total_tokens": 10000 }
+  },
+  "process_provider": { "kind": "native", "capabilities": { "gate_selection": "native_flat_gates" }, "probe": { "checks": {} } },
+  "mode": {
+    "agent_max_turns": 40,
+    "claude_max_turns": 40,
+    "claude_permission_mode": "acceptEdits",
+    "claude_dangerously_skip_permissions": false,
+    "claude_model": null,
+    "claude_allowed_tools": null
+  },
+  "action_policy": { "provider": "beislid", "run_mode": "enforce", "policy_file": null, "policy_file_source": null, "policy_file_sha256": null },
+  "release_loop": null,
+  "timestamps": {
+    "created_at": "2026-06-01T09:15:00Z",
+    "updated_at": "2026-06-01T09:30:00Z",
+    "started_at": "2026-06-01T09:15:00Z",
+    "finished_at": "2026-06-01T09:30:00Z"
+  },
+  "checkpoints": [
+    { "seq": 1, "kind": "turn_started", "path": "checkpoints/0001-turn_started.json", "timestamp": "2026-06-01T09:15:05Z" },
+    { "seq": 2, "kind": "gates_completed", "path": "checkpoints/0002-gates_completed.json", "timestamp": "2026-06-01T09:27:00Z" },
+    { "seq": 3, "kind": "turn_completed", "path": "checkpoints/0003-turn_completed.json", "timestamp": "2026-06-01T09:28:00Z" },
+    { "seq": 4, "kind": "final_report_validated", "path": "checkpoints/0004-final_report_validated.json", "timestamp": "2026-06-01T09:28:30Z" },
+    { "seq": 5, "kind": "clean_eval_completed", "path": "checkpoints/0005-clean_eval_completed.json", "timestamp": "2026-06-01T09:29:50Z" },
+    { "seq": 6, "kind": "completed", "path": "checkpoints/0006-completed.json", "timestamp": "2026-06-01T09:30:00Z" }
+  ],
+  "artifacts": [
+    { "kind": "agent_events", "path": "artifacts/agent-events.ndjson", "status": "present" },
+    { "kind": "gate_results", "path": "artifacts/gates/results.json", "status": "present" },
+    { "kind": "final_report", "path": "artifacts/final-report.json", "status": "present" },
+    { "kind": "clean_eval_result", "path": "clean_eval/result.json", "status": "present" }
+  ],
+  "final_report": { "status": "valid", "errors": [], "path": "artifacts/final-report.json" },
+  "clean_eval": { "status": "pass", "result_path": "clean_eval/result.json" }
+}
