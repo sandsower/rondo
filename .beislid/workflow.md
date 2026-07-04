@@ -113,7 +113,7 @@ Cheap gates first for iteration. Normal review/babysit runs format, credo, tests
   command: 'cd elixir && make all'
   cost: expensive
   failure:
-    hint: 'exhaustive/manual gate only. Includes coverage with a 100% threshold that may fail on baseline; compare against origin/main before treating as a branch regression.'
+    hint: 'exhaustive/manual gate only. Includes coverage with an honest, measured threshold on the execution core (web/dashboard/timeseries display surfaces excluded deliberately). Ratchet convention: the threshold may only increase; lowering it requires a ticket.'
 ```
 
 ## Model routing

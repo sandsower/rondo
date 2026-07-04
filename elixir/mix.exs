@@ -9,53 +9,36 @@ defmodule Rondo.MixProject do
       start_permanent: Mix.env() == :prod,
       test_coverage: [
         summary: [
-          threshold: 100
+          # Ratchet: this number may only increase. Raising coverage is
+          # welcome; lowering the threshold requires a ticket.
+          threshold: 81
         ],
         ignore_modules: [
-          Rondo.Config,
-          Rondo.Debug,
-          Rondo.GitHub.Adapter,
-          Rondo.GitHub.Client,
-          Rondo.GitHub.PullRequest,
-          Rondo.Linear.Client,
-          Rondo.Linear.MCPServer,
-          Rondo.SpecsCheck,
-          Rondo.Orchestrator,
-          Rondo.Orchestrator.State,
-          Rondo.Agent.Adapter,
-          Rondo.Agent.ClaudeCodeAdapter,
-          Rondo.Agent.CodexAdapter,
-          Rondo.Agent.PiAdapter,
-          Rondo.AgentRunner,
-          Rondo.CLI,
-          Rondo.DeliveryArtifact,
-          Rondo.RunOnce,
-          Rondo.Claude.CLI,
-          Rondo.Claude.StreamParser,
-          Rondo.Codex.CLI,
-          Rondo.Codex.StreamParser,
-          Rondo.Pi.CLI,
-          Rondo.Pi.StreamParser,
-          Rondo.HttpServer,
-          Rondo.LogFile,
-          Rondo.PathSafety,
-          Rondo.ReleaseLoop,
-          Rondo.Tracker.UpdateDetector,
-          Rondo.StatusDashboard,
-          Rondo.TimeSeries,
-          RondoWeb.Endpoint,
-          RondoWeb.ErrorJSON,
-          Rondo.Workspace,
+          # Display-only surfaces, excluded deliberately: the whole web
+          # layer (LiveView/Phoenix rendering, routing, and Phoenix's own
+          # generated Router.Helpers module), plus the two dashboard/
+          # timeseries display modules. None of these are part of the
+          # execution core the coverage gate is meant to protect.
+          RondoWeb.ArchivedRuns,
+          RondoWeb.ArchivedRuns.Sorter,
+          RondoWeb.DashboardEventStream,
           RondoWeb.DashboardLive,
+          RondoWeb.Endpoint,
+          RondoWeb.ErrorHTML,
+          RondoWeb.ErrorJSON,
+          RondoWeb.EventInspector,
           RondoWeb.Layouts,
           RondoWeb.ObservabilityApiController,
           RondoWeb.ObservabilityPubSub,
           RondoWeb.Presenter,
           RondoWeb.PresenterCache,
+          RondoWeb.ResultSummary,
           RondoWeb.Router,
           RondoWeb.Router.Helpers,
           RondoWeb.StaticAssetController,
-          RondoWeb.StaticAssets
+          RondoWeb.StaticAssets,
+          Rondo.StatusDashboard,
+          Rondo.TimeSeries
         ]
       ],
       test_ignore_filters: [
