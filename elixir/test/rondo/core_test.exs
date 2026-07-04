@@ -63,6 +63,81 @@ defmodule Rondo.CoreTest do
     assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.kind"}]}} = Config.validate!()
   end
 
+  test "release_loop.closeout.merge.mode validates under the nested merge section" do
+    write_workflow_file!(Workflow.workflow_file_path(), release_loop_merge_mode: "merge-plz")
+
+    assert {:error, {:invalid_workflow_config, _, [%{path: "release_loop.closeout.merge.mode"}]}} =
+             Config.validate!()
+  end
+
+  test "config warns on unknown keys without failing validation" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: "token",
+      tracker_project_slug: "project",
+      model_routing: %{
+        "profiles" => %{
+          "bulk_implementation" => %{
+            "tier" => "light",
+            "mode" => "prefer",
+            "adapter" => "pi"
+          }
+        }
+      },
+      claude_command: "/usr/bin/claude"
+    )
+
+    content =
+      Workflow.workflow_file_path()
+      |> File.read!()
+      |> String.replace(
+        ~S(  project_slug: "project"),
+        ~S(  project_slug: "project"
+  typo_key: "surprise")
+      )
+      |> String.replace(
+        ~S(      adapter: "pi"),
+        ~S(      adapter: "pi"
+      typo: "oops")
+      )
+
+    File.write!(Workflow.workflow_file_path(), content)
+
+    log =
+      capture_log(fn ->
+        assert :ok = Config.validate!()
+      end)
+
+    assert log =~ "unknown config key section=tracker key=typo_key"
+    assert log =~ "unknown config key section=model_routing.profiles.bulk_implementation key=typo"
+  end
+
+  test "config logs workflow load failures before defaulting to built-in values" do
+    original_workflow_path = Workflow.workflow_file_path()
+
+    missing_workflow_path =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-missing-workflow-#{System.unique_integer([:positive, :monotonic])}.md"
+      )
+
+    assert :ok = Supervisor.terminate_child(Rondo.Supervisor, WorkflowStore)
+
+    on_exit(fn ->
+      Workflow.set_workflow_file_path(original_workflow_path)
+      assert {:ok, _pid} = Supervisor.restart_child(Rondo.Supervisor, WorkflowStore)
+    end)
+
+    Workflow.set_workflow_file_path(missing_workflow_path)
+
+    log =
+      capture_log(fn ->
+        assert Config.poll_interval_ms() == 30_000
+      end)
+
+    assert log =~ "WORKFLOW.md load failed"
+    assert log =~ "defaults are being used"
+  end
+
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)

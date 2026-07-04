@@ -1295,6 +1295,134 @@ defmodule Rondo.WorkspaceAndConfigTest do
     refute payload["query"] =~ "labelNames"
   end
 
+  test "linear client filters candidate polling to configured assignee" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_assignee: "dev@example.com",
+      tracker_api_token: "test-token",
+      tracker_project_slug: "test-project"
+    )
+
+    request_fun = fn _payload, _headers ->
+      {:ok,
+       %{
+         status: 200,
+         body: %{
+           "data" => %{
+             "issues" => %{
+               "nodes" => [
+                 %{
+                   "id" => "issue-1",
+                   "identifier" => "MT-1",
+                   "title" => "Mine",
+                   "state" => %{"name" => "Todo"},
+                   "assignee" => %{"id" => "dev@example.com"}
+                 },
+                 %{
+                   "id" => "issue-2",
+                   "identifier" => "MT-2",
+                   "title" => "Other",
+                   "state" => %{"name" => "Todo"},
+                   "assignee" => %{"id" => "someone-else@example.com"}
+                 }
+               ],
+               "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+             }
+           }
+         }
+       }}
+    end
+
+    assert Config.linear_assignee() == "dev@example.com"
+    assert {:ok, issues} = Client.fetch_candidate_issues(request_fun: request_fun)
+
+    assert Enum.map(issues, &{&1.identifier, &1.assigned_to_worker}) == [
+             {"MT-1", true},
+             {"MT-2", false}
+           ]
+  end
+
+  test "config validates release_loop closeout merge.mode in the nested merge section" do
+    write_workflow_file!(Workflow.workflow_file_path(), release_loop_merge_mode: "sometimes")
+
+    assert {:error, {:invalid_workflow_config, _, [%{path: "release_loop.closeout.merge.mode"}]}} =
+             Config.validate!()
+  end
+
+  test "config warns on unknown workflow keys instead of dropping them silently" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_api_token: "token",
+      tracker_project_slug: "project",
+      model_routing: %{
+        "profiles" => %{
+          "bulk_implementation" => %{
+            "tier" => "light",
+            "mode" => "prefer",
+            "adapter" => "pi"
+          }
+        }
+      },
+      claude_command: "/usr/bin/claude"
+    )
+
+    content =
+      Workflow.workflow_file_path()
+      |> File.read!()
+      |> String.replace(
+        ~S(  project_slug: "project"),
+        ~S(  project_slug: "project"
+  typo_key: "surprise")
+      )
+      |> String.replace(
+        ~S(      adapter: "pi"),
+        ~S(      adapter: "pi"
+      typo: "oops")
+      )
+
+    File.write!(Workflow.workflow_file_path(), content)
+
+    log =
+      capture_log(fn ->
+        assert :ok = Config.validate!()
+      end)
+
+    assert log =~ "unknown config key section=tracker key=typo_key"
+    assert log =~ "unknown config key section=model_routing.profiles.bulk_implementation key=typo"
+  end
+
+  test "workflow load failure logs explicit fallback before defaults are used" do
+    original_path = Workflow.workflow_file_path()
+    missing_path = Path.join(Path.dirname(original_path), "MISSING_WORKFLOW.md")
+
+    on_exit(fn ->
+      Workflow.set_workflow_file_path(original_path)
+
+      case Supervisor.restart_child(Rondo.Supervisor, WorkflowStore) do
+        {:ok, _pid} -> :ok
+        {:error, {:already_started, _pid}} -> :ok
+      end
+    end)
+
+    Workflow.set_workflow_file_path(missing_path)
+
+    if Process.whereis(WorkflowStore) do
+      case Supervisor.terminate_child(Rondo.Supervisor, WorkflowStore) do
+        :ok -> :ok
+        {:ok, _pid} -> :ok
+        {:error, :not_found} -> :ok
+        {:error, {:already_terminated, _pid}} -> :ok
+      end
+    end
+
+    log =
+      capture_log(fn ->
+        assert String.contains?(Config.workflow_prompt(), "You are working on a Linear issue.")
+        assert Config.poll_interval_ms() == 30_000
+      end)
+
+    assert log =~ "WORKFLOW.md load failed"
+    assert log =~ "defaults are being used"
+  end
+
   test "workflow prompt is used when building base prompt" do
     workflow_prompt = "Workflow prompt body used as claude instruction."
 

@@ -5,6 +5,7 @@ defmodule Rondo.Config do
 
   alias NimbleOptions
   alias Rondo.Workflow
+  require Logger
 
   @default_active_states ["Todo", "In Progress"]
   @default_terminal_states ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
@@ -875,7 +876,8 @@ defmodule Rondo.Config do
       {:ok, %{prompt_template: prompt}} ->
         if String.trim(prompt) == "", do: @default_prompt_template, else: prompt
 
-      _ ->
+      {:error, reason} ->
+        log_workflow_load_failure(reason)
         @default_prompt_template
     end
   end
@@ -1149,10 +1151,9 @@ defmodule Rondo.Config do
             raise ArgumentError, format_validation_error(reason)
         end
 
-      _ ->
-        %{}
-        |> extract_workflow_options()
-        |> NimbleOptions.validate!(@workflow_options_schema)
+      {:error, reason} ->
+        log_workflow_load_failure(reason)
+        workflow_default_options()
     end
   end
 
@@ -1182,6 +1183,29 @@ defmodule Rondo.Config do
   end
 
   defp extract_workflow_options(config) do
+    config =
+      warn_unknown_config_keys("workflow", config, [
+        "tracker",
+        "polling",
+        "workspace",
+        "worker",
+        "agent",
+        "claude",
+        "pi",
+        "codex",
+        "action_policy",
+        "release_loop",
+        "process_provider",
+        "model_routing",
+        "escalation",
+        "hooks",
+        "gates",
+        "gate_reuse",
+        "clean_eval",
+        "observability",
+        "server"
+      ])
+
     %{
       tracker: extract_tracker_options(section_map(config, "tracker")),
       polling: extract_polling_options(section_map(config, "polling")),
@@ -1197,7 +1221,7 @@ defmodule Rondo.Config do
       model_routing: extract_model_routing_options(section_map(config, "model_routing")),
       escalation: extract_escalation_options(section_map(config, "escalation")),
       hooks: extract_hooks_options(section_map(config, "hooks")),
-      gates: extract_gates_options(Map.get(config, "gates")),
+      gates: extract_gates_options(Map.get(config, "gates"), "gates"),
       gate_reuse: extract_gate_reuse_options(section_map(config, "gate_reuse")),
       clean_eval: extract_clean_eval_options(section_map(config, "clean_eval")),
       observability: extract_observability_options(section_map(config, "observability")),
@@ -1206,6 +1230,21 @@ defmodule Rondo.Config do
   end
 
   defp extract_tracker_options(section) do
+    section =
+      warn_unknown_config_keys("tracker", section, [
+        "kind",
+        "endpoint",
+        "api_key",
+        "project_slug",
+        "repo",
+        "state_label_prefix",
+        "assignee",
+        "active_states",
+        "review_states",
+        "terminal_states",
+        "label_filter"
+      ])
+
     %{}
     |> put_if_present(:kind, normalize_tracker_kind(scalar_string_value(Map.get(section, "kind"))))
     |> put_if_present(:endpoint, scalar_string_value(Map.get(section, "endpoint")))
@@ -1213,6 +1252,7 @@ defmodule Rondo.Config do
     |> put_if_present(:project_slug, scalar_string_value(Map.get(section, "project_slug")))
     |> put_if_present(:repo, scalar_string_value(Map.get(section, "repo")))
     |> put_if_present(:state_label_prefix, scalar_string_value(Map.get(section, "state_label_prefix")))
+    |> put_if_present(:assignee, binary_value(Map.get(section, "assignee")))
     |> put_if_present(:active_states, csv_value(Map.get(section, "active_states")))
     |> put_if_present(:review_states, csv_value(Map.get(section, "review_states")))
     |> put_if_present(:terminal_states, csv_value(Map.get(section, "terminal_states")))
@@ -1220,25 +1260,40 @@ defmodule Rondo.Config do
   end
 
   defp extract_polling_options(section) do
+    section = warn_unknown_config_keys("polling", section, ["interval_ms"])
+
     %{}
     |> put_if_present(:interval_ms, integer_value(Map.get(section, "interval_ms")))
   end
 
   defp extract_workspace_options(section) do
+    section = warn_unknown_config_keys("workspace", section, ["root"])
+
     %{}
     |> put_if_present(:root, binary_value(Map.get(section, "root")))
   end
 
   defp extract_worker_options(section) do
+    section = warn_unknown_config_keys("worker", section, ["max_concurrent_agents_per_host", "ssh_hosts"])
+
     %{}
     |> put_if_present(
       :max_concurrent_agents_per_host,
       positive_integer_value(Map.get(section, "max_concurrent_agents_per_host"))
     )
-    |> put_if_present(:ssh_hosts, worker_hosts_value(Map.get(section, "ssh_hosts")))
+    |> put_if_present(:ssh_hosts, worker_hosts_value(Map.get(section, "ssh_hosts"), "worker.ssh_hosts"))
   end
 
   defp extract_agent_options(section) do
+    section =
+      warn_unknown_config_keys("agent", section, [
+        "max_concurrent_agents",
+        "adapter",
+        "max_turns",
+        "max_retry_backoff_ms",
+        "max_concurrent_agents_by_state"
+      ])
+
     %{}
     |> put_if_present(:max_concurrent_agents, integer_value(Map.get(section, "max_concurrent_agents")))
     |> put_if_present(:adapter, command_value(Map.get(section, "adapter")))
@@ -1251,6 +1306,19 @@ defmodule Rondo.Config do
   end
 
   defp extract_claude_options(section) do
+    section =
+      warn_unknown_config_keys("claude", section, [
+        "command",
+        "permission_mode",
+        "dangerously_skip_permissions",
+        "max_turns",
+        "output_format",
+        "model",
+        "allowed_tools",
+        "turn_timeout_ms",
+        "stall_timeout_ms"
+      ])
+
     %{}
     |> put_if_present(:command, command_value(Map.get(section, "command")))
     |> put_if_present(:permission_mode, scalar_string_value(Map.get(section, "permission_mode")))
@@ -1264,6 +1332,8 @@ defmodule Rondo.Config do
   end
 
   defp extract_pi_options(section) do
+    section = warn_unknown_config_keys("pi", section, ["command", "turn_timeout_ms", "stall_timeout_ms"])
+
     %{}
     |> put_if_present(:command, command_value(Map.get(section, "command")))
     |> put_if_present(:turn_timeout_ms, integer_value(Map.get(section, "turn_timeout_ms")))
@@ -1271,6 +1341,8 @@ defmodule Rondo.Config do
   end
 
   defp extract_codex_options(section) do
+    section = warn_unknown_config_keys("codex", section, ["command", "turn_timeout_ms", "stall_timeout_ms"])
+
     %{}
     |> put_if_present(:command, command_value(Map.get(section, "command")))
     |> put_if_present(:turn_timeout_ms, integer_value(Map.get(section, "turn_timeout_ms")))
@@ -1278,6 +1350,8 @@ defmodule Rondo.Config do
   end
 
   defp extract_action_policy_options(section) do
+    section = warn_unknown_config_keys("action_policy", section, ["command", "run_mode", "policy_file"])
+
     %{}
     |> put_if_present(:command, command_value(Map.get(section, "command")))
     |> put_if_present(:run_mode, scalar_string_value(Map.get(section, "run_mode")))
@@ -1285,8 +1359,26 @@ defmodule Rondo.Config do
   end
 
   defp extract_release_loop_options(section) do
+    section =
+      warn_unknown_config_keys("release_loop", section, [
+        "enabled",
+        "pr_review_source",
+        "pr_review_update",
+        "wait_interval_seconds",
+        "run_configured_gates_before_push",
+        "max_pr_risk_level",
+        "review_policy",
+        "review_state",
+        "rework_state",
+        "merge_state",
+        "done_state",
+        "closeout"
+      ])
+
     closeout = section_map(section, "closeout")
+    closeout = warn_unknown_config_keys("release_loop.closeout", closeout, ["merge"])
     merge = section_map(closeout, "merge")
+    merge = warn_unknown_config_keys("release_loop.closeout.merge", merge, ["mode", "method", "delete_branch"])
 
     %{}
     |> put_if_present(:enabled, boolean_value(Map.get(section, "enabled")))
@@ -1314,6 +1406,16 @@ defmodule Rondo.Config do
   end
 
   defp extract_release_loop_review_policy_options(section) do
+    section =
+      warn_unknown_config_keys("release_loop.review_policy", section, [
+        "high_risk_paths",
+        "low_risk_paths",
+        "high_risk_file_count",
+        "high_risk_total_changes",
+        "low_risk_file_count",
+        "low_risk_total_changes"
+      ])
+
     %{}
     |> put_if_present(:high_risk_paths, path_pattern_list_value(Map.get(section, "high_risk_paths")))
     |> put_if_present(:low_risk_paths, path_pattern_list_value(Map.get(section, "low_risk_paths")))
@@ -1352,6 +1454,8 @@ defmodule Rondo.Config do
   defp policy_file_value(_value), do: :omit
 
   defp extract_process_provider_options(section) do
+    section = warn_unknown_config_keys("process_provider", section, ["kind", "required", "artifact_path"])
+
     %{}
     |> put_if_present(:kind, scalar_string_value(Map.get(section, "kind")))
     |> put_if_present(:required, boolean_value(Map.get(section, "required")))
@@ -1359,15 +1463,19 @@ defmodule Rondo.Config do
   end
 
   defp extract_model_routing_options(section) when is_map(section) do
+    section = warn_unknown_config_keys("model_routing", section, ["tiers", "floor", "defaults", "step_hints", "profiles"])
+
     %{}
     |> put_if_present(:tiers, normalize_model_routing_tiers(Map.get(section, "tiers")))
-    |> put_if_present(:floor, normalize_model_routing_map(Map.get(section, "floor")))
-    |> put_if_present(:defaults, normalize_model_routing_map(Map.get(section, "defaults")))
-    |> put_if_present(:step_hints, normalize_model_routing_step_hints(model_routing_step_hints_value(section)))
+    |> put_if_present(:floor, normalize_model_routing_map(Map.get(section, "floor"), "model_routing.floor"))
+    |> put_if_present(:defaults, normalize_model_routing_map(Map.get(section, "defaults"), "model_routing.defaults"))
+    |> put_if_present(:step_hints, normalize_model_routing_step_hints(model_routing_step_hints_value(section), "model_routing.step_hints"))
     |> put_if_present(:profiles, normalize_model_routing_profiles(Map.get(section, "profiles")))
   end
 
   defp extract_escalation_options(section) when is_map(section) do
+    section = warn_unknown_config_keys("escalation", section, ["enabled", "tiers", "max_total_attempts", "token_budget", "report_repair_attempts"])
+
     %{}
     |> put_if_present(:enabled, boolean_value(Map.get(section, "enabled")))
     |> put_if_present(:tiers, tier_list_value(Map.get(section, "tiers")))
@@ -1377,11 +1485,13 @@ defmodule Rondo.Config do
   end
 
   defp normalize_model_routing_tiers(tiers) when is_map(tiers) do
+    tiers = warn_unknown_config_keys("model_routing.tiers", tiers, ["light", "standard", "heavy", "frontier"])
+
     tiers
     |> Enum.reduce(%{}, fn {tier, candidates}, acc ->
       case normalize_tier_key(tier) do
         nil -> acc
-        normalized -> Map.put(acc, normalized, normalize_model_routing_candidates(candidates))
+        normalized -> Map.put(acc, normalized, normalize_model_routing_candidates(candidates, "model_routing.tiers.#{normalize_key(tier)}"))
       end
     end)
   end
@@ -1392,7 +1502,9 @@ defmodule Rondo.Config do
     if Map.has_key?(section, "step_hints"), do: Map.get(section, "step_hints"), else: :omit
   end
 
-  defp normalize_model_routing_step_hints(hints) when is_map(hints) do
+  defp normalize_model_routing_step_hints(hints, section_name) when is_map(hints) do
+    hints = warn_unknown_config_keys(section_name, hints, ["initial", "initial_spawn", "steps", "phases"])
+
     hints
     |> Enum.reduce(%{}, fn {key, value}, acc ->
       case normalize_model_routing_step_hints_key(key) do
@@ -1404,7 +1516,7 @@ defmodule Rondo.Config do
     end)
   end
 
-  defp normalize_model_routing_step_hints(_hints), do: :omit
+  defp normalize_model_routing_step_hints(_hints, _section_name), do: :omit
 
   defp normalize_model_routing_step_hints_key(value) when value in ["initial", :initial], do: :initial
   defp normalize_model_routing_step_hints_key(value) when value in ["initial_spawn", :initial_spawn], do: :initial_spawn
@@ -1412,13 +1524,20 @@ defmodule Rondo.Config do
   defp normalize_model_routing_step_hints_key(value) when value in ["phases", :phases], do: :phases
   defp normalize_model_routing_step_hints_key(_value), do: nil
 
-  defp normalize_model_routing_candidates(candidates) when is_list(candidates), do: Enum.map(candidates, &normalize_model_routing_map/1)
-  defp normalize_model_routing_candidates(_candidates), do: []
+  defp normalize_model_routing_candidates(candidates, section_name) when is_list(candidates) do
+    Enum.with_index(candidates)
+    |> Enum.map(fn
+      {candidate, index} when is_map(candidate) -> normalize_model_routing_map(candidate, "#{section_name}.#{index}")
+      {_candidate, _index} -> %{}
+    end)
+  end
+
+  defp normalize_model_routing_candidates(_candidates, _section_name), do: []
 
   defp normalize_model_routing_profiles(profiles) when is_map(profiles) do
     profiles
     |> Enum.reduce(%{}, fn {name, profile}, acc ->
-      normalized = normalize_model_routing_profile(profile)
+      normalized = normalize_model_routing_profile(profile, "model_routing.profiles.#{normalize_key(name)}")
       if map_size(normalized) > 0, do: Map.put(acc, to_string(name), normalized), else: acc
     end)
     |> case do
@@ -1429,17 +1548,19 @@ defmodule Rondo.Config do
 
   defp normalize_model_routing_profiles(_profiles), do: :omit
 
-  defp normalize_model_routing_profile(profile) when is_map(profile) do
+  defp normalize_model_routing_profile(profile, section_name) when is_map(profile) do
+    profile = warn_unknown_config_keys(section_name, profile, ["tier", "model", "mode", "adapter", "required", "candidates"])
+
     %{}
     |> put_if_present(:tier, normalize_tier_key(map_value(profile, :tier)))
     |> put_if_present(:model, normalize_profile_string(map_value(profile, :model)))
     |> put_if_present(:mode, normalize_profile_mode(map_value(profile, :mode)))
     |> put_if_present(:adapter, normalize_profile_string(map_value(profile, :adapter)))
     |> put_if_present(:required, normalize_profile_required(map_value(profile, :required)))
-    |> put_if_present(:candidates, normalize_model_routing_profile_candidates(map_value(profile, :candidates)))
+    |> put_if_present(:candidates, normalize_model_routing_profile_candidates(map_value(profile, :candidates), "#{section_name}.candidates"))
   end
 
-  defp normalize_model_routing_profile(_profile), do: %{}
+  defp normalize_model_routing_profile(_profile, _section_name), do: %{}
 
   defp map_value(map, key) when is_map(map) and is_atom(key) do
     Map.get(map, key) || Map.get(map, Atom.to_string(key))
@@ -1460,14 +1581,19 @@ defmodule Rondo.Config do
   defp normalize_profile_required(value) when is_boolean(value), do: value
   defp normalize_profile_required(_value), do: :omit
 
-  defp normalize_model_routing_profile_candidates(candidates) when is_list(candidates) do
-    normalized = Enum.map(candidates, &normalize_model_routing_map/1)
-    if normalized == [], do: :omit, else: normalized
+  defp normalize_model_routing_profile_candidates(candidates, section_name) when is_list(candidates) do
+    Enum.with_index(candidates)
+    |> Enum.map(fn
+      {candidate, index} when is_map(candidate) -> normalize_model_routing_map(candidate, "#{section_name}.#{index}")
+      {_candidate, _index} -> %{}
+    end)
   end
 
-  defp normalize_model_routing_profile_candidates(_candidates), do: :omit
+  defp normalize_model_routing_profile_candidates(_candidates, _section_name), do: :omit
 
-  defp normalize_model_routing_map(map) when is_map(map) do
+  defp normalize_model_routing_map(map, section_name) when is_map(map) do
+    map = warn_unknown_config_keys(section_name, map, ["adapter", "agent_adapter", "model", "tier", "mode", "required"])
+
     map
     |> Enum.reduce(%{}, fn {key, value}, acc ->
       case normalize_model_routing_key(key) do
@@ -1477,7 +1603,7 @@ defmodule Rondo.Config do
     end)
   end
 
-  defp normalize_model_routing_map(_map), do: :omit
+  defp normalize_model_routing_map(_map, _section_name), do: :omit
 
   defp normalize_tier_key(value) when value in ["light", :light], do: :light
   defp normalize_tier_key(value) when value in ["standard", :standard], do: :standard
@@ -1512,13 +1638,19 @@ defmodule Rondo.Config do
 
   defp tier_list_value(_value), do: :omit
 
-  defp worker_hosts_value(values) when is_list(values) do
-    Enum.map(values, &worker_host_value/1)
+  defp worker_hosts_value(values, section_name) when is_list(values) do
+    Enum.with_index(values)
+    |> Enum.map(fn
+      {host, index} when is_map(host) -> worker_host_value(host, "#{section_name}.#{index}")
+      {_host, _index} -> %{}
+    end)
   end
 
-  defp worker_hosts_value(_value), do: :omit
+  defp worker_hosts_value(_value, _section_name), do: :omit
 
-  defp worker_host_value(host) when is_map(host) do
+  defp worker_host_value(host, section_name) when is_map(host) do
+    host = warn_unknown_config_keys(section_name, host, ["name", "host", "user", "port", "max_concurrent_agents"])
+
     %{}
     |> put_if_present(:name, scalar_string_value(Map.get(host, "name")))
     |> put_if_present(:host, scalar_string_value(Map.get(host, "host")))
@@ -1530,9 +1662,9 @@ defmodule Rondo.Config do
     )
   end
 
-  defp worker_host_value(_host), do: %{}
-
   defp extract_hooks_options(section) do
+    section = warn_unknown_config_keys("hooks", section, ["after_create", "before_run", "after_run", "before_remove", "timeout_ms"])
+
     %{}
     |> put_if_present(:after_create, hook_command_value(Map.get(section, "after_create")))
     |> put_if_present(:before_run, hook_command_value(Map.get(section, "before_run")))
@@ -1541,9 +1673,12 @@ defmodule Rondo.Config do
     |> put_if_present(:timeout_ms, positive_integer_value(Map.get(section, "timeout_ms")))
   end
 
-  defp extract_gates_options(gates) when is_list(gates) do
-    Enum.map(gates, fn
-      gate when is_map(gate) ->
+  defp extract_gates_options(gates, section_name) when is_list(gates) do
+    Enum.with_index(gates)
+    |> Enum.map(fn
+      {gate, index} when is_map(gate) ->
+        gate = warn_unknown_config_keys("#{section_name}.#{index}", gate, ["name", "command", "timeout_ms", "action_id", "action_classes"])
+
         %{}
         |> put_if_present(:name, scalar_string_value(Map.get(gate, "name")))
         |> put_if_present(:command, command_value(Map.get(gate, "command")))
@@ -1551,29 +1686,35 @@ defmodule Rondo.Config do
         |> put_if_present(:action_id, scalar_string_value(Map.get(gate, "action_id")))
         |> put_if_present(:action_classes, tools_list_value(Map.get(gate, "action_classes")))
 
-      _other ->
+      {_gate, _index} ->
         %{}
     end)
   end
 
-  defp extract_gates_options(_gates), do: []
+  defp extract_gates_options(_gates, _section_name), do: []
 
   defp extract_gate_reuse_options(section) do
+    section = warn_unknown_config_keys("gate_reuse", section, ["enabled"])
+
     %{}
     |> put_if_present(:enabled, boolean_value(Map.get(section, "enabled")))
   end
 
   defp extract_clean_eval_options(section) do
+    section = warn_unknown_config_keys("clean_eval", section, ["enabled", "base_ref", "gates"])
+
     %{}
     |> put_if_present(:enabled, boolean_value(Map.get(section, "enabled")))
     |> put_if_present(:base_ref, scalar_string_value(Map.get(section, "base_ref")))
     |> put_if_present(:gates, clean_eval_gates_value(Map.get(section, "gates")))
   end
 
-  defp clean_eval_gates_value(gates) when is_list(gates), do: extract_gates_options(gates)
+  defp clean_eval_gates_value(gates) when is_list(gates), do: extract_gates_options(gates, "clean_eval.gates")
   defp clean_eval_gates_value(_gates), do: :omit
 
   defp extract_observability_options(section) do
+    section = warn_unknown_config_keys("observability", section, ["dashboard_enabled", "refresh_ms", "render_interval_ms"])
+
     %{}
     |> put_if_present(:dashboard_enabled, boolean_value(Map.get(section, "dashboard_enabled")))
     |> put_if_present(:refresh_ms, integer_value(Map.get(section, "refresh_ms")))
@@ -1581,9 +1722,35 @@ defmodule Rondo.Config do
   end
 
   defp extract_server_options(section) do
+    section = warn_unknown_config_keys("server", section, ["port", "host"])
+
     %{}
     |> put_if_present(:port, non_negative_integer_value(Map.get(section, "port")))
     |> put_if_present(:host, scalar_string_value(Map.get(section, "host")))
+  end
+
+  defp workflow_default_options do
+    %{}
+    |> extract_workflow_options()
+    |> NimbleOptions.validate!(@workflow_options_schema)
+  end
+
+  defp log_workflow_load_failure(reason) do
+    Logger.error("WORKFLOW.md load failed; defaults are being used reason=#{inspect(reason)}")
+  end
+
+  defp warn_unknown_config_keys(section_name, section, allowed_keys) when is_map(section) do
+    allowed_keys = allowed_keys |> Enum.map(&normalize_key/1) |> MapSet.new()
+
+    section
+    |> Map.keys()
+    |> Enum.map(&normalize_key/1)
+    |> Enum.reject(&MapSet.member?(allowed_keys, &1))
+    |> Enum.each(fn key ->
+      Logger.warning("unknown config key section=#{section_name} key=#{key}")
+    end)
+
+    section
   end
 
   defp validate_raw_config(config) do
@@ -1695,7 +1862,7 @@ defmodule Rondo.Config do
       validate_string_field(release_loop, "release_loop.rework_state"),
       validate_string_field(release_loop, "release_loop.merge_state"),
       validate_string_field(release_loop, "release_loop.done_state"),
-      validate_inclusion_field(release_loop_closeout, "release_loop.closeout.merge.mode", ["auto", "ask", "deny"]),
+      validate_inclusion_field(release_loop_merge, "release_loop.closeout.merge.mode", ["auto", "ask", "deny"]),
       validate_inclusion_field(release_loop_merge, "release_loop.closeout.merge.method", ["merge", "squash", "rebase"]),
       validate_boolean_field(release_loop_merge, "release_loop.closeout.merge.delete_branch"),
       validate_inclusion_field(process_provider, "process_provider.kind", @valid_process_provider_kinds),
