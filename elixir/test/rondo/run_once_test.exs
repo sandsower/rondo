@@ -356,6 +356,39 @@ defmodule Rondo.RunOnceTest do
     assert log =~ "Failed to record run-once clean eval"
   end
 
+  test "clean eval crashes do not mask the original run result" do
+    parent = self()
+
+    agent_runner = fn _issue, agent_opts ->
+      send(parent, {:run_dir, Keyword.fetch!(agent_opts, :run_dir)})
+      :ok
+    end
+
+    log =
+      capture_log(fn ->
+        # A crash inside the evaluator is the same infrastructure failure class
+        # as a record-persist failure: it must not rewrite the run result, only
+        # log a warning and best-effort record the clean_eval status as error.
+        assert :ok =
+                 RunOnce.run("issue-1",
+                   deps:
+                     deps(issue("issue-1", state: "In Progress"), parent,
+                       agent_runner: agent_runner,
+                       clean_eval_runner: :raise
+                     )
+                 )
+      end)
+
+    assert log =~ "Run-once clean eval crashed"
+    assert log =~ "clean eval exploded"
+
+    assert_received {:run_dir, run_dir}
+    manifest = run_dir |> Path.join("manifest.json") |> File.read!() |> Jason.decode!()
+    assert manifest["clean_eval"] == %{"status" => "error"}
+    assert manifest["status"] == "completed"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "clean_eval_crashed"))
+  end
+
   test "logs run context when agent event persistence fails" do
     parent = self()
 
@@ -943,6 +976,7 @@ defmodule Rondo.RunOnceTest do
     update_result = Keyword.get(opts, :update_result, :ok)
     agent_runner = Keyword.get(opts, :agent_runner, :ok)
     policy_decision = Keyword.get(opts, :policy_decision, "allow")
+    clean_eval_runner = Keyword.get(opts, :clean_eval_runner, :real)
 
     %{
       fetch_issue_states_by_ids: fn issue_ids ->
@@ -975,6 +1009,13 @@ defmodule Rondo.RunOnceTest do
           is_function(agent_runner, 2) -> agent_runner.(issue, agent_opts)
           agent_runner == :ok -> :ok
           agent_runner == :raise -> raise "agent exploded"
+        end
+      end,
+      clean_eval_runner: fn ledger ->
+        cond do
+          is_function(clean_eval_runner, 1) -> clean_eval_runner.(ledger)
+          clean_eval_runner == :real -> Rondo.CleanEval.run(ledger)
+          clean_eval_runner == :raise -> raise "clean eval exploded"
         end
       end
     }

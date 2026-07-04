@@ -22,7 +22,8 @@ defmodule Rondo.RunOnce do
           fetch_issue_states_by_ids: ([String.t()] -> {:ok, [Issue.t()]} | {:error, term()}),
           update_issue_state: (String.t(), String.t() -> :ok | {:error, term()}),
           action_policy_evaluator: (String.t(), [String.t()], keyword() -> {:ok, map()} | {:error, term()}),
-          agent_runner: (Issue.t(), keyword() -> run_result() | no_return())
+          agent_runner: (Issue.t(), keyword() -> run_result() | no_return()),
+          clean_eval_runner: (RunLedger.t() -> {:ok, RunLedger.t(), map()} | {:error, term()} | no_return())
         }
 
   @spec run(String.t()) :: run_result()
@@ -134,7 +135,8 @@ defmodule Rondo.RunOnce do
       fetch_issue_states_by_ids: &Tracker.fetch_issue_states_by_ids/1,
       update_issue_state: &Tracker.update_issue_state/2,
       action_policy_evaluator: &Rondo.ActionPolicy.evaluate/3,
-      agent_runner: fn issue, agent_opts -> AgentRunner.run(issue, self(), agent_opts) end
+      agent_runner: fn issue, agent_opts -> AgentRunner.run(issue, self(), agent_opts) end,
+      clean_eval_runner: &CleanEval.run/1
     }
   end
 
@@ -296,7 +298,7 @@ defmodule Rondo.RunOnce do
     result = deps.agent_runner.(issue, agent_opts)
     {ledger, updates} = record_queued_updates(ledger, issue.id)
     ledger = finalize_run_artifacts(ledger, result, updates)
-    {ledger, result} = maybe_run_clean_eval(ledger, result)
+    {ledger, result} = maybe_run_clean_eval(deps, ledger, result)
     complete_run_once_ledger_result(ledger, result)
   rescue
     error ->
@@ -325,18 +327,18 @@ defmodule Rondo.RunOnce do
       complete_run_once_ledger_result(ledger, {:error, reason})
   end
 
-  defp maybe_run_clean_eval(ledger, :ok) do
+  defp maybe_run_clean_eval(deps, ledger, :ok) do
     if CleanEval.enabled?() do
-      run_clean_eval(ledger)
+      run_clean_eval(deps, ledger)
     else
       {ledger, :ok}
     end
   end
 
-  defp maybe_run_clean_eval(ledger, result), do: {ledger, result}
+  defp maybe_run_clean_eval(_deps, ledger, result), do: {ledger, result}
 
-  defp run_clean_eval(ledger) do
-    case CleanEval.run(ledger) do
+  defp run_clean_eval(deps, ledger) do
+    case deps.clean_eval_runner.(ledger) do
       {:ok, ledger, %{status: status} = result} when status in [:pass, :skipped] ->
         Logger.info("Run-once clean eval #{ledger_context(ledger)} status=#{result.status}")
         {ledger, :ok}
@@ -354,8 +356,33 @@ defmodule Rondo.RunOnce do
     end
   rescue
     error ->
+      # A crash inside the evaluator is the same infrastructure failure class as
+      # a record-persist failure (environment/infrastructure, not a verdict): it
+      # must not rewrite the run result. Log with full ledger + exception
+      # context, best-effort record the clean_eval status as `error` in the
+      # manifest, and return the original run result unchanged.
       Logger.warning("Run-once clean eval crashed #{ledger_context(ledger)} reason=#{Exception.message(error)}")
-      {ledger, {:error, {:clean_eval_crashed, Exception.message(error)}}}
+      {record_clean_eval_crash(ledger, error), :ok}
+  end
+
+  defp record_clean_eval_crash(ledger, error) do
+    payload = %{"status" => "error", "reason" => Exception.message(error)}
+    manifest_update = fn manifest -> Map.put(manifest, "clean_eval", %{"status" => "error"}) end
+
+    case RunLedger.write_checkpoint(ledger, :clean_eval_crashed, payload,
+           source: %{evaluator: "clean_eval"},
+           manifest_update: manifest_update
+         ) do
+      {:ok, ledger} ->
+        ledger
+
+      {:error, reason} ->
+        # Recording the crash is best-effort too: an unwritable manifest here is
+        # the same infrastructure failure class as the record-persist path above
+        # and must not escalate into a second crash or a rewritten run result.
+        Logger.warning("Failed to record run-once clean eval crash #{ledger_context(ledger)} reason=#{inspect(reason)}")
+        ledger
+    end
   end
 
   defp clean_eval_failure_summary(result) do
