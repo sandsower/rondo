@@ -116,6 +116,8 @@ Cheap gates first for iteration. Normal review/babysit runs format, credo, tests
     hint: 'exhaustive/manual gate only. Includes coverage with an honest, measured threshold on the execution core (web/dashboard/timeseries display surfaces excluded deliberately). Ratchet convention: the threshold may only increase; lowering it requires a ticket.'
 ```
 
+For fleet-level outcome visibility across runs, use `mix rondo.scorecard [--workspace-root PATH] [--json]` (read-only over `.rondo_runs/` ledgers, see `elixir/README.md`). The replay corpus regression suite in the `test` gate above regenerates its goldens via `REGEN_REPLAY_GOLDEN=1 mix test test/rondo/replay_corpus_test.exs`, which deliberately fails so a regen can't pass silently - always review the fixture diff before committing.
+
 ## Model routing
 
 Sonnet-tier models handle implementation, review-fix, and babysit-style work (validated by the 2026-06-10 envelope batch); planning and adversarial skills prefer a stronger model. `mode: prefer` everywhere — fall back with disclosure rather than block.

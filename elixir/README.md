@@ -339,6 +339,20 @@ Notes:
   top-level `gates` run, and an explicit `clean_eval.gates: []` means apply-only evaluation (pass
   if the patch applies cleanly). Beislið process artifacts should provide staged `pre_pr` gates.
   Gate timeouts are recorded as environment errors, not evaluator failures.
+- `command_proofs` is an optional run-ledger manifest key, distinct from the
+  `proof_requirements` attestation contract, carrying deterministic, executable
+  verification commands: `[{id, command, description?, timeout_seconds?,
+  expected_exit?}]`. When present, each proof runs inside `Rondo.CleanEval`, after
+  the repo gates pass, in the same clean worktree and under the same frozen
+  per-run action policy used for gates, and is graded purely by exit-code equality
+  against `expected_exit` (default `0`). A `fail` (wrong exit code) rolls the
+  overall clean-eval status up to `:fail` (code_failure, same-tier repair loop);
+  `error`/`timeout` rolls up to `:error` (environment_failure, retryable). Absent or
+  empty `command_proofs` is never an error - it is recorded as
+  `command_proofs_declared: false` and logged as a warning, for back-compat with
+  every existing envelope. Outcomes land in `clean_eval/result.json` alongside the
+  gate summary, with per-proof stdout/stderr logs under `clean_eval/proofs/`. See
+  the `Rondo.CleanEval` moduledoc for the full grading/error taxonomy.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
 - `tracker.repo` is required for `tracker.kind: github` and uses `owner/repo` syntax.
 - `tracker.state_label_prefix` defaults to `status:` for GitHub label-emulated workflow states.
@@ -418,6 +432,48 @@ fields are ignored for forward compatibility, but consumed sections are validate
 ```bash
 make all
 ```
+
+`make all` runs `make exhaustive`, which includes a coverage gate on top of format,
+lint, test, and dialyzer. The coverage threshold is an honest, measured number on the
+execution core (81 at the time of writing; web/dashboard/timeseries display surfaces
+are excluded deliberately, see `mix.exs`). It is a ratchet: the threshold may only
+increase, and lowering it requires a ticket. Coverage runs in `make all`/`make
+exhaustive`; it does not run in blocking CI (`make pre-pr`/`make ci`), so a normal PR
+gate pass does not by itself prove the threshold still holds.
+
+### Replay corpus regression suite
+
+`mix test` includes `test/rondo/replay_corpus_test.exs`, which replays the committed
+recorded-run corpus (`test/fixtures/recorded_runs/<case>/`) through each provider's
+StreamParser and asserts the normalized event sequence against a golden
+`expected.json` per case, plus cross-adapter invariants. See the moduledoc in that
+file for fixture layout and known-drift notes.
+
+Golden files are not scratch output. Regenerate them with an explicit opt-in:
+
+```bash
+REGEN_REPLAY_GOLDEN=1 mix test test/rondo/replay_corpus_test.exs
+```
+
+Setting the flag overwrites every case's `expected.json` and then intentionally fails
+the touched test, so a green `mix test` run can never happen silently under regen
+mode. After regenerating, unset the flag, review `git diff` on the fixture files line
+by line, and treat any diff as a finding about parser behavior rather than something
+to rubber-stamp.
+
+### Fleet observability
+
+```bash
+mix rondo.scorecard [--workspace-root PATH] [--json]
+```
+
+Prints a read-only, ledger-derived cross-run outcome scorecard: it walks
+`.rondo_runs/*/*/manifest.json` (plus linked clean-eval and gate result artifacts)
+under the workspace root and reports clean-eval outcomes, per-gate pass rates,
+per-adapter run counts, final-report validity, and escalation counts. It never
+mutates the ledger and never runs anything. `--workspace-root` defaults to
+`Rondo.Config.workspace_root/0`; `--json` prints the machine-readable form. See the
+moduledoc in `lib/mix/tasks/rondo.scorecard.ex` for the full field reference.
 
 ### Live end-to-end test (opt-in)
 

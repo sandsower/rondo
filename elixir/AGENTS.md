@@ -18,6 +18,7 @@ This directory contains the Elixir agent orchestration service that polls Linear
   - If implementation changes meaningfully alter the intended behavior, update the spec in the same
     change where practical so the spec stays current.
 - Prefer adding config access through `Rondo.Config` instead of ad-hoc env reads.
+- `command_proofs` manifest key runs executable exit-code proofs inside `Rondo.CleanEval` post-gates; see the moduledoc in `lib/rondo/clean_eval.ex`.
 - Workspace safety is critical:
   - Never run Claude Code with cwd in the source repo.
   - Workspaces must stay under configured workspace root.
@@ -31,6 +32,10 @@ Run targeted tests while iterating, then run full gates before handoff.
 ```bash
 make all
 ```
+
+- Replay corpus regression (`test/rondo/replay_corpus_test.exs`) runs under plain `mix test`; regenerate goldens with `REGEN_REPLAY_GOLDEN=1 mix test test/rondo/replay_corpus_test.exs` (deliberately fails so regens can't pass silently).
+- `mix rondo.scorecard [--workspace-root PATH] [--json]` prints a read-only cross-run outcome scorecard over `.rondo_runs/` ledgers; see the moduledoc in `lib/mix/tasks/rondo.scorecard.ex`.
+- Coverage threshold (`mix.exs` `test_coverage`) is a ratchet - may only increase, lowering requires a ticket; runs in `make all`/`make exhaustive`, not in blocking CI.
 
 ## Required Rules
 
