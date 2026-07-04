@@ -4324,19 +4324,62 @@ defmodule Rondo.OrchestratorStatusTest do
       File.rm_rf(workspace_root)
     end)
 
-    initial_state = :sys.get_state(pid)
-    state_with_dispatch = %{initial_state | max_concurrent_agents: 1, poll_interval_ms: 60_000}
-    :sys.replace_state(pid, fn _ -> state_with_dispatch end)
+    # The orchestrator schedules its own startup tick (delay 0) and, once consumed,
+    # an unconditional `:run_poll_cycle` follow-up ~20ms later (see
+    # `schedule_poll_cycle_start/0`). That follow-up message cannot be canceled once
+    # it has been sent, so racing a manual `{:tick, token}` injection against it (the
+    # old approach here) can let a *second* independently-triggered poll cycle land
+    # after this scenario's capacity dispatch has already run. Because
+    # `maybe_dispatch/1` only attributes a `capacity_exhausted` blocker to a specific
+    # issue when it still has slots to consider (`available_slots(state) > 0` at
+    # entry), that second cycle sees zero slots up front and overwrites the
+    # issue-attributed blocker with a generic, unattributed one - a real, reproduced
+    # flake (seed 42), not just a theoretical race.
+    #
+    # To make this deterministic we converge the orchestrator onto a fully
+    # tick-free state before injecting the scenario: repeatedly cancel any live tick
+    # timer and null out the tick/poll bookkeeping via `:sys.replace_state`, then
+    # verify (via another `:sys.get_state`) that nothing slipped in behind our back
+    # (a leftover already-in-flight `:run_poll_cycle` reschedules a fresh timer,
+    # which the next iteration cancels). Once settled, exactly one directly-sent
+    # `:run_poll_cycle` message drives the dispatch pass - no tick tokens, no sleeps.
+    settled_state =
+      wait_until(fn ->
+        state = :sys.get_state(pid)
+
+        if is_reference(state.tick_timer_ref) do
+          Process.cancel_timer(state.tick_timer_ref)
+        end
+
+        neutralized = %{
+          state
+          | max_concurrent_agents: 1,
+            poll_interval_ms: 60_000,
+            poll_check_in_progress: false,
+            tick_timer_ref: nil,
+            tick_token: nil,
+            next_poll_due_at_ms: nil
+        }
+
+        :sys.replace_state(pid, fn _ -> neutralized end)
+        verify_state = :sys.get_state(pid)
+
+        if verify_state.poll_check_in_progress == false and is_nil(verify_state.tick_timer_ref) do
+          verify_state
+        end
+      end)
+
+    assert settled_state.max_concurrent_agents == 1
 
     Application.put_env(:rondo, :memory_tracker_issues, [issue_a, issue_b])
-    send(pid, {:tick, state_with_dispatch.tick_token})
+    send(pid, :run_poll_cycle)
 
     snapshot =
       wait_until(fn ->
         case GenServer.call(pid, :snapshot) do
-          %{running: running, dispatch_blockers: dispatch_blockers}
-          when length(running) == 1 and length(dispatch_blockers) == 1 ->
-            %{running: running, dispatch_blockers: dispatch_blockers}
+          %{running: running, dispatch_blockers: [%{issue_identifier: "MT-CAP-B"}]} = snapshot
+          when length(running) == 1 ->
+            snapshot
 
           _ ->
             nil
