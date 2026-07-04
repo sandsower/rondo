@@ -1548,6 +1548,7 @@ defmodule Rondo.AgentAdapterTest do
 
       assert_receive {:fake_adapter_invoked, 2, implementation_prompt, _workspace, previous_run_ref}, 500
       assert previous_run_ref.provider_ref == "fake-run-1"
+      assert implementation_prompt =~ "planning-only phase is complete and its restrictions no longer apply"
       assert implementation_prompt =~ "Planning checkpoint to implement from"
       assert implementation_prompt =~ "Implement the tested phase-aware routing slice."
 

@@ -2536,7 +2536,9 @@ defmodule Rondo.AgentRunner do
   defp maybe_prepend_planning_handoff(prompt, opts) when is_binary(prompt) do
     case Keyword.get(opts, :planning_handoff) do
       handoff when is_binary(handoff) and handoff != "" ->
-        "Planning checkpoint to implement from:\n\n" <> handoff <> "\n\n" <> prompt
+        "The planning-only phase is complete and its restrictions no longer apply. " <>
+          "You are now in the implementation phase: edit files, run commands, and implement the plan below in the current workspace.\n\n" <>
+          "Planning checkpoint to implement from:\n\n" <> handoff <> "\n\n" <> prompt
 
       _other ->
         prompt
