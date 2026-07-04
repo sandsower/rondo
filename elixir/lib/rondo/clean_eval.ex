@@ -28,6 +28,37 @@ defmodule Rondo.CleanEval do
   `Rondo.ProcessProvider` for the pre-PR gate selection and runs those gates in
   the clean worktree. An explicit `:gates` option remains available for tests and
   low-level callers that need to exercise only the clean worktree mechanics.
+
+  ## Executable command proofs (`command_proofs`)
+
+  Distinct from the `proof_requirements` / proof-requirement-v1 attestation
+  contract (declared proof obligations, never executed here), `command_proofs`
+  is a new, optional manifest key carrying deterministic, executable
+  verification commands: `[{id, command, description?, timeout_seconds?,
+  expected_exit?}]`. When present (via the `:command_proofs` option or the
+  `command_proofs` key on the run ledger manifest), each proof runs — after the
+  repo gates pass, in the same clean worktree, through the same `:gate_runner`
+  seam and frozen per-run action policy used for gates — and is graded purely
+  by exit-code equality against `expected_exit` (default `0`). A proof's real
+  exit code always survives into the result (`exit_code`), independent of its
+  `expected_exit`; only the pass/fail verdict is derived from equality with
+  `expected_exit`.
+
+  Outcomes join the result as `command_proofs_declared` (boolean) and, when
+  proofs were declared, a `proofs` list of `{id, status, exit_code, log_path,
+  stderr_path, duration_ms}` (`status` one of `pass | fail | error | timeout`),
+  with per-proof stdout/stderr logs under `clean_eval/proofs/`. A `fail`
+  (wrong exit code) rolls the overall clean-eval status up to `:fail`
+  (code_failure, same-tier repair loop); `error`/`timeout` (including a
+  policy-blocked/denied proof, or the executable not being found) rolls up to
+  `:error` (environment_failure, retryable) — mirroring the gate taxonomy.
+  Absent or empty `command_proofs` is never an error: it is recorded as
+  `command_proofs_declared: false` (or `true` with an empty `proofs` list) and
+  logged as a warning, for back-compat with every existing envelope. A
+  malformed `command_proofs` manifest value (not a list, missing required
+  `id`/`command`, duplicate ids, or an invalid `timeout_seconds`/`expected_exit`)
+  is an evaluator `:error`, never silently ignored. Proofs never run when the
+  repo gates fail or error, or when the patch fails to apply.
   """
 
   require Logger
@@ -40,10 +71,31 @@ defmodule Rondo.CleanEval do
   @patch_metadata_relative_path "artifacts/patch.json"
   @result_relative_path "clean_eval/result.json"
   @gates_relative_dir "clean_eval/gates"
+  @proofs_relative_dir "clean_eval/proofs"
   @eval_root_dirname ".rondo_clean_eval"
   @max_apply_output_bytes 16_384
+  @default_proof_timeout_ms 120_000
+  @default_expected_exit 0
+  @proof_command_not_found_exit_status 127
 
   @type status :: :pass | :fail | :error | :skipped
+  @type proof_status :: :pass | :fail | :error | :timeout
+  @type command_proof :: %{
+          id: String.t(),
+          command: String.t(),
+          description: String.t() | nil,
+          timeout_ms: pos_integer(),
+          expected_exit: integer()
+        }
+  @type proof_result :: %{
+          required(:id) => String.t(),
+          required(:status) => proof_status(),
+          required(:exit_code) => integer() | nil,
+          optional(:log_path) => String.t(),
+          optional(:stderr_path) => String.t(),
+          optional(:description) => String.t(),
+          optional(:duration_ms) => non_neg_integer()
+        }
   @type result :: %{required(:status) => status(), optional(atom()) => term()}
   @type runner :: ([String.t()], Path.t() -> {String.t(), non_neg_integer()})
 
@@ -95,6 +147,7 @@ defmodule Rondo.CleanEval do
     workspace_root = get_in(ledger.manifest, ["repo", "workspace_root"])
 
     %{
+      run_id: ledger.run_id,
       run_dir: ledger.run_dir,
       workspace: Keyword.get(opts, :workspace, get_in(ledger.manifest, ["repo", "workspace"])),
       eval_workspace: eval_workspace_path(workspace_root, ledger.run_id),
@@ -103,7 +156,8 @@ defmodule Rondo.CleanEval do
       process_provider: process_provider(ledger, opts),
       source_contract: Keyword.get(opts, :source_contract, Map.get(ledger.manifest, "source_contract")),
       gate_runner: Keyword.get(opts, :gate_runner, &Gates.run/3),
-      runner: Keyword.get(opts, :runner, &run_git/2)
+      runner: Keyword.get(opts, :runner, &run_git/2),
+      command_proofs_raw: Keyword.get(opts, :command_proofs, Map.get(ledger.manifest, "command_proofs"))
     }
   end
 
@@ -201,8 +255,10 @@ defmodule Rondo.CleanEval do
   defp apply_and_run_gates(context, patch) do
     case git(context, context.eval_workspace, ["apply", patch.path]) do
       {:ok, output} ->
-        context
-        |> run_gates()
+        {gates_result, action_policy_provider} = run_gates(context)
+
+        gates_result
+        |> Map.merge(maybe_run_command_proofs(context, gates_result, action_policy_provider))
         |> Map.merge(%{patch_status: "applied", apply_exit_status: 0, apply_output: cap(output)})
 
       {:error, status, output} ->
@@ -218,29 +274,211 @@ defmodule Rondo.CleanEval do
   defp run_gates(context) do
     case select_gate_selection(context) do
       {:ok, %{gates: []} = gate_selection} ->
-        empty_gate_selection_outcome(gate_selection)
+        {empty_gate_selection_outcome(gate_selection), Native}
 
       {:ok, gate_selection} ->
         case action_policy_provider_for_gates(gate_selection, context) do
           {:ok, action_policy_provider, gate_selection} ->
-            gate_selection.gates
-            |> context.gate_runner.(context.eval_workspace,
-              run_dir: context.run_dir,
-              gates_dir: @gates_relative_dir,
-              gate_selection: Map.drop(gate_selection, [:gates, :action_policy_provider]),
-              action_policy: true,
-              action_policy_evaluator: action_policy_evaluator(action_policy_provider, context)
-            )
-            |> process_provider_gate_outcome(action_policy_provider, context)
+            result =
+              gate_selection.gates
+              |> context.gate_runner.(context.eval_workspace,
+                run_dir: context.run_dir,
+                gates_dir: @gates_relative_dir,
+                gate_selection: Map.drop(gate_selection, [:gates, :action_policy_provider]),
+                action_policy: true,
+                action_policy_evaluator: action_policy_evaluator(action_policy_provider, context)
+              )
+              |> process_provider_gate_outcome(action_policy_provider, context)
+
+            {result, action_policy_provider}
 
           {:error, reason} ->
-            process_provider_failure_outcome(reason)
+            {process_provider_failure_outcome(reason), Native}
         end
 
       {:error, reason} ->
-        process_provider_failure_outcome(reason)
+        {process_provider_failure_outcome(reason), Native}
     end
   end
+
+  # Executable command-proof verification (`command_proofs`). Runs only after the
+  # repo gates pass, reusing the same `:gate_runner` seam and action-policy
+  # provider/evaluator resolved for the gates, so proofs execute under the same
+  # frozen per-run action policy as any other run-owned side effect.
+  defp maybe_run_command_proofs(context, %{status: :pass}, action_policy_provider) do
+    case fetch_command_proofs(context) do
+      {:ok, nil} ->
+        Logger.warning("clean_eval: run #{context.run_id} declares no command_proofs; skipping deterministic proof verification (back-compat, not a failure)")
+
+        %{command_proofs_declared: false}
+
+      {:ok, []} ->
+        %{command_proofs_declared: true, proofs: []}
+
+      {:ok, proofs} ->
+        run_command_proofs(context, proofs, action_policy_provider)
+
+      {:error, reason} ->
+        %{status: :error, reason: "invalid_command_proofs #{reason}"}
+    end
+  end
+
+  defp maybe_run_command_proofs(_context, _gates_result, _action_policy_provider), do: %{}
+
+  defp run_command_proofs(context, proofs, action_policy_provider) do
+    proof_gates = Enum.map(proofs, &proof_gate_definition/1)
+
+    proof_gates
+    |> context.gate_runner.(context.eval_workspace,
+      run_dir: context.run_dir,
+      gates_dir: @proofs_relative_dir,
+      action_policy: true,
+      action_policy_evaluator: action_policy_evaluator(action_policy_provider, context)
+    )
+    |> command_proofs_outcome(proofs)
+  end
+
+  defp proof_gate_definition(proof) do
+    %{
+      name: proof.id,
+      command: proof.command,
+      timeout_ms: proof.timeout_ms,
+      action_id: "command_proof.#{proof.id}",
+      action_classes: ["workspace-write"]
+    }
+  end
+
+  defp command_proofs_outcome({:ok, summary}, proofs), do: build_command_proofs_result(summary, proofs)
+
+  defp command_proofs_outcome({:error, %{results: _results} = summary}, proofs), do: build_command_proofs_result(summary, proofs)
+
+  defp command_proofs_outcome({:error, reason}, _proofs) do
+    %{status: :error, reason: "command_proofs_runner_failed #{cap(inspect(reason))}"}
+  end
+
+  defp build_command_proofs_result(summary, proofs) do
+    proof_by_id = Map.new(proofs, &{&1.id, &1})
+
+    results =
+      Enum.map(summary.results, fn gate_result ->
+        classify_proof_result(Map.fetch!(proof_by_id, gate_result.name), gate_result)
+      end)
+
+    %{status: overall_command_proofs_status(results), command_proofs_declared: true, proofs: results}
+  end
+
+  defp classify_proof_result(proof, gate_result) do
+    %{
+      id: proof.id,
+      status: proof_result_status(gate_result, proof.expected_exit),
+      exit_code: Map.get(gate_result, :exit_status),
+      log_path: Map.get(gate_result, :stdout_path),
+      stderr_path: Map.get(gate_result, :stderr_path),
+      duration_ms: Map.get(gate_result, :duration_ms)
+    }
+    |> maybe_put_description(proof.description)
+    |> Map.reject(fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp proof_result_status(%{status: status}, _expected_exit) when status in [:policy_blocked, :policy_denied], do: :error
+  defp proof_result_status(%{status: :timeout}, _expected_exit), do: :timeout
+  defp proof_result_status(%{exit_status: @proof_command_not_found_exit_status}, _expected_exit), do: :error
+  defp proof_result_status(%{exit_status: exit_status}, expected_exit) when exit_status == expected_exit, do: :pass
+  defp proof_result_status(_gate_result, _expected_exit), do: :fail
+
+  defp overall_command_proofs_status(results) do
+    cond do
+      Enum.any?(results, &(&1.status == :fail)) -> :fail
+      Enum.any?(results, &(&1.status in [:error, :timeout])) -> :error
+      true -> :pass
+    end
+  end
+
+  defp maybe_put_description(map, nil), do: map
+  defp maybe_put_description(map, description), do: Map.put(map, :description, description)
+
+  defp fetch_command_proofs(context) do
+    case context.command_proofs_raw do
+      nil -> {:ok, nil}
+      list when is_list(list) -> normalize_command_proofs(list)
+      _other -> {:error, "command_proofs must be a list"}
+    end
+  end
+
+  defp normalize_command_proofs(list) do
+    list
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, [], MapSet.new()}, &accumulate_command_proof/2)
+    |> case do
+      {:ok, proofs, _seen_ids} -> {:ok, Enum.reverse(proofs)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp accumulate_command_proof({item, index}, {:ok, acc, seen_ids}) do
+    with {:ok, proof} <- normalize_command_proof(item, index),
+         :ok <- ensure_unique_proof_id(proof.id, seen_ids) do
+      {:cont, {:ok, [proof | acc], MapSet.put(seen_ids, proof.id)}}
+    else
+      {:error, reason} -> {:halt, {:error, reason}}
+    end
+  end
+
+  defp ensure_unique_proof_id(id, seen_ids) do
+    if MapSet.member?(seen_ids, id) do
+      {:error, "duplicate command_proofs id #{inspect(id)}"}
+    else
+      :ok
+    end
+  end
+
+  defp normalize_command_proof(%{"id" => id, "command" => command} = item, _index) when is_binary(id) and is_binary(command) do
+    id = String.trim(id)
+    command = String.trim(command)
+
+    cond do
+      id == "" -> {:error, "command_proofs item has a blank id"}
+      command == "" -> {:error, "command_proofs item #{inspect(id)} has a blank command"}
+      true -> normalize_command_proof_fields(id, command, item)
+    end
+  end
+
+  defp normalize_command_proof(item, index) when is_map(item) do
+    {:error, "command_proofs item at index #{index} is missing required id/command fields"}
+  end
+
+  defp normalize_command_proof(_item, index) do
+    {:error, "command_proofs item at index #{index} must be an object"}
+  end
+
+  defp normalize_command_proof_fields(id, command, item) do
+    with {:ok, timeout_ms} <- normalize_proof_timeout(Map.get(item, "timeout_seconds"), id),
+         {:ok, expected_exit} <- normalize_proof_expected_exit(Map.get(item, "expected_exit"), id) do
+      {:ok,
+       %{
+         id: id,
+         command: command,
+         description: proof_string_or_nil(Map.get(item, "description")),
+         timeout_ms: timeout_ms,
+         expected_exit: expected_exit
+       }}
+    end
+  end
+
+  defp normalize_proof_timeout(nil, _id), do: {:ok, @default_proof_timeout_ms}
+  defp normalize_proof_timeout(seconds, _id) when is_number(seconds) and seconds > 0, do: {:ok, round(seconds * 1000)}
+  defp normalize_proof_timeout(_seconds, id), do: {:error, "command_proofs item #{inspect(id)} has an invalid timeout_seconds"}
+
+  defp normalize_proof_expected_exit(nil, _id), do: {:ok, @default_expected_exit}
+  defp normalize_proof_expected_exit(exit_code, _id) when is_integer(exit_code), do: {:ok, exit_code}
+  defp normalize_proof_expected_exit(_exit_code, id), do: {:error, "command_proofs item #{inspect(id)} has an invalid expected_exit"}
+
+  defp proof_string_or_nil(value) when is_binary(value) do
+    value = String.trim(value)
+    if value == "", do: nil, else: value
+  end
+
+  defp proof_string_or_nil(_value), do: nil
 
   defp empty_gate_selection_outcome(gate_selection) do
     metadata = Map.get(gate_selection, :metadata, %{})
@@ -456,7 +694,17 @@ defmodule Rondo.CleanEval do
   end
 
   defp provider_id(provider) do
-    if function_exported?(provider, :id, 0), do: provider.id(), else: inspect(provider)
+    # `function_exported?/3` never loads a module implicitly, so without
+    # `Code.ensure_loaded?/1` this falls back to `inspect/1` whenever `provider`
+    # hasn't happened to be loaded yet elsewhere in the VM - an order-dependent
+    # flake (e.g. reproducible when running a single test in isolation). `id/0`
+    # is a required `Rondo.ProcessProvider` callback, so every real provider
+    # implements it once loaded.
+    if Code.ensure_loaded?(provider) and function_exported?(provider, :id, 0) do
+      provider.id()
+    else
+      inspect(provider)
+    end
   end
 
   defp cleanup_eval_workspace(context) do
@@ -500,6 +748,7 @@ defmodule Rondo.CleanEval do
   defp result_artifacts(result) do
     [%{"kind" => "clean_eval_result", "path" => @result_relative_path}]
     |> Kernel.++(gate_results_artifact(result))
+    |> Kernel.++(proof_log_artifacts(result))
   end
 
   defp gate_results_artifact(%{gates: %{results_path: results_path}}) when is_binary(results_path) do
@@ -507,6 +756,21 @@ defmodule Rondo.CleanEval do
   end
 
   defp gate_results_artifact(_result), do: []
+
+  defp proof_log_artifacts(%{proofs: proofs}) when is_list(proofs) do
+    Enum.flat_map(proofs, fn proof ->
+      [
+        proof_log_artifact("clean_eval_proof_stdout", Map.get(proof, :log_path)),
+        proof_log_artifact("clean_eval_proof_stderr", Map.get(proof, :stderr_path))
+      ]
+      |> Enum.reject(&is_nil/1)
+    end)
+  end
+
+  defp proof_log_artifacts(_result), do: []
+
+  defp proof_log_artifact(_kind, nil), do: nil
+  defp proof_log_artifact(kind, path), do: %{"kind" => kind, "path" => path}
 
   defp result_payload(result, started_at, finished_at) do
     %{
@@ -522,6 +786,8 @@ defmodule Rondo.CleanEval do
       "apply_exit_status" => Map.get(result, :apply_exit_status),
       "apply_output" => Map.get(result, :apply_output),
       "gates" => Map.get(result, :gates),
+      "command_proofs_declared" => Map.get(result, :command_proofs_declared),
+      "proofs" => Map.get(result, :proofs),
       "cleanup" => Map.get(result, :cleanup),
       "started_at" => datetime_to_iso(started_at),
       "finished_at" => datetime_to_iso(finished_at)

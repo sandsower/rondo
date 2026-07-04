@@ -777,6 +777,144 @@ defmodule Rondo.CleanEvalTest do
     assert byte_size(result.apply_output) < 20_000
   end
 
+  test "executes command_proofs post-gates and records pass results in rondo.clean_eval/v0" do
+    context = setup_run("clean-eval-command-proofs-pass")
+    write_patch_artifacts!(context)
+
+    gates = [%{name: "check files", command: "test -f new.txt", timeout_ms: 10_000}]
+    command_proofs = [%{"id" => "proof-exit-0", "command" => "exit 0", "description" => "sanity check"}]
+
+    assert {:ok, ledger, result} = CleanEval.run(context.ledger, gates: gates, command_proofs: command_proofs)
+    assert result.status == :pass
+    assert result.command_proofs_declared == true
+    assert [%{id: "proof-exit-0", status: :pass, exit_code: 0, description: "sanity check"}] = result.proofs
+
+    result_json = read_result_json!(context)
+    assert result_json["command_proofs_declared"] == true
+    assert [%{"id" => "proof-exit-0", "status" => "pass", "exit_code" => 0}] = result_json["proofs"]
+    assert ledger.manifest["clean_eval"]["status"] == "pass"
+
+    artifact_kinds = Enum.map(ledger.manifest["artifacts"], & &1["kind"])
+    assert "clean_eval_proof_stdout" in artifact_kinds
+  end
+
+  test "reads command_proofs from the run ledger manifest when no option is passed" do
+    context = setup_run("clean-eval-command-proofs-manifest")
+    write_patch_artifacts!(context)
+
+    manifest = Map.put(context.ledger.manifest, "command_proofs", [%{"id" => "proof-manifest", "command" => "exit 0"}])
+    ledger = %{context.ledger | manifest: manifest}
+
+    assert {:ok, _ledger, result} = CleanEval.run(ledger)
+    assert result.status == :pass
+    assert [%{id: "proof-manifest", status: :pass, exit_code: 0}] = result.proofs
+  end
+
+  test "honors a non-zero expected_exit for command_proofs exit-code grading" do
+    context = setup_run("clean-eval-command-proofs-expected-exit")
+    write_patch_artifacts!(context)
+
+    command_proofs = [%{"id" => "proof-expect-2", "command" => "exit 2", "expected_exit" => 2}]
+
+    assert {:ok, _ledger, result} = CleanEval.run(context.ledger, command_proofs: command_proofs)
+    assert result.status == :pass
+    assert [%{id: "proof-expect-2", status: :pass, exit_code: 2}] = result.proofs
+  end
+
+  test "classifies a failing command_proof as code_failure and fails the clean_eval run" do
+    context = setup_run("clean-eval-command-proofs-fail")
+    write_patch_artifacts!(context)
+
+    command_proofs = [%{"id" => "proof-behavior-1", "command" => "exit 3"}]
+
+    assert {:ok, ledger, result} = CleanEval.run(context.ledger, command_proofs: command_proofs)
+    assert result.status == :fail
+    assert [%{id: "proof-behavior-1", status: :fail, exit_code: 3}] = result.proofs
+    assert ledger.manifest["clean_eval"]["status"] == "fail"
+  end
+
+  test "classifies a missing command_proof executable as an environment failure" do
+    context = setup_run("clean-eval-command-proofs-error")
+    write_patch_artifacts!(context)
+
+    command_proofs = [%{"id" => "proof-missing-tool", "command" => "rondo-no-such-tool-xyz"}]
+
+    assert {:ok, _ledger, result} = CleanEval.run(context.ledger, command_proofs: command_proofs)
+    assert result.status == :error
+    assert [%{id: "proof-missing-tool", status: :error}] = result.proofs
+  end
+
+  test "classifies a command_proof timeout as an environment failure" do
+    context = setup_run("clean-eval-command-proofs-timeout")
+    write_patch_artifacts!(context)
+
+    command_proofs = [%{"id" => "proof-slow", "command" => "sleep 1", "timeout_seconds" => 0.01}]
+
+    assert {:ok, _ledger, result} = CleanEval.run(context.ledger, command_proofs: command_proofs)
+    assert result.status == :error
+    assert [%{id: "proof-slow", status: :timeout}] = result.proofs
+  end
+
+  test "never runs command_proofs when the repo gates fail" do
+    context = setup_run("clean-eval-command-proofs-skipped-on-gate-fail")
+    write_patch_artifacts!(context)
+
+    gates = [%{name: "boom", command: "exit 7", timeout_ms: 10_000}]
+    command_proofs = [%{"id" => "should-not-run", "command" => "exit 0"}]
+
+    assert {:ok, _ledger, result} = CleanEval.run(context.ledger, gates: gates, command_proofs: command_proofs)
+    assert result.status == :fail
+    refute Map.has_key?(result, :command_proofs_declared)
+    refute Map.has_key?(result, :proofs)
+  end
+
+  test "warns but does not fail when command_proofs is absent (back-compat with existing envelopes)" do
+    context = setup_run("clean-eval-command-proofs-absent")
+    write_patch_artifacts!(context)
+
+    log =
+      capture_log(fn ->
+        assert {:ok, _ledger, result} = CleanEval.run(context.ledger)
+        assert result.status == :pass
+        assert result.command_proofs_declared == false
+        refute Map.has_key?(result, :proofs)
+      end)
+
+    assert log =~ "declares no command_proofs"
+
+    result_json = read_result_json!(context)
+    assert result_json["command_proofs_declared"] == false
+    refute Map.has_key?(result_json, "proofs")
+  end
+
+  test "treats an explicitly empty command_proofs list as declared and informational" do
+    context = setup_run("clean-eval-command-proofs-empty")
+    write_patch_artifacts!(context)
+
+    assert {:ok, _ledger, result} = CleanEval.run(context.ledger, command_proofs: [])
+    assert result.status == :pass
+    assert result.command_proofs_declared == true
+    assert result.proofs == []
+  end
+
+  test "errors on a malformed command_proofs manifest without ever executing it" do
+    for {command_proofs, expected_fragment} <- [
+          {"not-a-list", "must be a list"},
+          {[%{"command" => "exit 0"}], "missing required id/command"},
+          {[%{"id" => "dup", "command" => "exit 0"}, %{"id" => "dup", "command" => "exit 1"}], "duplicate command_proofs id"},
+          {[%{"id" => "bad-timeout", "command" => "exit 0", "timeout_seconds" => -1}], "invalid timeout_seconds"},
+          {[%{"id" => "bad-exit", "command" => "exit 0", "expected_exit" => "zero"}], "invalid expected_exit"}
+        ] do
+      context = setup_run("clean-eval-command-proofs-malformed-#{:erlang.phash2(command_proofs)}")
+      write_patch_artifacts!(context)
+
+      assert {:ok, _ledger, result} = CleanEval.run(context.ledger, command_proofs: command_proofs)
+      assert result.status == :error
+      assert result.reason =~ "invalid_command_proofs"
+      assert result.reason =~ expected_fragment
+    end
+  end
+
   test "returns an error when the result artifact cannot be persisted" do
     context = setup_run("clean-eval-persist-error")
     File.write!(Path.join(context.ledger.run_dir, "clean_eval"), "blocking file")
