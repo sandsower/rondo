@@ -353,7 +353,7 @@ defmodule Rondo.ExtensionsTest do
   end
 
   test "http server serves html and json endpoints end-to-end" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: isolated_workspace_root!())
     orchestrator_name = Module.concat(__MODULE__, :HttpOrchestrator)
     {:ok, orchestrator_pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -471,7 +471,7 @@ defmodule Rondo.ExtensionsTest do
   end
 
   test "http server escapes html-sensitive characters in rendered dashboard payload" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: isolated_workspace_root!())
     orchestrator_name = Module.concat(__MODULE__, :EscapingHttpOrchestrator)
     {:ok, orchestrator_pid} = Orchestrator.start_link(name: orchestrator_name)
 
@@ -640,7 +640,7 @@ defmodule Rondo.ExtensionsTest do
   end
 
   test "http server teardown clears bound_port across repeated port-0 restarts" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", workspace_root: isolated_workspace_root!())
 
     for iteration <- 1..3 do
       orchestrator_name =
@@ -841,5 +841,29 @@ defmodule Rondo.ExtensionsTest do
         {:error, {:already_started, _pid}} -> :ok
       end
     end
+  end
+
+  # `Rondo.TestSupport`'s default `workspace_root` is a fixed, shared directory
+  # (`System.tmp_dir!()/rondo_workspaces`) that is never cleaned between test
+  # runs. `Rondo.Orchestrator.init/1` eagerly loads every archived run under
+  # `<workspace_root>/.rondo_archive` and every paused-interrupt manifest under
+  # `<workspace_root>/.rondo_runs`, so any test that starts a real Orchestrator
+  # against the default workspace_root picks up the accumulated history of
+  # every prior local test run (which only grows over time, since nothing ever
+  # prunes it). Tests in this file exercise the real HTTP observability
+  # endpoints and serialize that entire snapshot into the response body, so an
+  # unbounded shared archive directly inflates response size and encode/
+  # transfer time - this is what caused RON-153 (60s timeout under full-suite
+  # load, since encoding/transferring an ever-growing multi-hundred-KB-to-MB
+  # JSON body is slow and gets much slower under CPU contention). Give each
+  # such test its own empty, unique workspace root so results are small and
+  # deterministic regardless of what has run before it, locally or in CI.
+  defp isolated_workspace_root! do
+    root =
+      Path.join(System.tmp_dir!(), "rondo-extensions-test-ws-#{System.unique_integer([:positive, :monotonic])}")
+
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf(root) end)
+    root
   end
 end
