@@ -1642,7 +1642,20 @@ defmodule Rondo.AgentRunner do
   defp planning_phase_ready?(_analysis), do: false
 
   defp implementation_plan_present?(%{"implementation_plan" => plan}) when is_binary(plan), do: String.trim(plan) != ""
+
+  defp implementation_plan_present?(%{"implementation_plan" => plan}) when is_list(plan),
+    do: normalize_implementation_plan_steps(plan) != []
+
   defp implementation_plan_present?(_report), do: false
+
+  # The planning prompt does not pin a type for `implementation_plan`, so a
+  # list of step strings is as contract-compliant as a single string.
+  defp normalize_implementation_plan_steps(plan) when is_list(plan) do
+    plan
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
 
   defp planning_changed_files(%{"changed_files" => files}) when is_list(files), do: Enum.filter(files, &is_binary/1)
   defp planning_changed_files(_report), do: []
@@ -1730,6 +1743,13 @@ defmodule Rondo.AgentRunner do
     case String.trim(plan) do
       "" -> "Planning phase completed without a detailed implementation_plan. Continue from the ticket and run ledger context."
       trimmed -> trimmed
+    end
+  end
+
+  defp implementation_plan_from_report(%{"implementation_plan" => plan} = report, final_report) when is_list(plan) do
+    case normalize_implementation_plan_steps(plan) do
+      [] -> implementation_plan_from_report(Map.delete(report, "implementation_plan"), final_report)
+      steps -> Enum.map_join(Enum.with_index(steps, 1), "\n", fn {step, index} -> "#{index}. #{step}" end)
     end
   end
 
@@ -2532,7 +2552,7 @@ defmodule Rondo.AgentRunner do
     Produce an implementation handoff for the next phase. The next implementation phase will run separately with its own model routing.
 
     Your final response must include a valid `rondo.final_report/v0` JSON object. Include these additional optional fields:
-    - `implementation_plan`: concise handoff for the implementation phase.
+    - `implementation_plan`: concise handoff for the implementation phase (a single string or a list of step strings).
     - `recommended_implementation_tier`: `standard` by default, or `heavy` only when implementation complexity requires stronger execution.
     Set `next_state` to an active state such as `In Progress` unless truly blocked.
     """

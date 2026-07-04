@@ -1563,6 +1563,97 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  test "agent runner accepts a list-shaped implementation_plan in the planning handoff" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-list-plan-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "git init -q",
+        max_turns: 2,
+        gates: [],
+        model_routing: %{
+          defaults: %{tier: "standard", mode: "prefer"},
+          tiers: %{
+            standard: [%{model: "standard-model"}],
+            heavy: [%{model: "heavy-model"}],
+            frontier: [%{model: "frontier-model"}]
+          }
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-list-plan",
+        identifier: "MT-LIST-PLAN",
+        title: "List-shaped plan",
+        description: "Planning report carries implementation_plan as a list of steps",
+        state: "In Progress",
+        labels: []
+      }
+
+      planning_report = %{
+        "schema" => "rondo.final_report/v0",
+        "summary" => "planned implementation",
+        "changed_files" => [],
+        "gates_run" => [],
+        "failures" => [],
+        "risks" => [],
+        "next_state" => "In Progress",
+        "implementation_plan" => [
+          "Update the parser for decided semantics.",
+          "  ",
+          "Add the conformance corpus and runner."
+        ],
+        "recommended_implementation_tier" => "heavy"
+      }
+
+      implementation_report = %{
+        "schema" => "rondo.final_report/v0",
+        "summary" => "implemented",
+        "changed_files" => ["lib/rondo/agent_runner.ex"],
+        "gates_run" => [],
+        "failures" => [],
+        "risks" => [],
+        "next_state" => "Done"
+      }
+
+      parent = start_update_recorder(self())
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 process_provider: Rondo.ProcessProvider.Native,
+                 run_ledger: ledger,
+                 test_pid: parent,
+                 fake_final_reports: [Jason.encode!(planning_report), Jason.encode!(implementation_report)],
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "In Progress"}]} end
+               )
+
+      assert_receive {:fake_adapter_invoked, 2, implementation_prompt, _workspace, _previous_run_ref}, 500
+      assert implementation_prompt =~ "Planning checkpoint to implement from"
+      assert implementation_prompt =~ "1. Update the parser for decided semantics."
+      assert implementation_prompt =~ "2. Add the conformance corpus and runner."
+
+      manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+
+      planning_index = Enum.find(manifest["checkpoints"], &(&1["kind"] == "planning_completed"))
+      assert is_map(planning_index)
+
+      planning_checkpoint =
+        ledger.run_dir |> Path.join(planning_index["path"]) |> File.read!() |> Jason.decode!()
+
+      assert planning_checkpoint["payload"]["implementation_plan"] ==
+               "1. Update the parser for decided semantics.\n2. Add the conformance corpus and runner."
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner pauses on unsafe planning reports before implementation" do
     scenarios = [
       {:missing_plan,
@@ -1574,6 +1665,17 @@ defmodule Rondo.AgentAdapterTest do
          "failures" => [],
          "risks" => [],
          "next_state" => "In Progress"
+       }, "planning_handoff_missing"},
+      {:blank_list_plan,
+       %{
+         "schema" => "rondo.final_report/v0",
+         "summary" => "planned with blank list handoff",
+         "changed_files" => [],
+         "gates_run" => [],
+         "failures" => [],
+         "risks" => [],
+         "next_state" => "In Progress",
+         "implementation_plan" => ["", "   "]
        }, "planning_handoff_missing"},
       {:terminal,
        %{
