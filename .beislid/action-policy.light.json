@@ -1,0 +1,54 @@
+{
+  "modes": {
+    "supervised-auto": {
+      "rules": {
+        "dependency-install": "allow",
+        "git-remote": "deny",
+        "workspace-write": "allow",
+        "read": "allow"
+      },
+      "unknown_action": "ask",
+      "unclassified_action": "ask",
+      "sandbox": { "minimum": "separate-worktree", "on_uncommitted_changes": "allow" },
+      "actions": {
+        "dependency.install": "allow",
+        "git.push": "deny",
+        "gh.pr.create": "deny",
+        "gh.pr.ready": "deny",
+        "gh.pr.edit.label": "deny",
+        "gh.pr.merge": "deny",
+        "pr.review.reply": "deny",
+        "ticket.comment": "deny",
+        "tracker.issue.transition": "deny",
+        "workspace.lifecycle.create": "allow",
+        "workspace.lifecycle.remove_stale_path": "allow",
+        "workspace.lifecycle.remove": "allow"
+      }
+    },
+    "unattended-auto": {
+      "rules": {
+        "dependency-install": "allow",
+        "git-remote": "deny",
+        "workspace-write": "allow",
+        "read": "allow"
+      },
+      "unknown_action": "ask",
+      "unclassified_action": "ask",
+      "sandbox": { "minimum": "separate-worktree", "on_uncommitted_changes": "allow" },
+      "actions": {
+        "dependency.install": "allow",
+        "git.push": "deny",
+        "gh.pr.create": "deny",
+        "gh.pr.ready": "deny",
+        "gh.pr.edit.label": "deny",
+        "gh.pr.merge": "deny",
+        "pr.review.reply": "deny",
+        "ticket.comment": "deny",
+        "tracker.issue.transition": "deny",
+        "workspace.lifecycle.create": "allow",
+        "workspace.lifecycle.remove_stale_path": "allow",
+        "workspace.lifecycle.remove": "allow"
+      }
+    }
+  }
+}
