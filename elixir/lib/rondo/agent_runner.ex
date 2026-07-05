@@ -2518,6 +2518,7 @@ defmodule Rondo.AgentRunner do
       - Resume from the current workspace state instead of restarting from scratch.
       - The original task instructions and prior turn context are already present in this session, so do not restate them before acting.
       - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
+      - Your final response must be only a valid `rondo.final_report/v0` JSON object with required fields `schema`, `summary`, `changed_files`, `gates_run`, `failures`, `risks`, and `next_state`; use `schema: "rondo.final_report/v0"` and do not use legacy keys such as `version`, `ticket`, `completed_actions`, or `blockers` instead of the required fields.
       """
 
     prompt
@@ -2553,10 +2554,23 @@ defmodule Rondo.AgentRunner do
     This is a planning-only phase. Do not edit files, run autofix commands, commit, push, or perform implementation work.
     Produce an implementation handoff for the next phase. The next implementation phase will run separately with its own model routing.
 
-    Your final response must include a valid `rondo.final_report/v0` JSON object. Include these additional optional fields:
-    - `implementation_plan`: concise handoff for the implementation phase (a single string or a list of step strings).
-    - `recommended_implementation_tier`: `standard` by default, or `heavy` only when implementation complexity requires stronger execution.
-    Set `next_state` to an active state such as `In Progress` unless truly blocked.
+    Your final response must include only a valid `rondo.final_report/v0` JSON object, using this exact core shape:
+
+    ```json
+    {
+      "schema": "rondo.final_report/v0",
+      "summary": "planning-only summary",
+      "changed_files": [],
+      "gates_run": [],
+      "failures": [],
+      "risks": [],
+      "next_state": "In Progress",
+      "implementation_plan": "concise handoff for the implementation phase",
+      "recommended_implementation_tier": "standard"
+    }
+    ```
+
+    Do not use legacy keys such as `version`, `ticket`, `completed_actions`, or `blockers` instead of the required core fields. `implementation_plan` may be either a non-empty string or a non-empty list of strings. Set `recommended_implementation_tier` to `standard` by default, or `heavy` only when implementation complexity requires stronger execution. Set `next_state` to an active state such as `In Progress` unless truly blocked.
     """
   end
 
