@@ -1510,7 +1510,10 @@ defmodule Rondo.AgentAdapterTest do
         "failures" => [],
         "risks" => [],
         "next_state" => "In Progress",
-        "implementation_plan" => "Implement the tested phase-aware routing slice.",
+        "implementation_plan" => [
+          "Implement the tested phase-aware routing slice.",
+          "Run the phase-aware routing verification."
+        ],
         "recommended_implementation_tier" => "heavy"
       }
 
@@ -1541,6 +1544,8 @@ defmodule Rondo.AgentAdapterTest do
       assert_receive {:fake_adapter_invoked, 1, planning_prompt, _workspace, nil}, 500
       assert planning_prompt =~ "Rondo planning phase"
       assert planning_prompt =~ "Do not edit files"
+      assert planning_prompt =~ ~s("schema": "rondo.final_report/v0")
+      assert planning_prompt =~ "Do not use legacy keys"
 
       assert_receive {:fake_adapter_opts, first_opts}, 500
       assert Keyword.get(first_opts, :model) == "frontier-model"
@@ -1550,7 +1555,9 @@ defmodule Rondo.AgentAdapterTest do
       assert previous_run_ref.provider_ref == "fake-run-1"
       assert implementation_prompt =~ "planning-only phase is complete and its restrictions no longer apply"
       assert implementation_prompt =~ "Planning checkpoint to implement from"
-      assert implementation_prompt =~ "Implement the tested phase-aware routing slice."
+      assert implementation_prompt =~ "1. Implement the tested phase-aware routing slice."
+      assert implementation_prompt =~ "2. Run the phase-aware routing verification."
+      assert implementation_prompt =~ ~s(schema: "rondo.final_report/v0")
 
       assert_receive {:fake_adapter_opts, second_opts}, 500
       assert Keyword.get(second_opts, :model) == "heavy-model"
