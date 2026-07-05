@@ -77,9 +77,9 @@ defmodule Rondo.ExecutionRequestTest do
              ".github/workflows/validate.yml"
            ]
 
-    assert request.issue.description =~ "## Boundaries"
+    assert request.issue.description =~ "## Boundaries\n\n```json\n"
     assert request.issue.description =~ "scripts/workflow_normalizer.py"
-    assert request.issue.description =~ "## Proof requirements"
+    assert request.issue.description =~ "## Proof requirements\n\n```json\n"
     assert request.issue.description =~ "bei-131-gates"
     assert request.issue.description =~ "proof-requirement-v1"
   end

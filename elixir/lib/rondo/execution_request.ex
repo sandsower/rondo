@@ -133,7 +133,7 @@ defmodule Rondo.ExecutionRequest do
         {:ok, list_section_value(values)}
 
       value when is_map(value) ->
-        {:ok, Jason.encode!(value, pretty: true)}
+        {:ok, json_code_block(value)}
 
       value when is_binary(value) ->
         {:ok, String.trim(value)}
@@ -153,8 +153,12 @@ defmodule Rondo.ExecutionRequest do
       |> Enum.reject(&(&1 == ""))
       |> Enum.map_join("\n", &("- " <> &1))
     else
-      Jason.encode!(values, pretty: true)
+      json_code_block(values)
     end
+  end
+
+  defp json_code_block(value) do
+    "```json\n" <> Jason.encode!(value, pretty: true) <> "\n```"
   end
 
   defp json_section(payload, key) do
