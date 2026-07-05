@@ -1,0 +1,94 @@
+{
+  "schema": "approved-slice-v1",
+  "slice_id": "bei-131-normalizer-conformance",
+  "source_ticket": "BEI-131",
+  "prompt": "## Objective\nImplement the BEI-131 canonical parser decisions in scripts/workflow_normalizer.py, encode them as a golden conformance corpus with a runner, document the stable error-code catalog, amend the canonical format doc, and wire one CI job. The corpus becomes the contract olin (the Rust port, OLI-13 onward) ports against - it must encode the DECIDED behavior below, never whatever the implementation happens to do.\n\n## Design summary\nAll behavior was decided by Vic in the 2026-07-03 HITL session (record: docs/plans/2026-07-03-bei-131-canonical-parser-decisions.md in this repo; this prompt is self-contained and binding). Decisions:\n- D1 comments: in unquoted scalar values, a '#' preceded by whitespace starts a comment; the value ends before it. This applies everywhere outside quotes, including between inline-list elements. Quoted values keep '#' literally. Pinned expectations: `parallel_safe: true # optional` -> true (boolean); `autofix: npm run lint -- --fix # optional` -> \"npm run lint -- --fix\"; `command: 'echo \"a # b\"'` -> `echo \"a # b\"`.\n- D2 flow maps: an inline flow map list item such as `- { name: lint, command: 'pnpm lint' }` is a flow_map_unsupported ERROR pointing at block style - never a silent literal string. Amend the two flow-map examples in the scopes section of .beislid/workflow-md-format.md to block style.\n- D3 line numbers: every parse diagnostic reports the absolute physical line number in workflow.md. Thread each fence's start line into the YAML-subset parser; today errors index a comment/blank-stripped array (reproduced: an error at physical line 4 reports 'line 2'). The existing duplicate_key fence diagnostic already computes absolute lines - match it.\n- D4 unknown fences: the normalizer carries a registry of ALL fence keys documented in .beislid/workflow-md-format.md (roughly 22; derive the exact list from that doc - it includes the 7 TARGET_KEYS plus keys consumed by other tools such as scopes, babysit, action_policy, ticket_source, branch_pattern, workflow_signals, review_policy, probe_cache). Any beislid:* fence whose key is not in the registry produces an unknown_fence_key WARNING with the absolute line (envelope status warning, exit 0). Registry keys outside TARGET_KEYS remain silently skipped - other tools own them.\n- D5 tiers: model_routing 'tiers' keys must be exactly light|standard|heavy|frontier and 'tier_mode' must be prefer|require; violations are invalid_value ERRORS at normalize time (same pattern as clean_eval.mode today).\n- D6 exclusivity: 'model' and 'models' both present on one route is an invalid_value ERROR naming the route path. Today both are silently kept.\n- D7 floats: values matching -?\\d+\\.\\d+ parse as JSON numbers. Exponents, '1.', '.5', and '1.5.2' stay strings.\n- D8 nested inline lists: a '[' inside an inline list is a nested_inline_list ERROR pointing at block style (today `paths: [[a, b], c]` silently corrupts to [\"[a\", \"b]\", \"c\"]).\n- D9 quotes: double-quoted scalars process exactly the escape set \\n \\t \\\\ \\\" ; any other backslash escape is an unknown_escape ERROR. Single-quoted scalars are literal except '' -> '. Pinned: \"line1\\nline2\" -> line1<LF>line2; 'don''t' -> don't; 'a\\nb' -> literal a\\nb.\n- D9b (ratified at approval): an unterminated or mismatched quote on a scalar (e.g. `name: \"abc`) is an unterminated_quote ERROR; today it silently stays a literal string.\n- D10 duplicate fences: current behavior is canon - duplicate_key WARNING with absolute line, first occurrence wins. Pin it in the corpus.\n- D11 error codes: extend the existing snake_case set. New codes, exactly: flow_map_unsupported, nested_inline_list, unknown_escape, unterminated_quote (errors) and unknown_fence_key (warning). Catalog every code (existing + new) in docs/parser-conformance.md: code, severity, when emitted, diagnostic path convention. Codes are frozen once shipped.\n- D12 corpus shape: tests/conformance/cases/<case-name>/ each holding a complete workflow.md input and expected.json - the FULL normalized envelope (schema_version, source, status, sections, warnings, errors). scripts/run_conformance.py runs every case, masks the volatile source.path field before diffing (workflow_hash is deterministic from bytes and stays), prints the case count, and exits non-zero on any mismatch with a readable diff.\n\n## File scope\nInclude: scripts/workflow_normalizer.py, scripts/test_workflow_normalizer.py, scripts/run_conformance.py (new), tests/conformance/** (new), docs/parser-conformance.md (new), .beislid/workflow-md-format.md (the canonical copy; per-skill copies are symlinks - do not touch them), .github/workflows/validate.yml (add ONE job, e.g. normalizer-conformance, mirroring the run-ledger job pattern: sha-pinned checkout with persist-credentials false, sha-pinned setup-python 3.12, run the unit tests then the conformance runner).\nExclude: scripts/action_policy.py and scripts/validate_export.py behavior and corpus cases (blocked on the pending bei-128..130 P0 bundle), release/bump-version.sh, skills/**, all other files.\n\n## Constraints\nHARD: Python stdlib-only; workflow_normalizer.py must remain runnable standalone as a single file. Work corpus-first/TDD: write corpus cases and failing unit tests from the pinned expectations above BEFORE changing the parser. Amend the format doc so doc and implementation agree (D1 makes its gate examples correct as written; D2 requires rewriting the two scopes examples; add the new comment/quote/float/inline-list rules and the fence-key registry note to the doc). Never alter decided semantics - if two decisions appear to conflict, or a case falls outside them, PAUSE and ask rather than judging. No git push, PR creation, or any remote write - local branch (vic/bei-131-*) and local commits only.\n\n## Verification\nFrom the repo root:\n1. python3 scripts/test_workflow_normalizer.py  (exits 0; includes at least one new unit test per decision D1-D9b)\n2. python3 scripts/run_conformance.py  (exits 0; at least one corpus case per decision D1-D10, including cases derived from the format doc's own amended examples; prints the case count)\n3. git diff --check origin/main...HEAD  (exits 0)",
+  "boundaries": {
+    "include": [
+      "scripts/workflow_normalizer.py",
+      "scripts/test_workflow_normalizer.py",
+      "scripts/run_conformance.py",
+      "tests/conformance/**",
+      "docs/parser-conformance.md",
+      ".beislid/workflow-md-format.md",
+      ".github/workflows/validate.yml"
+    ],
+    "exclude": [
+      "scripts/action_policy.py and scripts/validate_export.py behavior/corpus (blocked on pending bei-128..130 P0 bundle)",
+      "release shipping and scripts/bump-version.sh (separate HITL slice)",
+      "skills/** (per-skill format-doc copies are symlinks to the canonical file)",
+      "all other files"
+    ]
+  },
+  "dependencies": [
+    "scripts/workflow_normalizer.py and scripts/test_workflow_normalizer.py present at pinned base (probed with test -f; parser read in full in the authoring session)",
+    ".beislid/workflow-md-format.md canonical with per-skill symlinks (verified via os.readlink + shasum in the authoring session)",
+    ".github/workflows/validate.yml read in the authoring session; no existing normalizer CI job",
+    "python3 (/opt/homebrew/bin/python3), bash (/bin/bash), git (/opt/homebrew/bin/git) probed with command -v",
+    "decisions record docs/plans/2026-07-03-bei-131-canonical-parser-decisions.md committed alongside this bundle (prompt is self-contained regardless)"
+  ],
+  "proof_requirements": [
+    {
+      "kind": "proof-requirement-v1",
+      "id": "bei-131-gates",
+      "type": "command_gate",
+      "stage": "pre-pr",
+      "status": "required",
+      "success_criteria": [
+        "python3 scripts/test_workflow_normalizer.py exits 0 with >=1 new unit test per decision D1-D9b",
+        "python3 scripts/run_conformance.py exits 0 with >=1 corpus case per decision D1-D10 incl. format-doc-derived cases",
+        "git diff --check origin/main...HEAD exits 0"
+      ],
+      "failure_policy": {"on_missing": "block", "on_failure": "block", "retryable": true},
+      "expected_artifact": {"kind": "gate_envelope", "reference": "gate transcript in run evidence"}
+    }
+  ],
+  "output_expectations": {
+    "summary": "Per-decision implementation notes, the final error-code catalog, corpus case list with decision coverage map, and every format-doc amendment made.",
+    "artifacts": ["changed_files", "proof_results"],
+    "next_step": "Human review of parser deltas and corpus fidelity against the decisions record, then ready-for-review; release shipping (version bump + release notes documenting every behavior delta) is a separate HITL slice."
+  },
+  "parent_contract": {
+    "work_contract": "Teotl unification P1a fix-forward conformance spec (spec approved 2026-07-02; parser decisions approved 2026-07-03)",
+    "source": "docs/plans/2026-07-03-bei-131-canonical-parser-decisions.md (this repo) + ~/Personal/teotl/plans/2026-07-02-teotl-unification-core-extraction-spec.md (P1a, decision 7)",
+    "ticket": "BEI-131"
+  },
+  "repo": {
+    "url": "git@github.com:sandsower/beislid.git",
+    "base_ref": "main",
+    "base_sha": "db52c3863e48703a9b2ad57c1e581b307f483894"
+  },
+  "allowed_actions": {
+    "run_mode": "supervised-auto",
+    "allow": [
+      "Edit the include-scope files and create the new corpus/runner/catalog files",
+      "Run the slice verification commands and existing repo test scripts read-only",
+      "Create/commit on a local work branch (vic/bei-131-*)"
+    ],
+    "ask": [
+      "Any edit outside the include scope",
+      "Any case where implementing one decision appears to contradict another",
+      "Touching CI jobs other than the one new normalizer-conformance job",
+      "Any deviation from the decided canonical behaviors D1-D12"
+    ],
+    "deny": [
+      "git push, PR creation, or any remote write (irreversible outside git)",
+      "Adding non-stdlib dependencies or breaking single-file standalone execution of workflow_normalizer.py",
+      "Altering decided semantics or encoding implementation-observed behavior into the corpus where it differs from the decisions (canon is human-owned)",
+      "Editing per-skill workflow-md-format.md symlinks as regular files"
+    ]
+  },
+  "process_provider": {"name": "codex"},
+  "runner_extensions": {
+    "model_routing": {
+      "routing": [
+        {"boundary": "implementation", "tier": "standard", "mode": "prefer", "reason": "all design pre-resolved in the prompt; encode-and-implement against pinned expected outputs"},
+        {"boundary": "review_fix", "tier": "standard", "mode": "prefer", "reason": "default"},
+        {"boundary": "gate_repair", "tier": "standard", "mode": "prefer", "reason": "exact commands given"}
+      ],
+      "tier": "standard",
+      "mode": "prefer",
+      "candidates": ["openai:gpt-5.1-codex", "anthropic:claude-sonnet-4.6", "google:gemini-2.5-pro"]
+    }
+  }
+}

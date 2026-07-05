@@ -6,7 +6,7 @@ defmodule Rondo.ExecutionRequest do
   alias Rondo.Linear.Issue
 
   @schemas ["approved-slice-v1", "rondo-execution-request-v1"]
-  @metadata_keys ~w(parent_contract repo allowed_actions process_provider memory_provider output_expectations runner_extensions model_routing model_routing_hints)
+  @metadata_keys ~w(source_ticket parent_contract repo boundaries dependencies proof_requirements allowed_actions process_provider memory_provider output_expectations runner_extensions model_routing model_routing_hints)
 
   @type t :: %{
           issue: Issue.t(),
@@ -130,17 +130,10 @@ defmodule Rondo.ExecutionRequest do
   defp list_section(payload, key) do
     case Map.get(payload, key) || Map.get(payload, String.to_atom(key)) do
       values when is_list(values) ->
-        if Enum.all?(values, &is_binary/1) do
-          section =
-            values
-            |> Enum.map(&String.trim/1)
-            |> Enum.reject(&(&1 == ""))
-            |> Enum.map_join("\n", &("- " <> &1))
+        {:ok, list_section_value(values)}
 
-          {:ok, section}
-        else
-          {:error, {:invalid_execution_request_field, key}}
-        end
+      value when is_map(value) ->
+        {:ok, Jason.encode!(value, pretty: true)}
 
       value when is_binary(value) ->
         {:ok, String.trim(value)}
@@ -150,6 +143,17 @@ defmodule Rondo.ExecutionRequest do
 
       _ ->
         {:error, {:invalid_execution_request_field, key}}
+    end
+  end
+
+  defp list_section_value(values) do
+    if Enum.all?(values, &is_binary/1) do
+      values
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.map_join("\n", &("- " <> &1))
+    else
+      Jason.encode!(values, pretty: true)
     end
   end
 
