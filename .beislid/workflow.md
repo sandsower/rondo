@@ -136,11 +136,29 @@ overrides:
 
 ## Action policy
 
-Canonical policy lives in `.beislid/action-policy.json` (the evaluator only reads `--policy-file`; inline `modes:` here never reached it). Allows dependency install, git push, PR create/ready/merge, PR review reply, and ticket comment without prompting in both supervised-auto and unattended-auto. The evaluator's sandbox floor still applies: unattended-auto pushes/merges on the default branch or with uncommitted changes downgrade to ask.
+Canonical policy lives in `.beislid/action-policy.json` (the evaluator only reads `--policy-file`; inline `modes:` here never reached it). Allows dependency install, git push, PR create/ready, PR review reply, and ticket comment without prompting in both supervised-auto and unattended-auto; unattended-auto PR merge downgrades to ask because merge authority belongs to gates plus supervision, never to an unattended model. The evaluator's sandbox floor still applies: unattended-auto pushes/merges on the default branch or with uncommitted changes downgrade to ask.
 
 ```beislid:action_policy
 policy_file: .beislid/action-policy.json
 ```
+
+### Tier authority
+
+Authority scales with the capability tier of the model running the session, not with per-run judgment (trust-boundary redesign, 2026-07-05).
+The canonical file above is the `heavy`-tier policy; lower tiers use the restricted policy files alongside it.
+
+| Tier | Policy file | Outward authority |
+|---|---|---|
+| `light` | `.beislid/action-policy.light.json` | None. Read, test, and run-ledger writes only; findings are harvested and posted by a stronger session. |
+| `standard` | `.beislid/action-policy.standard.json` | Adds ticket comments; commits stay local to the worktree; no push, no PR actions. |
+| `heavy` / `frontier` | `.beislid/action-policy.json` | Adds push to `vic/*` branches and PR create/ready; unattended merge is ask. |
+
+Both restricted tiers set `sandbox.minimum: separate-worktree`, which structurally enforces the rule that agent runs never execute on a primary checkout.
+Both also set `unknown_action: ask` and `unclassified_action: ask`, so novel actions pause for guidance instead of defaulting open; the orchestrator already treats ask as a pause-for-guidance interrupt.
+
+Credential rule enforced at dispatch, not by the evaluator: `light`-tier runs receive no `LINEAR_API_KEY`; the run ledger is their only output channel.
+Follow-up plumbing: per-run `policy_file` selection is not yet in the execution request, so dispatch must point `action_policy.policy_file` at the tier's file via the workflow override it passes for the run.
+Residual risk: pi sessions inherit the user-global MCP config (`~/.pi/agent/mcp.json`), which carries Linear OAuth, and the evaluator only gates orchestrator-mediated actions, not in-session MCP tool calls; strip the credential at dispatch (env isolation) when pi grows support for it.
 
 ## Probe cache
 

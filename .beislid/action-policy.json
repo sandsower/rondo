@@ -41,7 +41,7 @@
         "gh.pr.create": "allow",
         "gh.pr.ready": "allow",
         "gh.pr.edit.label": "allow",
-        "gh.pr.merge": "allow",
+        "gh.pr.merge": "ask",
         "pr.review.reply": "allow",
         "ticket.comment": "allow",
         "tracker.issue.transition": "allow",
