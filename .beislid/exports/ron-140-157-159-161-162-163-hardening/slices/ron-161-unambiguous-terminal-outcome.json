@@ -1,0 +1,124 @@
+{
+  "schema": "approved-slice-v1",
+  "slice_id": "ron-161-unambiguous-terminal-outcome",
+  "source_ticket": "RON-161",
+  "prompt": "## Objective\nFix the specimen contradiction: run RON-160-20260705T031413Z-d846d0b8 validated its final report, passed clean-eval, then still burned to max_turns and recorded BOTH 0108-completed.json and 0109-failed.json, exiting nonzero with a type error on gates_run.\n\n## Design summary\nThree bound changes (ticket fix direction, implement as specified):\n1. New terminal outcome: in the run-decision path (agent_runner.ex L1407-1419 max_turns clause and the continue-decision logic feeding it), when the final report is valid, clean-eval context is green or pending-only, tracker is unavailable (manifest run), and next_state stays active solely because PR/review evidence is absent - stop with a distinct `handoff_required` outcome instead of returning continue. It is a successful, deliberate handoff state: exit zero, checkpoint payload names the missing evidence.\n2. Normalize gates_run: the crash `{:agent_run_failed, \"expected a map, got: <string>\"}` came from final-report gates_run entries being command strings. Normalize/validate gates_run at the final-report validation boundary (string entries wrap into a map form) so post-validation consumers never see raw strings.\n3. Single terminal classification: make terminal checkpoint writing exclusive - a run records completed XOR failed XOR handoff_required, never two. Guard at the checkpoint-write layer, not the call sites.\n- Tests in run_decision_test.exs + agent_runner tests: valid-report/no-tracker -> handoff_required, exit 0, single terminal checkpoint; string gates_run -> normalized, no crash; genuine failure -> failed only.\n\n## File scope\nInclude: elixir/lib/rondo/agent_runner.ex, elixir/lib/rondo/run_decision.ex, their tests. Exclude: tracker integrations, clean_eval internals (RON-162 lands separately before this).\n\n## Constraints\nTracker-driven flows keep current behavior. No remote writes.\n\n## Verification\ncd elixir && mix test test/rondo/run_decision_test.exs\ncd elixir && mix format --check-formatted && mix credo --strict && mix test\nPre-PR: cd elixir && mix dialyzer --format short",
+  "boundaries": [
+    "Include: elixir/lib/rondo/agent_runner.ex",
+    "Include: elixir/lib/rondo/run_decision.ex",
+    "Include: elixir/test/rondo/run_decision_test.exs",
+    "Include: elixir/test/ (agent_runner terminal-outcome tests)",
+    "Exclude: Tracker integration changes",
+    "Exclude: clean_eval internals (RON-162)"
+  ],
+  "dependencies": [
+    "mix resolves only via mise PATH (probed: not on default PATH; found at $HOME/.local/share/mise/installs/elixir/1.19.5-otp-28/bin/mix; prepend that dir plus $HOME/.local/share/mise/installs/erlang/28.5/bin to PATH)",
+    "max_turns_reached dispatch at agent_runner.ex L1407-1419 and run_decision.ex helpers (checkpoint_payload L11, synthetic_update L33) verified in-session",
+    "Upstream slices ron-159-gate-repair-turn (turn-loop) and ron-162-clean-eval-executes-declared-gates (clean-eval semantics) must land first"
+  ],
+  "proof_requirements": [
+    "ron-161-unambiguous-terminal-outcome-gates: Rondo Elixir gates (format, credo, test, pre-PR dialyzer).",
+    "ron-161-unambiguous-terminal-outcome-gates success: cd elixir && mix format --check-formatted exits 0",
+    "ron-161-unambiguous-terminal-outcome-gates success: cd elixir && mix credo --strict exits 0",
+    "ron-161-unambiguous-terminal-outcome-gates success: cd elixir && mix test exits 0",
+    "ron-161-unambiguous-terminal-outcome-gates success: cd elixir && mix dialyzer --format short exits 0"
+  ],
+  "command_proofs": [
+    {
+      "id": "run-decision-tests",
+      "command": "cd elixir && mix test test/rondo/run_decision_test.exs",
+      "description": "Terminal outcome tests",
+      "timeout_seconds": 600,
+      "expected_exit": 0
+    },
+    {
+      "id": "test",
+      "command": "cd elixir && mix test",
+      "description": "Full test gate",
+      "timeout_seconds": 600,
+      "expected_exit": 0
+    }
+  ],
+  "output_expectations": {
+    "summary": "Valid final report + tracker-less manifest run yields a deliberate handoff_required terminal outcome instead of burning turns to max_turns; gates_run string entries are normalized before completion; the ledger records exactly one terminal classification.",
+    "artifacts": [
+      "changed_files",
+      "proof_results"
+    ],
+    "next_step": "Human close-out: review workspace diff, land on a branch, push, CI, mark ticket Done with run provenance."
+  },
+  "parent_contract": {
+    "work_contract": "RON-161 bug ticket (OLI-17 specimen finding)",
+    "source": "Linear RON-161",
+    "ticket": "RON-161"
+  },
+  "repo": {
+    "url": "git@github.com:sandsower/rondo.git",
+    "base_ref": "origin/main",
+    "base_sha": "9ff39a16c411acb2e2f60d27133b67344d38ea72"
+  },
+  "allowed_actions": {
+    "run_mode": "supervised-auto",
+    "allow": [
+      "Edit files listed in boundaries.include",
+      "Introduce the handoff_required terminal outcome value and its checkpoint payload",
+      "Run the configured gates and targeted tests",
+      "Create local commits on a work branch"
+    ],
+    "ask": [
+      "Any edit outside boundaries.include",
+      "Adding dependencies not named in the slice",
+      "Behavioral changes beyond the bound design summary"
+    ],
+    "deny": [
+      "git push, PR creation, or any remote write",
+      "Tracker (Linear/GitHub) mutations",
+      "External service mutations",
+      "Destructive actions outside the repo workspace"
+    ]
+  },
+  "process_provider": {
+    "name": "claude_code"
+  },
+  "runner_extensions": {
+    "model_routing": {
+      "routing": [
+        {
+          "boundary": "implementation",
+          "tier": "heavy",
+          "mode": "prefer",
+          "reason": "Authored tier for this slice; see bundle validation notes.",
+          "source": {
+            "skill": "envelope",
+            "phase": "execution"
+          }
+        },
+        {
+          "boundary": "review_fix",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "review/fix iterations stay mechanical against exact feedback and gate output",
+          "source": {
+            "skill": "envelope"
+          }
+        },
+        {
+          "boundary": "gate_repair",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "gate repair is bounded by exact gate commands",
+          "source": {
+            "skill": "envelope"
+          }
+        }
+      ],
+      "tier": "heavy",
+      "mode": "prefer",
+      "candidates": [
+        "pi:openai-codex/gpt-5.5",
+        "pi:openrouter/deepseek/deepseek-v4-pro",
+        "pi:openrouter/z-ai/glm-5.2"
+      ]
+    }
+  }
+}

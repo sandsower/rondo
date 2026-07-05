@@ -1,0 +1,122 @@
+{
+  "schema": "approved-slice-v1",
+  "slice_id": "ron-163-log-resolved-model-candidate",
+  "source_ticket": "RON-163",
+  "prompt": "## Objective\nMake the resolved model visible in run logs. Today logs show only adapter=pi provider_ref=<opaque>; operators cannot tell which of the ordered candidates ran or whether fallback occurred.\n\n## Design summary\n- In elixir/lib/rondo/model_routing.ex resolve/1 (L32-45): after `resolved = List.first(candidates)`, emit a structured Logger.info containing adapter, resolved provider/model string, effective tier, candidate index (0-based) and fallback? flag, plus issue/request identifier and turn/stage when available in opts. When filter_openrouter_candidates drops candidates or a later candidate is selected after a failure, log both the failed candidate and the selected fallback.\n- In elixir/lib/rondo/agent_runner.ex (L1031-1034): extend the \"Completed agent turn\" Logger.info with the resolved model string (thread it via turn_context; keep the change minimal and local to logging).\n- Cover manifest run-once flows, not only tracker-driven flows - the resolution path is shared, assert via tests on resolve/1 output and log capture.\n- Ticket acceptance criteria are the spec; implement them verbatim.\n\n## File scope\nInclude: elixir/lib/rondo/model_routing.ex, elixir/lib/rondo/agent_runner.ex (logging call sites and turn_context plumbing only), elixir/test/rondo/model_routing_test.exs. Exclude: any routing behavior change - selection order and filtering must be byte-identical.\n\n## Constraints\nLogging only; zero behavior change to candidate selection. No remote writes.\n\n## Verification\ncd elixir && mix test test/rondo/model_routing_test.exs\ncd elixir && mix format --check-formatted && mix credo --strict && mix test",
+  "boundaries": [
+    "Include: elixir/lib/rondo/model_routing.ex",
+    "Include: elixir/lib/rondo/agent_runner.ex (log call sites only)",
+    "Include: elixir/test/rondo/model_routing_test.exs",
+    "Exclude: Routing behavior changes",
+    "Exclude: Dashboard work (RON-60/RON-86)"
+  ],
+  "dependencies": [
+    "mix resolves only via mise PATH (probed: not on default PATH; found at $HOME/.local/share/mise/installs/elixir/1.19.5-otp-28/bin/mix; prepend that dir plus $HOME/.local/share/mise/installs/erlang/28.5/bin to PATH)",
+    "model_routing.ex resolve/1 at L32-45 (candidates_for_hint, filter_openrouter_candidates, List.first) verified",
+    "agent_runner.ex 'Completed agent turn' Logger.info at L1031-1034 verified"
+  ],
+  "proof_requirements": [
+    "ron-163-log-resolved-model-candidate-gates: Rondo Elixir gates (format, credo, test, pre-PR dialyzer).",
+    "ron-163-log-resolved-model-candidate-gates success: cd elixir && mix format --check-formatted exits 0",
+    "ron-163-log-resolved-model-candidate-gates success: cd elixir && mix credo --strict exits 0",
+    "ron-163-log-resolved-model-candidate-gates success: cd elixir && mix test exits 0",
+    "ron-163-log-resolved-model-candidate-gates success: cd elixir && mix dialyzer --format short exits 0"
+  ],
+  "command_proofs": [
+    {
+      "id": "routing-tests",
+      "command": "cd elixir && mix test test/rondo/model_routing_test.exs",
+      "description": "Routing resolution logging tests",
+      "timeout_seconds": 600,
+      "expected_exit": 0
+    },
+    {
+      "id": "test",
+      "command": "cd elixir && mix test",
+      "description": "Full test gate",
+      "timeout_seconds": 600,
+      "expected_exit": 0
+    }
+  ],
+  "output_expectations": {
+    "summary": "Run logs answer 'which model actually ran': resolve/1 emits adapter, provider/model, tier, candidate index and fallback flag with issue/turn context; the Completed-agent-turn line includes the resolved model; fallbacks log failed candidate plus selected fallback.",
+    "artifacts": [
+      "changed_files",
+      "proof_results"
+    ],
+    "next_step": "Human close-out: review workspace diff, land on a branch, push, CI, mark ticket Done with run provenance."
+  },
+  "parent_contract": {
+    "work_contract": "RON-163 observability ticket (OLI-21 run finding)",
+    "source": "Linear RON-163",
+    "ticket": "RON-163"
+  },
+  "repo": {
+    "url": "git@github.com:sandsower/rondo.git",
+    "base_ref": "origin/main",
+    "base_sha": "9ff39a16c411acb2e2f60d27133b67344d38ea72"
+  },
+  "allowed_actions": {
+    "run_mode": "supervised-auto",
+    "allow": [
+      "Edit files listed in boundaries.include",
+      "Add structured metadata to existing log statements",
+      "Run the configured gates and targeted tests",
+      "Create local commits on a work branch"
+    ],
+    "ask": [
+      "Any edit outside boundaries.include",
+      "Adding dependencies not named in the slice",
+      "Behavioral changes beyond the bound design summary"
+    ],
+    "deny": [
+      "git push, PR creation, or any remote write",
+      "Tracker (Linear/GitHub) mutations",
+      "External service mutations",
+      "Destructive actions outside the repo workspace"
+    ]
+  },
+  "process_provider": {
+    "name": "claude_code"
+  },
+  "runner_extensions": {
+    "model_routing": {
+      "routing": [
+        {
+          "boundary": "implementation",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "Authored tier for this slice; see bundle validation notes.",
+          "source": {
+            "skill": "envelope",
+            "phase": "execution"
+          }
+        },
+        {
+          "boundary": "review_fix",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "review/fix iterations stay mechanical against exact feedback and gate output",
+          "source": {
+            "skill": "envelope"
+          }
+        },
+        {
+          "boundary": "gate_repair",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "gate repair is bounded by exact gate commands",
+          "source": {
+            "skill": "envelope"
+          }
+        }
+      ],
+      "tier": "standard",
+      "mode": "prefer",
+      "candidates": [
+        "pi:openai-codex/gpt-5.4-mini",
+        "pi:openrouter/deepseek/deepseek-v4-pro"
+      ]
+    }
+  }
+}

@@ -1,0 +1,232 @@
+{
+  "kind": "approved-slice-plan-export-v0",
+  "version": 1,
+  "status": "approved",
+  "supersedes": null,
+  "generated_from": "envelope skill run 2026-07-05 (batch: remaining open tickets across teotl stack)",
+  "source_work_contract": "Linear ticket bodies (evidence-audited in-session); see per-slice parent_contract",
+  "slice_plan": {
+    "phase": "Rondo execution-path hardening batch (P0 straggler + OLI-17/OLI-21 run findings)",
+    "parallel_groups": [
+      [
+        "ron-140-subprocess-group-kill",
+        "ron-157-linear-customfields-drift",
+        "ron-162-clean-eval-executes-declared-gates",
+        "ron-163-log-resolved-model-candidate"
+      ],
+      [
+        "ron-159-gate-repair-turn"
+      ],
+      [
+        "ron-161-unambiguous-terminal-outcome"
+      ]
+    ],
+    "notes": "All include paths, line sites, and gate binaries probed in-session (mix via mise PATH only - recorded per slice). Serial chain ron-163 -> ron-159 -> ron-161 exists because all three touch the agent_runner.ex turn-completion region (L1031-1056, L1407-1419); ron-161 additionally depends on ron-162's clean-eval semantics. Primary checkout has parked RON-98 WIP touching agent_runner.ex - runners clone fresh from origin/main 9ff39a1; operator must reconcile at close-out. All slices deny push/PR: human close-out per slice."
+  },
+  "children": [
+    {
+      "id": "ron-140-subprocess-group-kill",
+      "source_ticket": "RON-140"
+    },
+    {
+      "id": "ron-157-linear-customfields-drift",
+      "source_ticket": "RON-157"
+    },
+    {
+      "id": "ron-162-clean-eval-executes-declared-gates",
+      "source_ticket": "RON-162"
+    },
+    {
+      "id": "ron-163-log-resolved-model-candidate",
+      "source_ticket": "RON-163"
+    },
+    {
+      "id": "ron-159-gate-repair-turn",
+      "source_ticket": "RON-159"
+    },
+    {
+      "id": "ron-161-unambiguous-terminal-outcome",
+      "source_ticket": "RON-161"
+    }
+  ],
+  "dependency_graph": {
+    "ron-140-subprocess-group-kill": [],
+    "ron-157-linear-customfields-drift": [],
+    "ron-162-clean-eval-executes-declared-gates": [],
+    "ron-163-log-resolved-model-candidate": [],
+    "ron-159-gate-repair-turn": [
+      "ron-163-log-resolved-model-candidate"
+    ],
+    "ron-161-unambiguous-terminal-outcome": [
+      "ron-159-gate-repair-turn",
+      "ron-162-clean-eval-executes-declared-gates"
+    ]
+  },
+  "proof_requirements": [
+    {
+      "kind": "proof-requirement-v1",
+      "id": "ron-140-subprocess-group-kill-gates",
+      "type": "command_gate",
+      "stage": "pre-pr",
+      "status": "required",
+      "description": "Rondo Elixir gates (format, credo, test, pre-PR dialyzer).",
+      "success_criteria": [
+        "cd elixir && mix format --check-formatted exits 0",
+        "cd elixir && mix credo --strict exits 0",
+        "cd elixir && mix test exits 0",
+        "cd elixir && mix dialyzer --format short exits 0"
+      ],
+      "failure_semantics": "code_failure: same-tier repair loop, then pause"
+    },
+    {
+      "kind": "proof-requirement-v1",
+      "id": "ron-157-linear-customfields-drift-gates",
+      "type": "command_gate",
+      "stage": "pre-pr",
+      "status": "required",
+      "description": "Rondo Elixir gates (format, credo, test, pre-PR dialyzer).",
+      "success_criteria": [
+        "cd elixir && mix format --check-formatted exits 0",
+        "cd elixir && mix credo --strict exits 0",
+        "cd elixir && mix test exits 0",
+        "cd elixir && mix dialyzer --format short exits 0"
+      ],
+      "failure_semantics": "code_failure: same-tier repair loop, then pause"
+    },
+    {
+      "kind": "proof-requirement-v1",
+      "id": "ron-162-clean-eval-executes-declared-gates-gates",
+      "type": "command_gate",
+      "stage": "pre-pr",
+      "status": "required",
+      "description": "Rondo Elixir gates (format, credo, test, pre-PR dialyzer).",
+      "success_criteria": [
+        "cd elixir && mix format --check-formatted exits 0",
+        "cd elixir && mix credo --strict exits 0",
+        "cd elixir && mix test exits 0",
+        "cd elixir && mix dialyzer --format short exits 0"
+      ],
+      "failure_semantics": "code_failure: same-tier repair loop, then pause"
+    },
+    {
+      "kind": "proof-requirement-v1",
+      "id": "ron-163-log-resolved-model-candidate-gates",
+      "type": "command_gate",
+      "stage": "pre-pr",
+      "status": "required",
+      "description": "Rondo Elixir gates (format, credo, test, pre-PR dialyzer).",
+      "success_criteria": [
+        "cd elixir && mix format --check-formatted exits 0",
+        "cd elixir && mix credo --strict exits 0",
+        "cd elixir && mix test exits 0",
+        "cd elixir && mix dialyzer --format short exits 0"
+      ],
+      "failure_semantics": "code_failure: same-tier repair loop, then pause"
+    },
+    {
+      "kind": "proof-requirement-v1",
+      "id": "ron-159-gate-repair-turn-gates",
+      "type": "command_gate",
+      "stage": "pre-pr",
+      "status": "required",
+      "description": "Rondo Elixir gates (format, credo, test, pre-PR dialyzer).",
+      "success_criteria": [
+        "cd elixir && mix format --check-formatted exits 0",
+        "cd elixir && mix credo --strict exits 0",
+        "cd elixir && mix test exits 0",
+        "cd elixir && mix dialyzer --format short exits 0"
+      ],
+      "failure_semantics": "code_failure: same-tier repair loop, then pause"
+    },
+    {
+      "kind": "proof-requirement-v1",
+      "id": "ron-161-unambiguous-terminal-outcome-gates",
+      "type": "command_gate",
+      "stage": "pre-pr",
+      "status": "required",
+      "description": "Rondo Elixir gates (format, credo, test, pre-PR dialyzer).",
+      "success_criteria": [
+        "cd elixir && mix format --check-formatted exits 0",
+        "cd elixir && mix credo --strict exits 0",
+        "cd elixir && mix test exits 0",
+        "cd elixir && mix dialyzer --format short exits 0"
+      ],
+      "failure_semantics": "code_failure: same-tier repair loop, then pause"
+    }
+  ],
+  "guides_and_gates": {
+    "gates": [
+      "format",
+      "credo",
+      "test",
+      "dialyzer"
+    ],
+    "gate_commands": {
+      "format": "cd elixir && mix format --check-formatted",
+      "credo": "cd elixir && mix credo --strict",
+      "test": "cd elixir && mix test",
+      "dialyzer": "cd elixir && mix dialyzer --format short"
+    },
+    "guides": [
+      "Rondo owns execution and run evidence; Beislid owns envelope semantics",
+      "All slices deny push/PR/tracker writes: human close-out per slice"
+    ]
+  },
+  "approval": {
+    "approved_at": "2026-07-05T23:20:00Z",
+    "approved_by": "Vic Valenzuela <victor@dala.care>",
+    "verdicts": {
+      "ron-140-subprocess-group-kill": "approve",
+      "ron-157-linear-customfields-drift": "approve",
+      "ron-162-clean-eval-executes-declared-gates": "approve",
+      "ron-163-log-resolved-model-candidate": "approve",
+      "ron-159-gate-repair-turn": "approve",
+      "ron-161-unambiguous-terminal-outcome": "approve"
+    }
+  },
+  "runner_extensions": {
+    "model_routing": {
+      "routing": [
+        {
+          "boundary": "implementation",
+          "tier": "heavy",
+          "mode": "prefer",
+          "reason": "Bundle mixes tiers; individual slices carry their own tier projection.",
+          "source": {
+            "skill": "envelope",
+            "phase": "execution"
+          }
+        },
+        {
+          "boundary": "review_fix",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "mechanical review/fix",
+          "source": {
+            "skill": "envelope"
+          }
+        },
+        {
+          "boundary": "gate_repair",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "bounded by exact gate commands",
+          "source": {
+            "skill": "envelope"
+          }
+        }
+      ]
+    }
+  },
+  "validation": {
+    "schema_version": "approved-slice-plan-export-v0",
+    "rubric_version": "afk-rubric-v1",
+    "notes": "All include paths, line sites, and gate binaries probed in-session (mix via mise PATH only - recorded per slice). Serial chain ron-163 -> ron-159 -> ron-161 exists because all three touch the agent_runner.ex turn-completion region (L1031-1056, L1407-1419); ron-161 additionally depends on ron-162's clean-eval semantics. Primary checkout has parked RON-98 WIP touching agent_runner.ex - runners clone fresh from origin/main 9ff39a1; operator must reconcile at close-out. All slices deny push/PR: human close-out per slice."
+  },
+  "ownership": {
+    "beislid": "Defines planning, autonomy, and proof semantics of this exported bundle.",
+    "rondo": "Owns execution scheduling, run evidence, and command-proof results.",
+    "memento": "Owns durable memory and learning captured after completed work.",
+    "teotl": "Program/ticket umbrella; no runtime responsibility."
+  }
+}

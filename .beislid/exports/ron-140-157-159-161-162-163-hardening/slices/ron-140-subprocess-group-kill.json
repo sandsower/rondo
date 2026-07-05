@@ -1,0 +1,134 @@
+{
+  "schema": "approved-slice-v1",
+  "slice_id": "ron-140-subprocess-group-kill",
+  "source_ticket": "RON-140",
+  "prompt": "## Objective\nMake agent subprocess termination reliable across all three adapters (claude, codex, pi): children run in their own session/process group, group kill is checked, and the port is closed on every exit path including raises in on_event.\n\n## Design summary\n- Session leadership: spawn the external CLI through a portable exec-wrapper `python3 -c \"import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])\" -- <original argv>` (macOS ships no setsid binary; python3 is probed at /opt/homebrew/bin/python3). Implement once in a shared helper module and use it from all three adapters - divergence between adapters is the disease this ticket treats.\n- Kill: target the process group (`kill -- -<os_pid>` semantics are now valid because the child is a group leader). Check the kill result; log and surface failures instead of ignoring them.\n- Port close: wrap event handling so a raise in on_event cannot skip safe_port_close - use try/after (or rescue + re-raise after closing). Apply on all exit paths.\n- Known sites to fix: elixir/lib/rondo/claude/cli.ex lines ~83-87 and ~283, elixir/lib/rondo/codex/cli.ex line ~237, elixir/lib/rondo/pi/cli.ex line ~232.\n- Test-first order per the ticket: (1) repro test that leaves an orphaned grandchild with current code (assert process liveness after kill), (2) the fix, (3) raise-in-on_event test asserting the port closes. Cover all three adapters.\n\n## File scope\nInclude: elixir/lib/rondo/{claude,codex,pi}/cli.ex, their test files, plus ONE new shared spawn helper module (none exists today - verified). Exclude: adapter consolidation (RON-141), any other behavior.\n\n## Constraints\nMust work on macOS (BSD userland) and Linux. If platform behavior is ambiguous, stop and pause - do not invent behavior. No remote writes; local commits only.\n\n## Verification\ncd elixir && mix test test/rondo/claude_cli_test.exs test/rondo/codex_cli_test.exs test/rondo/pi_cli_test.exs\ncd elixir && mix format --check-formatted && mix credo --strict && mix test\nPre-PR: cd elixir && mix dialyzer --format short",
+  "boundaries": [
+    "Include: elixir/lib/rondo/claude/cli.ex",
+    "Include: elixir/lib/rondo/codex/cli.ex",
+    "Include: elixir/lib/rondo/pi/cli.ex",
+    "Include: elixir/test/rondo/claude_cli_test.exs",
+    "Include: elixir/test/rondo/codex_cli_test.exs",
+    "Include: elixir/test/rondo/pi_cli_test.exs",
+    "Include: a new shared spawn helper module under elixir/lib/rondo/ if none exists (none found in-session)",
+    "Exclude: Adapter consolidation (RON-141)",
+    "Exclude: Any other adapter behavior change"
+  ],
+  "dependencies": [
+    "mix resolves only via mise PATH (probed: not on default PATH; found at $HOME/.local/share/mise/installs/elixir/1.19.5-otp-28/bin/mix; prepend that dir plus $HOME/.local/share/mise/installs/erlang/28.5/bin to PATH)",
+    "python3 at /opt/homebrew/bin/python3 (probed) for the setsid exec-wrapper",
+    "Existing kill sites: claude/cli.ex:83-87,283; codex/cli.ex:237; pi/cli.ex:232 (verified present)"
+  ],
+  "proof_requirements": [
+    "ron-140-subprocess-group-kill-gates: Rondo Elixir gates (format, credo, test, pre-PR dialyzer).",
+    "ron-140-subprocess-group-kill-gates success: cd elixir && mix format --check-formatted exits 0",
+    "ron-140-subprocess-group-kill-gates success: cd elixir && mix credo --strict exits 0",
+    "ron-140-subprocess-group-kill-gates success: cd elixir && mix test exits 0",
+    "ron-140-subprocess-group-kill-gates success: cd elixir && mix dialyzer --format short exits 0"
+  ],
+  "command_proofs": [
+    {
+      "id": "adapter-tests",
+      "command": "cd elixir && mix test test/rondo/claude_cli_test.exs test/rondo/codex_cli_test.exs test/rondo/pi_cli_test.exs",
+      "description": "Targeted adapter test files incl. new orphan/raise-path tests",
+      "timeout_seconds": 600,
+      "expected_exit": 0
+    },
+    {
+      "id": "format",
+      "command": "cd elixir && mix format --check-formatted",
+      "description": "Formatting gate",
+      "timeout_seconds": 120,
+      "expected_exit": 0
+    },
+    {
+      "id": "credo",
+      "command": "cd elixir && mix credo --strict",
+      "description": "Lint gate",
+      "timeout_seconds": 300,
+      "expected_exit": 0
+    }
+  ],
+  "output_expectations": {
+    "summary": "All three adapters spawn children as process-group leaders via a portable wrapper, kill by -pgid with checked results, and close ports in after/rescue paths; orphaned-child and raise-in-on_event tests pass on darwin.",
+    "artifacts": [
+      "changed_files",
+      "proof_results"
+    ],
+    "next_step": "Human close-out: review workspace diff, land on a branch, push, CI, mark ticket Done with run provenance."
+  },
+  "parent_contract": {
+    "work_contract": "RON-140 P0 integrity batch AFK brief",
+    "source": "Linear RON-140 (source plan: teotl plans/2026-07-02-debt-audit-p0-integrity-batch.md, RON 5)",
+    "ticket": "RON-140"
+  },
+  "repo": {
+    "url": "git@github.com:sandsower/rondo.git",
+    "base_ref": "origin/main",
+    "base_sha": "9ff39a16c411acb2e2f60d27133b67344d38ea72"
+  },
+  "allowed_actions": {
+    "run_mode": "supervised-auto",
+    "allow": [
+      "Edit files listed in boundaries.include",
+      "Create one shared spawn-wrapper helper module used by all three adapters",
+      "Run the configured gates and targeted tests",
+      "Create local commits on a work branch"
+    ],
+    "ask": [
+      "Any edit outside boundaries.include",
+      "Adding dependencies not named in the slice",
+      "Behavioral changes beyond the bound design summary"
+    ],
+    "deny": [
+      "git push, PR creation, or any remote write",
+      "Tracker (Linear/GitHub) mutations",
+      "External service mutations",
+      "Destructive actions outside the repo workspace"
+    ]
+  },
+  "process_provider": {
+    "name": "claude_code"
+  },
+  "runner_extensions": {
+    "model_routing": {
+      "routing": [
+        {
+          "boundary": "implementation",
+          "tier": "heavy",
+          "mode": "prefer",
+          "reason": "Authored tier for this slice; see bundle validation notes.",
+          "source": {
+            "skill": "envelope",
+            "phase": "execution"
+          }
+        },
+        {
+          "boundary": "review_fix",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "review/fix iterations stay mechanical against exact feedback and gate output",
+          "source": {
+            "skill": "envelope"
+          }
+        },
+        {
+          "boundary": "gate_repair",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "gate repair is bounded by exact gate commands",
+          "source": {
+            "skill": "envelope"
+          }
+        }
+      ],
+      "tier": "heavy",
+      "mode": "prefer",
+      "candidates": [
+        "pi:openai-codex/gpt-5.5",
+        "pi:openrouter/deepseek/deepseek-v4-pro",
+        "pi:openrouter/z-ai/glm-5.2"
+      ]
+    }
+  }
+}

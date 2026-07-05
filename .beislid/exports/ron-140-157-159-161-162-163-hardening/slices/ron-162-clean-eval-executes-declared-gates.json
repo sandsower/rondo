@@ -1,0 +1,123 @@
+{
+  "schema": "approved-slice-v1",
+  "slice_id": "ron-162-clean-eval-executes-declared-gates",
+  "source_ticket": "RON-162",
+  "prompt": "## Objective\nClose the trust gap found in the OLI-17 specimen: a manifest run whose Beislid artifact declared pre-PR gates and proof requirements got a clean_eval pass with zero gates executed.\n\n## Design summary\n- Thread the manifest source_contract.process_provider artifact context into clean_eval's gate selection: clean_eval.ex already builds selections at stage :pre_pr (L261 gates_override path, L282 gate_selection_opts) - ensure the provider artifact path used during the run reaches these selections for manifest runs, so declared pre_pr gates are selected and executed during clean eval.\n- Fail closed: when the artifact declares gate sets or proof requirements and clean_eval executes none of them, the result must not be status pass. Emit status fail with reason \"declared_proofs_not_executed\" (add a reason field to rondo.clean_eval/v0 output if absent). A pass requires: patch applied AND every selected declared gate executed and green.\n- Keep command_proofs handling consistent with the shape in process_provider/native.ex - read it first.\n- Tests: manifest fixture with declared pre_pr gates -> clean_eval executes them (gate logs present in clean_eval/gates/); declared-but-unexecutable -> fail with the reason; no declarations -> current behavior unchanged.\n\n## File scope\nInclude: elixir/lib/rondo/clean_eval.ex, elixir/lib/rondo/process_provider/native.ex (only as needed for proof shape), elixir/test/rondo/clean_eval_test.exs. Exclude: turn-loop and run-decision changes (separate slices RON-159/RON-161).\n\n## Constraints\nDo not weaken any currently-failing path into a pass. No remote writes.\n\n## Verification\ncd elixir && mix test test/rondo/clean_eval_test.exs\ncd elixir && mix format --check-formatted && mix credo --strict && mix test",
+  "boundaries": [
+    "Include: elixir/lib/rondo/clean_eval.ex",
+    "Include: elixir/lib/rondo/process_provider/native.ex (read/extend for command_proofs shape)",
+    "Include: elixir/test/rondo/clean_eval_test.exs",
+    "Exclude: Gate selection semantics outside clean_eval",
+    "Exclude: Turn-loop changes (RON-159/161)"
+  ],
+  "dependencies": [
+    "mix resolves only via mise PATH (probed: not on default PATH; found at $HOME/.local/share/mise/installs/elixir/1.19.5-otp-28/bin/mix; prepend that dir plus $HOME/.local/share/mise/installs/erlang/28.5/bin to PATH)",
+    "clean_eval.ex L261 (gates_override selection) and L282 (stage: :pre_pr opts) verified in-session",
+    "Specimen evidence: run RON-160-20260705T031413Z-d846d0b8 passed clean-eval with zero gates executed"
+  ],
+  "proof_requirements": [
+    "ron-162-clean-eval-executes-declared-gates-gates: Rondo Elixir gates (format, credo, test, pre-PR dialyzer).",
+    "ron-162-clean-eval-executes-declared-gates-gates success: cd elixir && mix format --check-formatted exits 0",
+    "ron-162-clean-eval-executes-declared-gates-gates success: cd elixir && mix credo --strict exits 0",
+    "ron-162-clean-eval-executes-declared-gates-gates success: cd elixir && mix test exits 0",
+    "ron-162-clean-eval-executes-declared-gates-gates success: cd elixir && mix dialyzer --format short exits 0"
+  ],
+  "command_proofs": [
+    {
+      "id": "clean-eval-tests",
+      "command": "cd elixir && mix test test/rondo/clean_eval_test.exs",
+      "description": "clean_eval behavior incl. fail-closed cases",
+      "timeout_seconds": 600,
+      "expected_exit": 0
+    },
+    {
+      "id": "test",
+      "command": "cd elixir && mix test",
+      "description": "Full test gate",
+      "timeout_seconds": 600,
+      "expected_exit": 0
+    }
+  ],
+  "output_expectations": {
+    "summary": "clean_eval threads the manifest process_provider artifact into gate selection at stage pre_pr, executes declared gates/proofs, and fails closed with reason declared_proofs_not_executed when declared proofs produce no execution evidence.",
+    "artifacts": [
+      "changed_files",
+      "proof_results"
+    ],
+    "next_step": "Human close-out: review workspace diff, land on a branch, push, CI, mark ticket Done with run provenance."
+  },
+  "parent_contract": {
+    "work_contract": "RON-162 bug ticket (OLI-17 specimen finding)",
+    "source": "Linear RON-162",
+    "ticket": "RON-162"
+  },
+  "repo": {
+    "url": "git@github.com:sandsower/rondo.git",
+    "base_ref": "origin/main",
+    "base_sha": "9ff39a16c411acb2e2f60d27133b67344d38ea72"
+  },
+  "allowed_actions": {
+    "run_mode": "supervised-auto",
+    "allow": [
+      "Edit files listed in boundaries.include",
+      "Extend the clean_eval result schema with an explicit reason field for fail-closed outcomes",
+      "Run the configured gates and targeted tests",
+      "Create local commits on a work branch"
+    ],
+    "ask": [
+      "Any edit outside boundaries.include",
+      "Adding dependencies not named in the slice",
+      "Behavioral changes beyond the bound design summary"
+    ],
+    "deny": [
+      "git push, PR creation, or any remote write",
+      "Tracker (Linear/GitHub) mutations",
+      "External service mutations",
+      "Destructive actions outside the repo workspace"
+    ]
+  },
+  "process_provider": {
+    "name": "claude_code"
+  },
+  "runner_extensions": {
+    "model_routing": {
+      "routing": [
+        {
+          "boundary": "implementation",
+          "tier": "heavy",
+          "mode": "prefer",
+          "reason": "Authored tier for this slice; see bundle validation notes.",
+          "source": {
+            "skill": "envelope",
+            "phase": "execution"
+          }
+        },
+        {
+          "boundary": "review_fix",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "review/fix iterations stay mechanical against exact feedback and gate output",
+          "source": {
+            "skill": "envelope"
+          }
+        },
+        {
+          "boundary": "gate_repair",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "gate repair is bounded by exact gate commands",
+          "source": {
+            "skill": "envelope"
+          }
+        }
+      ],
+      "tier": "heavy",
+      "mode": "prefer",
+      "candidates": [
+        "pi:openai-codex/gpt-5.5",
+        "pi:openrouter/deepseek/deepseek-v4-pro",
+        "pi:openrouter/z-ai/glm-5.2"
+      ]
+    }
+  }
+}

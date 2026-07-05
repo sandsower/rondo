@@ -1,0 +1,120 @@
+{
+  "schema": "approved-slice-v1",
+  "slice_id": "ron-157-linear-customfields-drift",
+  "source_ticket": "RON-157",
+  "prompt": "## Objective\nStop every Rondo run from 400ing against Linear: remove the dead customFields selection and make deterministic GraphQL schema-validation failures loud.\n\n## Design summary\n- Remove the `customFields { ... }` fragments at elixir/lib/rondo/linear/client.ex L256 and L341, the `extract_custom_fields(%{\"customFields\" => ...})` clause at L950, and any now-dead downstream plumbing of that extraction (trace its callers first; if a caller actually consumes custom-field data in live behavior, PAUSE and report).\n- Loudness: when a Linear GraphQL response is a 400 with GRAPHQL_VALIDATION_FAILED, log at error level including the API's message - once per occurrence, not swallowed as a per-poll debug line. Do not crash the poller; this is observability, not new failure semantics.\n- Add/extend a test asserting the issue query string contains no customFields and that a validation-failed response produces an error-level log.\n\n## File scope\nInclude: elixir/lib/rondo/linear/client.ex plus one test file. Exclude: adapter.ex, issue.ex, mcp_server.ex unless a dead reference must be deleted (report it in the final report if so).\n\n## Constraints\nNo remote writes; local commits only. Do not alter retry/poll semantics.\n\n## Verification\ngrep -q customFields elixir/lib/rondo/linear/client.ex  # expected exit 1\ncd elixir && mix format --check-formatted && mix credo --strict && mix test",
+  "boundaries": [
+    "Include: elixir/lib/rondo/linear/client.ex",
+    "Include: elixir/test/ (new or extended Linear client test)",
+    "Exclude: Other Linear query changes",
+    "Exclude: MCP server changes"
+  ],
+  "dependencies": [
+    "mix resolves only via mise PATH (probed: not on default PATH; found at $HOME/.local/share/mise/installs/elixir/1.19.5-otp-28/bin/mix; prepend that dir plus $HOME/.local/share/mise/installs/erlang/28.5/bin to PATH)",
+    "customFields sites verified in-session: client.ex L256, L341 (query fragments), L950 (extract_custom_fields clause)"
+  ],
+  "proof_requirements": [
+    "ron-157-linear-customfields-drift-gates: Rondo Elixir gates (format, credo, test, pre-PR dialyzer).",
+    "ron-157-linear-customfields-drift-gates success: cd elixir && mix format --check-formatted exits 0",
+    "ron-157-linear-customfields-drift-gates success: cd elixir && mix credo --strict exits 0",
+    "ron-157-linear-customfields-drift-gates success: cd elixir && mix test exits 0",
+    "ron-157-linear-customfields-drift-gates success: cd elixir && mix dialyzer --format short exits 0"
+  ],
+  "command_proofs": [
+    {
+      "id": "no-customfields",
+      "command": "grep -q customFields elixir/lib/rondo/linear/client.ex",
+      "description": "customFields fully removed from the Linear client",
+      "timeout_seconds": 30,
+      "expected_exit": 1
+    },
+    {
+      "id": "test",
+      "command": "cd elixir && mix test",
+      "description": "Full test gate",
+      "timeout_seconds": 600,
+      "expected_exit": 0
+    }
+  ],
+  "output_expectations": {
+    "summary": "Linear issue queries validate against the current API schema; customFields selection and its extraction clause are gone; GRAPHQL_VALIDATION_FAILED 400s log at error level with the API message.",
+    "artifacts": [
+      "changed_files",
+      "proof_results"
+    ],
+    "next_step": "Human close-out: review workspace diff, land on a branch, push, CI, mark ticket Done with run provenance."
+  },
+  "parent_contract": {
+    "work_contract": "RON-157 bug ticket",
+    "source": "Linear RON-157",
+    "ticket": "RON-157"
+  },
+  "repo": {
+    "url": "git@github.com:sandsower/rondo.git",
+    "base_ref": "origin/main",
+    "base_sha": "9ff39a16c411acb2e2f60d27133b67344d38ea72"
+  },
+  "allowed_actions": {
+    "run_mode": "supervised-auto",
+    "allow": [
+      "Edit files listed in boundaries.include",
+      "Add a Linear client test file if none covers query construction",
+      "Run the configured gates and targeted tests",
+      "Create local commits on a work branch"
+    ],
+    "ask": [
+      "Any edit outside boundaries.include",
+      "Adding dependencies not named in the slice",
+      "Behavioral changes beyond the bound design summary"
+    ],
+    "deny": [
+      "git push, PR creation, or any remote write",
+      "Tracker (Linear/GitHub) mutations",
+      "External service mutations",
+      "Destructive actions outside the repo workspace"
+    ]
+  },
+  "process_provider": {
+    "name": "claude_code"
+  },
+  "runner_extensions": {
+    "model_routing": {
+      "routing": [
+        {
+          "boundary": "implementation",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "Authored tier for this slice; see bundle validation notes.",
+          "source": {
+            "skill": "envelope",
+            "phase": "execution"
+          }
+        },
+        {
+          "boundary": "review_fix",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "review/fix iterations stay mechanical against exact feedback and gate output",
+          "source": {
+            "skill": "envelope"
+          }
+        },
+        {
+          "boundary": "gate_repair",
+          "tier": "standard",
+          "mode": "prefer",
+          "reason": "gate repair is bounded by exact gate commands",
+          "source": {
+            "skill": "envelope"
+          }
+        }
+      ],
+      "tier": "standard",
+      "mode": "prefer",
+      "candidates": [
+        "pi:openai-codex/gpt-5.4-mini",
+        "pi:openrouter/deepseek/deepseek-v4-pro"
+      ]
+    }
+  }
+}
