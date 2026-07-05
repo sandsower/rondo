@@ -39,6 +39,17 @@ defmodule Rondo.CLI do
   @spec evaluate([String.t()], deps()) :: evaluate_result()
   def evaluate(args, deps \\ runtime_deps()) do
     case parse_args(args) do
+      {:run_once, opts, [workflow_path]} ->
+        with :ok <- require_run_once_target(opts),
+             :ok <- maybe_set_logs_root(opts, deps),
+             :ok <- maybe_set_debug(opts),
+             :ok <- run_once(workflow_path, opts, deps) do
+          :run_once_completed
+        end
+
+      {:run_once, _opts, _argv} ->
+        {:error, usage_message()}
+
       {opts, [], []} ->
         with :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps),
@@ -51,14 +62,6 @@ defmodule Rondo.CLI do
              :ok <- maybe_set_server_port(opts, deps),
              :ok <- maybe_set_debug(opts) do
           run(workflow_path, deps)
-        end
-
-      {:run_once, opts, [workflow_path]} ->
-        with :ok <- require_run_once_target(opts),
-             :ok <- maybe_set_logs_root(opts, deps),
-             :ok <- maybe_set_debug(opts),
-             :ok <- run_once(workflow_path, opts, deps) do
-          :run_once_completed
         end
 
       _ ->
