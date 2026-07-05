@@ -60,6 +60,30 @@ defmodule Rondo.ExecutionRequestTest do
     assert request.source_contract.schema == "approved-slice-v1"
   end
 
+  test "loads Beislið approved-slice exports with structured C3 sections" do
+    path = Path.expand("../fixtures/execution_requests/approved_slice_structured_c3.json", __DIR__)
+
+    assert {:ok, request} = ExecutionRequest.load(path)
+    assert request.issue.id == "bei-131-normalizer-conformance"
+    assert request.source_contract.schema == "approved-slice-v1"
+
+    assert request.source_contract.boundaries["include"] == [
+             "scripts/workflow_normalizer.py",
+             "scripts/test_workflow_normalizer.py",
+             "scripts/run_conformance.py",
+             "tests/conformance/**",
+             "docs/parser-conformance.md",
+             ".beislid/workflow-md-format.md",
+             ".github/workflows/validate.yml"
+           ]
+
+    assert request.issue.description =~ "## Boundaries\n\n```json\n"
+    assert request.issue.description =~ "scripts/workflow_normalizer.py"
+    assert request.issue.description =~ "## Proof requirements\n\n```json\n"
+    assert request.issue.description =~ "bei-131-gates"
+    assert request.issue.description =~ "proof-requirement-v1"
+  end
+
   test "rejects invalid JSON" do
     path = raw_manifest_path("invalid-json", "{not json")
 
@@ -108,14 +132,14 @@ defmodule Rondo.ExecutionRequestTest do
     assert string_request.issue.description =~ "Return a summary."
   end
 
-  test "rejects invalid optional list sections" do
+  test "rejects invalid optional section scalars" do
     assert {:error, {:invalid_execution_request_field, "boundaries"}} =
              "invalid-boundaries"
              |> manifest_path(%{
                schema: "rondo-execution-request-v1",
                slice_id: "slice-123",
                prompt: "Do it.",
-               boundaries: [%{bad: true}]
+               boundaries: 123
              })
              |> ExecutionRequest.load()
 
