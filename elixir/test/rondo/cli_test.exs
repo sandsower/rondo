@@ -147,6 +147,26 @@ defmodule Rondo.CLITest do
     assert message =~ "rondo run-once"
   end
 
+  test "run-once returns usage when the workflow positional is missing with one switch" do
+    deps = run_once_deps(self(), Path.expand("WORKFLOW.md"))
+
+    for args <- [
+          ["run-once", "--manifest", "request.json"],
+          ["run-once", "--issue", "RON-160"]
+        ] do
+      assert {:error, message} = CLI.evaluate(args, deps)
+      assert message =~ "Usage: rondo"
+      assert message =~ "rondo run-once"
+    end
+  end
+
+  test "run-once rejects extra positional arguments" do
+    deps = run_once_deps(self(), Path.expand("WORKFLOW.md"))
+
+    assert {:error, message} = CLI.evaluate(["run-once", "WORKFLOW.md", "extra.md", "--issue", "123"], deps)
+    assert message =~ "Usage: rondo"
+  end
+
   test "run-once treats blank targets as absent during validation and dispatch" do
     parent = self()
     workflow_path = "tmp/run-once/WORKFLOW.md"
