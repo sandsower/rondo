@@ -11,13 +11,14 @@ defmodule Rondo.CLI do
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type evaluate_result :: :ok | :run_once_completed | {:error, String.t()}
   @type deps :: %{
-          file_regular?: (String.t() -> boolean()),
-          set_workflow_file_path: (String.t() -> :ok | {:error, term()}),
-          set_logs_root: (String.t() -> :ok | {:error, term()}),
-          set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
-          ensure_all_started: (-> ensure_started_result()),
-          run_once: (String.t() -> :ok | {:error, term()}),
-          run_manifest: (Path.t() -> :ok | {:error, term()})
+          required(:file_regular?) => (String.t() -> boolean()),
+          required(:set_workflow_file_path) => (String.t() -> :ok | {:error, term()}),
+          required(:set_logs_root) => (String.t() -> :ok | {:error, term()}),
+          required(:set_server_port_override) => (non_neg_integer() | nil -> :ok | {:error, term()}),
+          required(:ensure_all_started) => (-> ensure_started_result()),
+          optional(:ensure_run_once_dependencies_started) => (-> ensure_started_result()),
+          required(:run_once) => (String.t() -> :ok | {:error, term()}),
+          required(:run_manifest) => (Path.t() -> :ok | {:error, term()})
         }
 
   @spec main([String.t()]) :: no_return()
@@ -113,7 +114,14 @@ defmodule Rondo.CLI do
 
     if deps.file_regular?.(expanded_path) do
       :ok = deps.set_workflow_file_path.(expanded_path)
-      run_once_target(opts, deps)
+
+      case ensure_run_once_dependencies_started(deps) do
+        {:ok, _started_apps} ->
+          run_once_target(opts, deps)
+
+        {:error, reason} ->
+          {:error, "Failed to start run-once dependencies for workflow #{expanded_path}: #{inspect(reason)}"}
+      end
     else
       {:error, "Workflow file not found: #{expanded_path}"}
     end
@@ -153,6 +161,7 @@ defmodule Rondo.CLI do
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
       ensure_all_started: fn -> Application.ensure_all_started(:rondo) end,
+      ensure_run_once_dependencies_started: &ensure_run_once_dependency_applications_started/0,
       run_once: &RunOnce.run/1,
       run_manifest: &RunOnce.run_manifest/1
     }
@@ -204,6 +213,37 @@ defmodule Rondo.CLI do
   end
 
   defp normalize_target_value(_value), do: nil
+
+  defp ensure_run_once_dependencies_started(deps) do
+    Map.get(deps, :ensure_run_once_dependencies_started, &ensure_run_once_dependency_applications_started/0).()
+  end
+
+  defp ensure_run_once_dependency_applications_started do
+    with :ok <- load_rondo_application(),
+         applications when is_list(applications) <- Application.spec(:rondo, :applications) do
+      ensure_applications_started(applications)
+    else
+      nil -> {:error, :missing_rondo_application_spec}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp load_rondo_application do
+    case Application.load(:rondo) do
+      :ok -> :ok
+      {:error, {:already_loaded, :rondo}} -> :ok
+      {:error, reason} -> {:error, {:rondo_application_load_failed, reason}}
+    end
+  end
+
+  defp ensure_applications_started(applications) do
+    Enum.reduce_while(applications, {:ok, []}, fn application, {:ok, started} ->
+      case Application.ensure_all_started(application) do
+        {:ok, newly_started} -> {:cont, {:ok, started ++ newly_started}}
+        {:error, reason} -> {:halt, {:error, {application, reason}}}
+      end
+    end)
+  end
 
   defp set_logs_root(logs_root) do
     Application.put_env(:rondo, :log_file, LogFile.default_log_file(logs_root))
