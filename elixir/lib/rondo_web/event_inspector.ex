@@ -3,6 +3,8 @@ defmodule RondoWeb.EventInspector do
   Builds dashboard-friendly event lists and event detail models.
   """
 
+  alias Rondo.RunEvidence.EventStream
+
   @prompt_event_names ~w(assistant assistant_message prompt request turn_started invocation_started)
   @result_event_names ~w(result invocation_completed turn_completed final_report final_report_validated)
   @gate_event_names ~w(gates_completed gates_reused)
@@ -43,7 +45,7 @@ defmodule RondoWeb.EventInspector do
     run_dir = map_get(selected_issue_data, :run_dir)
 
     if is_binary(run_dir) and String.trim(run_dir) != "" do
-      Path.join([run_dir, "artifacts", "agent-events.ndjson"])
+      EventStream.path(run_dir)
     else
       nil
     end
