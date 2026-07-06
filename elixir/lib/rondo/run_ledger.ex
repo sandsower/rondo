@@ -13,10 +13,9 @@ defmodule Rondo.RunLedger do
   """
 
   alias Rondo.{Config, DeliveryArtifact, FinalReport, Linear.Issue, ProcessProvider, Redaction, RemoteShell}
-  alias Rondo.RunEvidence.ArtifactCatalog
+  alias Rondo.RunEvidence.{ArtifactCatalog, EventStream}
 
   @schema_version 1
-  @events_schema "rondo.events/v0"
   @final_report_relative_path "artifacts/final-report.json"
   @max_string_bytes 2_048
   @max_map_entries 50
@@ -157,14 +156,14 @@ defmodule Rondo.RunLedger do
   defp do_append_agent_event(%__MODULE__{} = ledger, event, opts) when is_map(event) do
     timestamp = opts |> Keyword.get(:timestamp, Map.get(event, :timestamp, DateTime.utc_now())) |> datetime_to_iso()
 
-    artifact = agent_event_payload(event, timestamp)
+    record =
+      EventStream.normalize_event(event,
+        timestamp: timestamp,
+        sanitize: &sanitize_value/1,
+        sanitize_raw: &sanitize_agent_raw/1
+      )
 
-    path = Path.join(ledger.run_dir, "artifacts/agent-events.ndjson")
-
-    with :ok <- File.mkdir_p(Path.dirname(path)),
-         {:ok, json} <- Jason.encode(artifact) do
-      File.write(path, json <> "\n", [:append])
-    end
+    EventStream.append(ledger.run_dir, record)
   end
 
   @spec record_action_policy_decision(t(), map(), keyword()) :: {:ok, t()} | {:error, term()}
@@ -498,7 +497,7 @@ defmodule Rondo.RunLedger do
 
   @doc "Returns the normalized agent event JSONL schema identifier."
   @spec events_schema() :: String.t()
-  def events_schema, do: @events_schema
+  def events_schema, do: EventStream.schema()
 
   @doc "Returns the run-dir-relative path of the validated final report artifact."
   @spec final_report_relative_path() :: String.t()
@@ -595,28 +594,6 @@ defmodule Rondo.RunLedger do
   defp maybe_put_final_report_classification(manifest, :missing), do: Map.put(manifest, "failure_classification", "final_report_missing")
   defp maybe_put_final_report_classification(manifest, :invalid), do: Map.put(manifest, "failure_classification", "final_report_invalid")
 
-  defp agent_event_payload(event, timestamp) do
-    accounted_usage = Map.get(event, :accounted_usage, Map.get(event, "accounted_usage"))
-
-    %{
-      "schema" => @events_schema,
-      "timestamp" => timestamp,
-      "event" => event |> Map.get(:event, Map.get(event, "event")) |> kind_to_string(),
-      "adapter" => sanitize_value(Map.get(event, :adapter, Map.get(event, "adapter"))),
-      "run_ref" => sanitize_value(Map.get(event, :run_ref, Map.get(event, "run_ref"))),
-      "session_id" => sanitize_value(Map.get(event, :session_id, Map.get(event, "session_id"))),
-      "usage" => sanitize_value(Map.get(event, :usage, Map.get(event, "usage"))),
-      "raw" => event |> Map.get(:raw, Map.get(event, "raw", %{})) |> sanitize_agent_raw()
-    }
-    |> maybe_put_accounted_usage(accounted_usage)
-  end
-
-  defp maybe_put_accounted_usage(payload, nil), do: payload
-
-  defp maybe_put_accounted_usage(payload, accounted_usage) do
-    Map.put(payload, "accounted_usage", sanitize_value(accounted_usage))
-  end
-
   defp build_manifest(issue, opts, now, run_id, run_dir, workspace_root, workspace, policy_snapshot) do
     iso_timestamp = datetime_to_iso(now)
 
@@ -655,7 +632,7 @@ defmodule Rondo.RunLedger do
         "finished_at" => nil
       },
       "checkpoints" => [],
-      "artifacts" => [%{"kind" => "agent_events", "path" => "artifacts/agent-events.ndjson", "status" => "tracked"}]
+      "artifacts" => [%{"kind" => "agent_events", "path" => EventStream.relative_path(), "status" => "tracked"}]
     }
     |> maybe_put_source_contract(Keyword.get(opts, :source_contract))
   end

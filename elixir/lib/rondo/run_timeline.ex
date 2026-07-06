@@ -8,6 +8,7 @@ defmodule Rondo.RunTimeline do
   """
 
   alias Rondo.{Orchestrator, RunLedger}
+  alias Rondo.RunEvidence.EventStream
 
   @checkpoint_kinds MapSet.new([
                       "dispatch",
@@ -436,7 +437,7 @@ defmodule Rondo.RunTimeline do
   defp artifact_refs(kind, checkpoint_path, payload, run, manifest) do
     []
     |> add_artifact(checkpoint_path, "checkpoint")
-    |> add_artifact(event_log_path(entry_value(run, :run_dir)), "agent_events")
+    |> add_artifact(EventStream.path(entry_value(run, :run_dir)), "agent_events")
     |> add_artifact(payload_value(payload, :results_path), "gate_results")
     |> add_artifact(payload_value(payload, :state_path), "gate_state")
     |> add_artifact(payload_value(payload, :diff_source), "diff_source")
@@ -453,9 +454,6 @@ defmodule Rondo.RunTimeline do
   end
 
   defp final_report_path(_, _), do: nil
-
-  defp event_log_path(nil), do: nil
-  defp event_log_path(run_dir), do: Path.join(run_dir, "artifacts/agent-events.ndjson")
 
   defp decision_kind?(kind), do: MapSet.member?(@decision_kinds, kind)
   defp terminal_kind?(kind), do: MapSet.member?(@terminal_kinds, kind)
