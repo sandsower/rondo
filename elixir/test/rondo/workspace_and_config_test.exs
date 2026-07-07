@@ -451,7 +451,7 @@ defmodule Rondo.WorkspaceAndConfigTest do
   test "linear client logs response bodies for non-200 graphql responses" do
     log =
       ExUnit.CaptureLog.capture_log(fn ->
-        assert {:error, {:linear_api_status, 400}} =
+        assert {:error, {:linear_api_status, 400, %{"errors" => [_schema_error]}}} =
                  Client.graphql(
                    "query Viewer { viewer { id } }",
                    %{},

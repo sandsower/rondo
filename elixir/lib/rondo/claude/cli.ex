@@ -4,6 +4,7 @@ defmodule Rondo.Claude.CLI do
   """
 
   require Logger
+  alias Rondo.Agent.Env
   alias Rondo.Claude.StreamParser
   alias Rondo.{Config, PathSafety, RemoteShell}
 
@@ -65,7 +66,7 @@ defmodule Rondo.Claude.CLI do
               {:line, @port_line_bytes},
               {:cd, Path.expand(workspace)},
               {:args, spawn_args},
-              {:env, [{~c"CLAUDECODE", false}]}
+              {:env, Env.port_env(opts, [{~c"CLAUDECODE", false}])}
             ]
           )
 

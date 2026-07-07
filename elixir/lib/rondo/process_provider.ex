@@ -81,6 +81,11 @@ defmodule Rondo.ProcessProvider do
     provider.prompt(issue, opts)
   end
 
+  @spec proof_requirements(module(), keyword()) :: proof_requirements()
+  def proof_requirements(provider \\ provider_module(), opts \\ []) do
+    provider.proof_requirements(opts)
+  end
+
   @spec action_policy_evaluator(module()) :: (String.t(), [String.t()], keyword() -> {:ok, map()} | {:error, term()})
   def action_policy_evaluator(provider \\ provider_module()) do
     fn action, classes, opts -> provider.evaluate_action_policy(action, classes, opts) end

@@ -52,10 +52,13 @@ defmodule Rondo.CleanEval do
   (code_failure, same-tier repair loop); `error`/`timeout` (including a
   policy-blocked/denied proof, or the executable not being found) rolls up to
   `:error` (environment_failure, retryable) — mirroring the gate taxonomy.
-  Absent or empty `command_proofs` is never an error: it is recorded as
-  `command_proofs_declared: false` (or `true` with an empty `proofs` list) and
-  logged as a warning, for back-compat with every existing envelope. A
-  malformed `command_proofs` manifest value (not a list, missing required
+  Absent or empty `command_proofs` is not an error for native or legacy runs: it
+  is recorded as `command_proofs_declared: false` (or `true` with an empty
+  `proofs` list) and logged as a warning, for back-compat with existing
+  envelopes. If a process-provider artifact declares proof requirements and no
+  executable pre-PR gate or command proof covers them, clean evaluation fails
+  closed instead of silently accepting unexecuted proof obligations. A malformed
+  `command_proofs` manifest value (not a list, missing required
   `id`/`command`, duplicate ids, or an invalid `timeout_seconds`/`expected_exit`)
   is an evaluator `:error`, never silently ignored. Proofs never run when the
   repo gates fail or error, or when the patch fails to apply.
@@ -305,15 +308,13 @@ defmodule Rondo.CleanEval do
   # repo gates pass, reusing the same `:gate_runner` seam and action-policy
   # provider/evaluator resolved for the gates, so proofs execute under the same
   # frozen per-run action policy as any other run-owned side effect.
-  defp maybe_run_command_proofs(context, %{status: :pass}, action_policy_provider) do
+  defp maybe_run_command_proofs(context, %{status: :pass} = gates_result, action_policy_provider) do
     case fetch_command_proofs(context) do
       {:ok, nil} ->
-        Logger.warning("clean_eval: run #{context.run_id} declares no command_proofs; skipping deterministic proof verification (back-compat, not a failure)")
-
-        %{command_proofs_declared: false}
+        missing_command_proofs_outcome(context, gates_result)
 
       {:ok, []} ->
-        %{command_proofs_declared: true, proofs: []}
+        empty_command_proofs_outcome(context, gates_result)
 
       {:ok, proofs} ->
         run_command_proofs(context, proofs, action_policy_provider)
@@ -324,6 +325,75 @@ defmodule Rondo.CleanEval do
   end
 
   defp maybe_run_command_proofs(_context, _gates_result, _action_policy_provider), do: %{}
+
+  defp missing_command_proofs_outcome(context, gates_result) do
+    case declared_proof_requirements(context) do
+      {:ok, []} ->
+        Logger.warning("clean_eval: run #{context.run_id} declares no command_proofs; skipping deterministic proof verification (back-compat, not a failure)")
+
+        %{command_proofs_declared: false, proof_requirements_declared: false}
+
+      {:ok, proof_requirements} ->
+        proof_requirements_without_command_proofs_outcome(context, gates_result, proof_requirements, false)
+
+      {:error, reason} ->
+        %{status: :error, reason: "proof_requirements_unavailable #{inspect(reason)}", command_proofs_declared: false}
+    end
+  end
+
+  defp empty_command_proofs_outcome(context, gates_result) do
+    case declared_proof_requirements(context) do
+      {:ok, []} ->
+        %{command_proofs_declared: true, proof_requirements_declared: false, proofs: []}
+
+      {:ok, proof_requirements} ->
+        proof_requirements_without_command_proofs_outcome(context, gates_result, proof_requirements, true)
+
+      {:error, reason} ->
+        %{status: :error, reason: "proof_requirements_unavailable #{inspect(reason)}", command_proofs_declared: true, proofs: []}
+    end
+  end
+
+  defp proof_requirements_without_command_proofs_outcome(context, gates_result, proof_requirements, command_proofs_declared?) do
+    if gates_result_has_executable_results?(gates_result) do
+      %{
+        command_proofs_declared: command_proofs_declared?,
+        proof_requirements_declared: true,
+        proof_requirements: proof_requirements,
+        proofs: if(command_proofs_declared?, do: [], else: nil)
+      }
+      |> Map.reject(fn {_key, value} -> is_nil(value) end)
+    else
+      reason =
+        if command_proofs_declared? do
+          "empty_command_proofs_for_declared_proof_requirements"
+        else
+          "missing_command_proofs_for_declared_proof_requirements"
+        end
+
+      %{
+        status: :error,
+        reason: reason,
+        command_proofs_declared: command_proofs_declared?,
+        proof_requirements_declared: true,
+        proof_requirements: proof_requirements,
+        proofs: if(command_proofs_declared?, do: [], else: nil),
+        run_id: context.run_id
+      }
+      |> Map.reject(fn {_key, value} -> is_nil(value) end)
+    end
+  end
+
+  defp gates_result_has_executable_results?(%{gates: %{"results" => results}}) when is_list(results), do: results != []
+  defp gates_result_has_executable_results?(%{gates: %{results: results}}) when is_list(results), do: results != []
+  defp gates_result_has_executable_results?(_gates_result), do: false
+
+  defp declared_proof_requirements(context) do
+    case ProcessProvider.proof_requirements(context.process_provider, provider_opts(context)) do
+      {:ok, requirements} when is_list(requirements) -> {:ok, requirements}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   defp run_command_proofs(context, proofs, action_policy_provider) do
     proof_gates = Enum.map(proofs, &proof_gate_definition/1)
@@ -787,6 +857,8 @@ defmodule Rondo.CleanEval do
       "apply_output" => Map.get(result, :apply_output),
       "gates" => Map.get(result, :gates),
       "command_proofs_declared" => Map.get(result, :command_proofs_declared),
+      "proof_requirements_declared" => Map.get(result, :proof_requirements_declared),
+      "proof_requirements" => Map.get(result, :proof_requirements),
       "proofs" => Map.get(result, :proofs),
       "cleanup" => Map.get(result, :cleanup),
       "started_at" => datetime_to_iso(started_at),
@@ -813,12 +885,28 @@ defmodule Rondo.CleanEval do
     if Keyword.has_key?(opts, :gates), do: Keyword.fetch!(opts, :gates), else: nil
   end
 
-  defp process_provider(_ledger, opts) do
+  defp process_provider(ledger, opts) do
     case Keyword.get(opts, :process_provider) do
-      nil -> ProcessProvider.provider_module()
+      nil -> process_provider_from_manifest_or_config(ledger)
       provider -> ProcessProvider.provider_module(provider)
     end
   end
+
+  defp process_provider_from_manifest_or_config(ledger) do
+    source_contract = Map.get(ledger.manifest, "source_contract") || %{}
+
+    if source_contract_process_provider_artifact?(source_contract) do
+      Beislid
+    else
+      ProcessProvider.provider_module()
+    end
+  end
+
+  defp source_contract_process_provider_artifact?(%{"process_provider" => %{"artifact_path" => path}}) when is_binary(path) do
+    String.trim(path) != ""
+  end
+
+  defp source_contract_process_provider_artifact?(_source_contract), do: false
 
   defp git(context, cwd, args) do
     case context.runner.(args, cwd) do

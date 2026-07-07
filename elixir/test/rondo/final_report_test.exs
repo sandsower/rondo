@@ -174,6 +174,13 @@ defmodule Rondo.FinalReportTest do
     assert "changed_files must be a list of strings" in errors
   end
 
+  test "rejects string command entries in gates_run" do
+    report = Map.put(@valid_report, "gates_run", ["cd elixir && mix test"])
+
+    assert {:error, {:invalid, errors}} = FinalReport.validate(report)
+    assert "gates_run must be a list of objects" in errors
+  end
+
   test "ignores JSON arrays when looking for a report object" do
     assert {:error, :missing} = FinalReport.extract("[1, 2, 3]")
   end

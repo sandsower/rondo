@@ -2449,6 +2449,117 @@ defmodule Rondo.AgentAdapterTest do
     end
   end
 
+  test "tracker-less run stops after a valid active-state final report instead of burning max turns" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-trackerless-handoff-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 3
+      )
+
+      parent = start_update_recorder(self())
+
+      active_report = %{
+        "schema" => "rondo.final_report/v0",
+        "summary" => "Implemented but needs external handoff",
+        "changed_files" => [],
+        "gates_run" => [],
+        "failures" => [],
+        "risks" => [],
+        "next_state" => "In Progress"
+      }
+
+      issue = %Issue{
+        id: "issue-trackerless-handoff",
+        identifier: "MT-TRACKERLESS",
+        title: "Trackerless handoff proof",
+        description: "Exercise manifest handoff stop",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 issue_state_fetcher: &AgentRunner.no_tracker_issue_state_fetcher/1,
+                 fake_final_reports: [Jason.encode!(active_report)],
+                 test_pid: parent
+               )
+
+      assert_receive {:fake_adapter_invoked, 1, _prompt, _workspace, nil}, 500
+      refute_receive {:fake_adapter_invoked, 2, _prompt, _workspace, _run_ref}, 100
+
+      assert_receive {:claude_worker_update, "issue-trackerless-handoff", %{event: :run_decision, reason_code: "tracker_less_handoff_required"}}, 500
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "post-turn gate failure feeds verifier output back for a repair turn" do
+    test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-gate-repair-#{System.unique_integer([:positive])}")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      File.mkdir_p!(workspace_root)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        max_turns: 2,
+        gates: [%{name: "proof", command: "test -f fixed.txt", timeout_ms: 1_000}]
+      )
+
+      parent = start_update_recorder(self())
+
+      active_report = %{
+        "schema" => "rondo.final_report/v0",
+        "summary" => "First pass",
+        "changed_files" => [],
+        "gates_run" => [],
+        "failures" => [],
+        "risks" => [],
+        "next_state" => "In Progress"
+      }
+
+      done_report = %{active_report | "summary" => "Gate repaired", "changed_files" => ["fixed.txt"], "next_state" => "Done"}
+
+      issue = %Issue{
+        id: "issue-gate-repair",
+        identifier: "MT-GATE-REPAIR",
+        title: "Gate repair proof",
+        description: "Exercise gate repair continuation",
+        state: "In Progress",
+        labels: []
+      }
+
+      assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
+      send(parent, {:set_ledger, ledger})
+
+      assert :ok =
+               AgentRunner.run(issue, parent,
+                 agent_adapter: FakeAdapter,
+                 issue_state_fetcher: &AgentRunner.no_tracker_issue_state_fetcher/1,
+                 run_ledger: ledger,
+                 fake_final_reports: [Jason.encode!(active_report), Jason.encode!(done_report)],
+                 touch_workspace_on_invocation: 2,
+                 touch_workspace_path: "fixed.txt",
+                 test_pid: parent
+               )
+
+      assert_receive {:fake_adapter_invoked, 1, _first_prompt, _workspace, nil}, 500
+      assert_receive {:claude_worker_update, "issue-gate-repair", %{event: :run_decision, reason_code: "gate_failed_repair"}}, 500
+      assert_receive {:fake_adapter_invoked, 2, repair_prompt, _workspace, _run_ref}, 500
+      assert repair_prompt =~ "Post-turn gate failure repair required"
+      assert repair_prompt =~ "Gate: proof"
+      assert repair_prompt =~ "test -f fixed.txt"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner can use a fake adapter for first invocation, continuation, and events" do
     test_root = Path.join(System.tmp_dir!(), "rondo-agent-runner-fake-adapter-#{System.unique_integer([:positive])}")
 

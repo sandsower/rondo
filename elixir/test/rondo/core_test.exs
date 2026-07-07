@@ -1362,7 +1362,7 @@ defmodule Rondo.CoreTest do
     end
   end
 
-  test "agent runner continues on an incomplete report even without tracker capability" do
+  test "agent runner stops for handoff on an incomplete report without tracker capability" do
     test_root =
       Path.join(System.tmp_dir!(), "rondo-elixir-agent-runner-report-active-#{System.unique_integer([:positive])}")
 
@@ -1372,11 +1372,11 @@ defmodule Rondo.CoreTest do
 
       issue = continuation_issue("issue-report-active", "MT-302")
 
-      # Report-driven continuation: an explicitly-incomplete next_state keeps
-      # going up to max_turns even though the fetcher reports no tracker capability.
+      # Tracker-less execution cannot observe external progress, so a valid
+      # active-state report becomes a handoff boundary instead of burning turns.
       assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: &AgentRunner.no_tracker_issue_state_fetcher/1)
 
-      assert length(trace_argv(trace_file)) == 2
+      assert length(trace_argv(trace_file)) == 1
     after
       File.rm_rf(test_root)
     end

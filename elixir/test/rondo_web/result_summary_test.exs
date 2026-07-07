@@ -303,7 +303,7 @@ defmodule RondoWeb.ResultSummaryTest do
         schema: "rondo.final_report/v0",
         summary: "Empty collections",
         changed_files: [""],
-        gates_run: [""],
+        gates_run: [],
         failures: [],
         risks: [],
         next_state: "done"
@@ -335,7 +335,7 @@ defmodule RondoWeb.ResultSummaryTest do
         schema: "rondo.final_report/v0",
         summary: "Gate raw",
         changed_files: ["lib/a.ex"],
-        gates_run: ["raw"],
+        gates_run: [%{"name" => "raw"}],
         failures: [],
         risks: [],
         next_state: "done"

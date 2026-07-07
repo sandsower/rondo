@@ -4,6 +4,7 @@ defmodule Rondo.Codex.CLI do
   """
 
   require Logger
+  alias Rondo.Agent.Env
   alias Rondo.Codex.StreamParser
   alias Rondo.Config
   alias Rondo.PathSafety
@@ -54,7 +55,8 @@ defmodule Rondo.Codex.CLI do
               :stderr_to_stdout,
               {:line, @port_line_bytes},
               {:cd, Path.expand(workspace)},
-              {:args, spawn_args}
+              {:args, spawn_args},
+              {:env, Env.port_env(opts)}
             ]
           )
 

@@ -64,6 +64,48 @@ defmodule Rondo.CleanEvalTest do
     end
   end
 
+  defmodule ProofRequirementsProcessProvider do
+    @behaviour Rondo.ProcessProvider
+
+    @impl true
+    def id, do: "proof_requirements_process"
+
+    @impl true
+    def capabilities, do: %{gate_selection: :test, proof_requirements: :test}
+
+    @impl true
+    def probe(_opts \\ []), do: Rondo.ProcessProvider.probe_result(:ok, %{gate_selection: :ok})
+
+    @impl true
+    def select_gates(_opts \\ []), do: {:ok, Rondo.ProcessProvider.gate_selection_result([])}
+
+    @impl true
+    def select_guides(_opts \\ []), do: {:ok, []}
+
+    @impl true
+    def prompt(%Rondo.Linear.Issue{} = issue, _opts \\ []), do: "Provider prompt for #{issue.identifier}"
+
+    @impl true
+    def model_routing_hints(_opts \\ []), do: %{}
+
+    @impl true
+    def proof_requirements(_opts \\ []) do
+      {:ok, [%{"id" => "pre_pr", "description" => "pre-PR proof must run"}]}
+    end
+
+    @impl true
+    def evaluate_action_policy(action, classes, opts \\ []) do
+      {:ok,
+       %{
+         "decision" => "allow",
+         "action" => action,
+         "classes" => classes,
+         "mode" => Keyword.get(opts, :mode, "unattended-auto"),
+         "provider" => id()
+       }}
+    end
+  end
+
   defmodule FailingProcessProvider do
     @behaviour Rondo.ProcessProvider
 
@@ -291,6 +333,23 @@ defmodule Rondo.CleanEvalTest do
     Process.delete(:clean_eval_test_parent)
   end
 
+  test "fails clean evaluation when proof requirements exist without executable command proofs" do
+    context = setup_run("clean-eval-proof-requirements-no-command-proofs", clean_eval_enabled: true)
+    write_patch_artifacts!(context)
+
+    assert {:ok, _ledger, result} = CleanEval.run(context.ledger, process_provider: ProofRequirementsProcessProvider)
+    assert result.status == :error
+    assert result.reason == "missing_command_proofs_for_declared_proof_requirements"
+    assert result.command_proofs_declared == false
+    assert result.proof_requirements_declared == true
+    assert [%{"id" => "pre_pr"}] = result.proof_requirements
+
+    result_json = read_result_json!(context)
+    assert result_json["status"] == "error"
+    assert result_json["proof_requirements_declared"] == true
+    assert [%{"id" => "pre_pr"}] = result_json["proof_requirements"]
+  end
+
   test "falls back to native pre-PR gates when an optional provider gate selection fails" do
     context =
       setup_run("clean-eval-provider-fallback",
@@ -399,6 +458,24 @@ defmodule Rondo.CleanEvalTest do
     assert result.status == :error
     assert result.reason_code == "process_provider_gate_selection_failed"
     assert result.reason =~ "provider_unavailable"
+  end
+
+  test "manifest source_contract process provider artifact selects Beislið clean-eval gates" do
+    artifact_path = beislid_fixture_path("approved.json")
+    context = setup_run("clean-eval-manifest-beislid-source-contract", clean_eval_enabled: true, process_provider_kind: "native")
+    write_patch_artifacts!(context)
+
+    ledger = %{
+      context.ledger
+      | manifest:
+          Map.put(context.ledger.manifest, "source_contract", %{
+            "process_provider" => %{"artifact_path" => artifact_path}
+          })
+    }
+
+    assert {:ok, _ledger, result} = CleanEval.run(ledger)
+    assert result.status == :pass
+    assert read_result_json!(%{context | ledger: ledger})["gates"]["gate_selection"]["metadata"]["provider"] == "beislid"
   end
 
   test "uses Beislið pre-PR gates and action policy when the artifact provides policy" do

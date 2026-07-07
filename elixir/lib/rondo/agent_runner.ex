@@ -29,6 +29,8 @@ defmodule Rondo.AgentRunner do
   alias Rondo.Tracker.TerminalState
   alias Rondo.Tracker.UpdateDetector
 
+  @max_gate_repair_log_bytes 4_096
+
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, claude_update_recipient \\ nil, opts \\ []) do
     Logger.info("Starting agent run for #{issue_context(issue)}")
@@ -1028,9 +1030,12 @@ defmodule Rondo.AgentRunner do
     effective_run_ref = new_run_ref || run_ref
     provider_ref = if effective_run_ref, do: Map.get(effective_run_ref, :provider_ref)
 
+    model_routing = Keyword.get(turn_context.opts, :model_routing)
+
     Logger.info(
       "Completed agent turn for #{issue_context(issue)} adapter=#{turn_context.adapter.id()} " <>
-        "provider_ref=#{provider_ref} workspace=#{turn_context.workspace} turn=#{turn_number}/#{turn_context.max_turns}"
+        "model=#{model_routing_label(model_routing)} provider_ref=#{provider_ref} " <>
+        "workspace=#{turn_context.workspace} turn=#{turn_number}/#{turn_context.max_turns}"
     )
 
     maybe_send_invocation_result_update(
@@ -1038,18 +1043,30 @@ defmodule Rondo.AgentRunner do
       issue,
       turn_context.adapter,
       invocation_result,
-      completion_observed?
+      completion_observed?,
+      model_routing
     )
 
-    with :ok <- run_gates_for_phase(turn_context, issue, turn_number) do
-      continue_agent_turns(
-        clear_live_update_prompt(turn_context),
-        issue,
-        turn_number,
-        effective_run_ref,
-        Map.get(invocation_result, :final_report),
-        previous_final_report_fingerprint
-      )
+    case run_gates_for_phase(turn_context, issue, turn_number) do
+      :ok ->
+        continue_agent_turns(
+          turn_context |> clear_live_update_prompt() |> clear_gate_repair_prompt(),
+          issue,
+          turn_number,
+          effective_run_ref,
+          Map.get(invocation_result, :final_report),
+          previous_final_report_fingerprint
+        )
+
+      {:error, reason} ->
+        handle_post_turn_gate_failure(
+          turn_context,
+          issue,
+          turn_number,
+          effective_run_ref,
+          previous_final_report_fingerprint,
+          reason
+        )
     end
   end
 
@@ -1061,9 +1078,9 @@ defmodule Rondo.AgentRunner do
     end
   end
 
-  defp maybe_send_invocation_result_update(_recipient, _issue, _adapter, _invocation_result, true), do: :ok
+  defp maybe_send_invocation_result_update(_recipient, _issue, _adapter, _invocation_result, true, _model_routing), do: :ok
 
-  defp maybe_send_invocation_result_update(recipient, issue, adapter, invocation_result, false) do
+  defp maybe_send_invocation_result_update(recipient, issue, adapter, invocation_result, false, model_routing) do
     :invocation_completed
     |> Adapter.event(
       adapter: adapter.id(),
@@ -1072,10 +1089,106 @@ defmodule Rondo.AgentRunner do
       capabilities: Map.get(invocation_result, :capabilities),
       final_report: Map.get(invocation_result, :final_report),
       diff_source: Map.get(invocation_result, :diff_source),
+      model_routing: model_routing,
       raw: Map.get(invocation_result, :raw, %{})
     )
     |> claude_event_handler(recipient, issue).()
   end
+
+  defp handle_post_turn_gate_failure(context, issue, turn_number, effective_run_ref, previous_final_report_fingerprint, reason) do
+    if repairable_gate_failure?(reason) and turn_number < context.max_turns do
+      dispatch_run_decision(
+        turn_context_recipient(context),
+        issue,
+        :continue,
+        "gate_failed_repair",
+        "continue so the agent can repair failed post-turn gates",
+        gate_failure_run_decision_opts(context, issue, turn_number, effective_run_ref, reason)
+      )
+
+      context
+      |> put_gate_repair_prompt(reason, turn_number)
+      |> do_run_agent_turns(issue, turn_number + 1, effective_run_ref, previous_final_report_fingerprint)
+    else
+      {:error, reason}
+    end
+  end
+
+  defp repairable_gate_failure?({:gate_failed, _summary}), do: true
+  defp repairable_gate_failure?(_reason), do: false
+
+  defp gate_failure_run_decision_opts(context, issue, turn_number, effective_run_ref, reason) do
+    analysis = %{status: :invalid, next_state_hint: nil, fingerprint: "gate_failed", errors: [], report: nil}
+
+    run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, nil, %{
+      "gate_failure" => gate_failure_summary(reason)
+    })
+  end
+
+  defp put_gate_repair_prompt(%{opts: opts} = context, reason, turn_number) when is_list(opts) do
+    prompt = gate_repair_prompt(context, reason, turn_number)
+    %{context | opts: Keyword.put(opts, :gate_repair_prompt, prompt)}
+  end
+
+  defp gate_repair_prompt(context, reason, turn_number) do
+    """
+    Post-turn gate failure repair required:
+
+    The previous turn's implementation was not accepted because configured gates failed after turn #{turn_number}.
+    Treat the gate output below as trusted verifier output from Rondo.
+    Fix the code, rerun the relevant verification locally, and finish with a valid `rondo.final_report/v0` JSON object.
+
+    #{gate_failure_prompt_body(context, reason)}
+    """
+  end
+
+  defp gate_failure_prompt_body(context, {:gate_failed, summary}) when is_map(summary) do
+    summary
+    |> gate_failure_results()
+    |> Enum.reject(&(Map.get(&1, :status) in [:pass, "pass"]))
+    |> Enum.map_join("\n\n", &gate_result_prompt(context, &1))
+  end
+
+  defp gate_failure_prompt_body(_context, reason), do: inspect(reason)
+
+  defp gate_result_prompt(context, result) when is_map(result) do
+    """
+    Gate: #{Map.get(result, :name)}
+    Command: #{Map.get(result, :command)}
+    Status: #{Map.get(result, :status)} exit_status=#{inspect(Map.get(result, :exit_status))}
+    stdout:
+    #{gate_log_tail(context, Map.get(result, :stdout_path))}
+    stderr:
+    #{gate_log_tail(context, Map.get(result, :stderr_path))}
+    """
+  end
+
+  defp gate_log_tail(_context, nil), do: "(not captured)"
+
+  defp gate_log_tail(context, path) when is_binary(path) do
+    full_path = if Path.type(path) == :absolute, do: path, else: Path.join(context.run_dir || "", path)
+
+    full_path
+    |> File.read()
+    |> case do
+      {:ok, contents} -> tail_bytes(contents, @max_gate_repair_log_bytes)
+      {:error, _reason} -> "(log unavailable at #{path})"
+    end
+  end
+
+  defp tail_bytes(contents, max_bytes) when byte_size(contents) <= max_bytes, do: contents
+
+  defp tail_bytes(contents, max_bytes) do
+    size = byte_size(contents)
+    "...\n" <> binary_part(contents, size - max_bytes, max_bytes)
+  end
+
+  defp gate_failure_summary({:gate_failed, %{results: _results} = summary}), do: gate_error_summary(summary)
+  defp gate_failure_summary({:gate_failed, summary}) when is_map(summary), do: summary
+  defp gate_failure_summary(reason), do: inspect(reason)
+
+  defp model_routing_label(%{resolved: resolved}) when is_map(resolved), do: ModelRouting.candidate_label(resolved)
+  defp model_routing_label(_routing), do: "unresolved"
 
   defp run_gates(%{gates: []}, _issue, _turn_number), do: :ok
 
@@ -1316,9 +1429,13 @@ defmodule Rondo.AgentRunner do
   defp gate_error_summary(summary) do
     %{
       status: summary.status,
-      failed: Enum.map(summary.results, &Map.take(&1, [:name, :status, :exit_status, :retryable, :environment_failure]))
+      failed: Enum.map(summary.results, &Map.take(&1, [:name, :command, :status, :exit_status, :retryable, :environment_failure, :stdout_path, :stderr_path]))
     }
   end
+
+  defp gate_failure_results(%{results: results}) when is_list(results), do: results
+  defp gate_failure_results(%{failed: failed}) when is_list(failed), do: failed
+  defp gate_failure_results(_summary), do: []
 
   defp gate_failure_reason(%{status: status} = summary) when status in [:policy_blocked, "policy_blocked"] do
     case policy_gate_result(summary, [:policy_blocked, "policy_blocked"]) do
@@ -1919,63 +2036,99 @@ defmodule Rondo.AgentRunner do
 
   defp valid_final_report_continuation(context, issue, analysis, turn_number, final_report, effective_run_ref) do
     if active_issue_state?(Map.get(analysis.report, "next_state")) do
-      case maybe_continue_with_live_update(context, issue, :continue) do
-        {:continue, refreshed_issue, next_context} ->
-          dispatch_run_decision(
-            turn_context_recipient(context),
-            refreshed_issue,
-            :continue,
-            "final_report_active_or_incomplete",
-            "continue because final report says active/incomplete",
-            # credo:disable-for-next-line
-            # credo:disable-for-next-line
-            # credo:disable-for-next-line
-            run_decision_opts(context, refreshed_issue, turn_number, effective_run_ref, analysis, final_report)
-          )
-
-          {:continue, refreshed_issue, analysis.fingerprint, next_context}
-
-        {:terminal, refreshed_issue, next_context} ->
-          # credo:disable-for-next-line
-          stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :terminal, :final_report)
-
-        {:inactive, refreshed_issue, next_context} ->
-          # credo:disable-for-next-line
-          stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :inactive, :final_report)
-
-        {:missing, refreshed_issue, next_context} ->
-          # credo:disable-for-next-line
-          stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :missing, :final_report)
-
-        {:pause, interrupt, next_context} ->
-          dispatch_run_decision(
-            turn_context_recipient(context),
-            issue,
-            :pause,
-            "tracker_update_requires_guidance",
-            "pause because tracker update requires guidance",
-            run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report, %{
-              "tracker_update" => Map.get(interrupt, "question")
-            })
-          )
-
-          {:pause, interrupt, next_context}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      active_final_report_continuation(context, issue, analysis, turn_number, final_report, effective_run_ref)
     else
-      dispatch_run_decision(
-        turn_context_recipient(context),
-        issue,
-        :stop,
-        "final_report_terminal_or_complete",
-        "stop because final report says terminal/complete",
-        run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report)
-      )
-
-      {:done, issue, clear_live_update_prompt(context)}
+      terminal_final_report_continuation(context, issue, analysis, turn_number, final_report, effective_run_ref)
     end
+  end
+
+  defp active_final_report_continuation(context, issue, analysis, turn_number, final_report, effective_run_ref) do
+    if tracker_capable?(context) do
+      tracker_active_final_report_continuation(context, issue, analysis, turn_number, final_report, effective_run_ref)
+    else
+      tracker_less_active_final_report_continuation(
+        context,
+        issue,
+        analysis,
+        turn_number,
+        final_report,
+        effective_run_ref
+      )
+    end
+  end
+
+  defp tracker_less_active_final_report_continuation(context, issue, analysis, turn_number, final_report, effective_run_ref) do
+    dispatch_run_decision(
+      turn_context_recipient(context),
+      issue,
+      :stop,
+      "tracker_less_handoff_required",
+      "stop because tracker-less run has a valid active-state final report and must hand off instead of burning turns",
+      run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report)
+    )
+
+    {:done, issue, clear_live_update_prompt(context)}
+  end
+
+  defp tracker_active_final_report_continuation(context, issue, analysis, turn_number, final_report, effective_run_ref) do
+    case maybe_continue_with_live_update(context, issue, :continue) do
+      {:continue, refreshed_issue, next_context} ->
+        dispatch_run_decision(
+          turn_context_recipient(context),
+          refreshed_issue,
+          :continue,
+          "final_report_active_or_incomplete",
+          "continue because final report says active/incomplete",
+          # credo:disable-for-next-line
+          # credo:disable-for-next-line
+          # credo:disable-for-next-line
+          run_decision_opts(context, refreshed_issue, turn_number, effective_run_ref, analysis, final_report)
+        )
+
+        {:continue, refreshed_issue, analysis.fingerprint, next_context}
+
+      {:terminal, refreshed_issue, next_context} ->
+        # credo:disable-for-next-line
+        stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :terminal, :final_report)
+
+      {:inactive, refreshed_issue, next_context} ->
+        # credo:disable-for-next-line
+        stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :inactive, :final_report)
+
+      {:missing, refreshed_issue, next_context} ->
+        # credo:disable-for-next-line
+        stop_for_tracker_state(next_context, refreshed_issue, turn_number, effective_run_ref, :missing, :final_report)
+
+      {:pause, interrupt, next_context} ->
+        dispatch_run_decision(
+          turn_context_recipient(context),
+          issue,
+          :pause,
+          "tracker_update_requires_guidance",
+          "pause because tracker update requires guidance",
+          run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report, %{
+            "tracker_update" => Map.get(interrupt, "question")
+          })
+        )
+
+        {:pause, interrupt, next_context}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp terminal_final_report_continuation(context, issue, analysis, turn_number, final_report, effective_run_ref) do
+    dispatch_run_decision(
+      turn_context_recipient(context),
+      issue,
+      :stop,
+      "final_report_terminal_or_complete",
+      "stop because final report says terminal/complete",
+      run_decision_opts(context, issue, turn_number, effective_run_ref, analysis, final_report)
+    )
+
+    {:done, issue, clear_live_update_prompt(context)}
   end
 
   defp invalid_or_missing_final_report_continuation(context, issue, analysis, turn_number, final_report, effective_run_ref) do
@@ -2282,6 +2435,12 @@ defmodule Rondo.AgentRunner do
 
   defp clear_live_update_prompt(context), do: context
 
+  defp clear_gate_repair_prompt(%{opts: opts} = context) when is_list(opts) do
+    %{context | opts: Keyword.delete(opts, :gate_repair_prompt)}
+  end
+
+  defp clear_gate_repair_prompt(context), do: context
+
   defp continue_with_live_update(context, %Issue{} = issue) do
     case continue_with_issue?(issue, context.issue_state_fetcher) do
       {:continue, refreshed_issue} ->
@@ -2523,6 +2682,7 @@ defmodule Rondo.AgentRunner do
 
     prompt
     |> maybe_prepend_planning_handoff(opts)
+    |> prepend_gate_repair_prompt(opts)
     |> prepend_live_update_prompt(opts)
   end
 
@@ -2572,6 +2732,13 @@ defmodule Rondo.AgentRunner do
 
     Do not use legacy keys such as `version`, `ticket`, `completed_actions`, or `blockers` instead of the required core fields. `implementation_plan` may be either a non-empty string or a non-empty list of strings. Set `recommended_implementation_tier` to `standard` by default, or `heavy` only when implementation complexity requires stronger execution. Set `next_state` to an active state such as `In Progress` unless truly blocked.
     """
+  end
+
+  defp prepend_gate_repair_prompt(prompt, opts) when is_binary(prompt) do
+    case Keyword.get(opts, :gate_repair_prompt) do
+      value when is_binary(value) and value != "" -> value <> "\n\n" <> prompt
+      _other -> prompt
+    end
   end
 
   defp prepend_live_update_prompt(prompt, opts) when is_binary(prompt) do

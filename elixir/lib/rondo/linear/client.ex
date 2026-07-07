@@ -253,12 +253,6 @@ defmodule Rondo.Linear.Client do
             updatedAt
           }
         }
-        customFields {
-          nodes {
-            name
-            value
-          }
-        }
         createdAt
         updatedAt
       }
@@ -336,12 +330,6 @@ defmodule Rondo.Linear.Client do
             metadata
             createdAt
             updatedAt
-          }
-        }
-        customFields {
-          nodes {
-            name
-            value
           }
         }
         createdAt
@@ -484,7 +472,7 @@ defmodule Rondo.Linear.Client do
             linear_error_context(payload, response)
         )
 
-        {:error, {:linear_api_status, response.status}}
+        {:error, {:linear_api_status, response.status, Map.get(response, :body) || Map.get(response, "body")}}
 
       {:error, reason} ->
         Logger.error("Linear GraphQL request failed: #{inspect(reason)}")

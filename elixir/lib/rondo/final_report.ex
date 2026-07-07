@@ -150,7 +150,7 @@ defmodule Rondo.FinalReport do
     |> check_schema(report)
     |> check_non_empty_string(report, "summary")
     |> check_string_list(report, "changed_files")
-    |> check_list(report, "gates_run")
+    |> check_map_list(report, "gates_run")
     |> check_list(report, "failures")
     |> check_list(report, "risks")
     |> check_non_empty_string(report, "next_state")
@@ -196,6 +196,20 @@ defmodule Rondo.FinalReport do
     case Map.get(report, field) do
       value when is_list(value) -> errors
       other -> ["#{field} must be a list, got: #{inspect(other)}" | errors]
+    end
+  end
+
+  defp check_map_list(errors, report, field) do
+    case Map.get(report, field) do
+      value when is_list(value) ->
+        if Enum.all?(value, &is_map/1) do
+          errors
+        else
+          ["#{field} must be a list of objects" | errors]
+        end
+
+      other ->
+        ["#{field} must be a list of objects, got: #{inspect(other)}" | errors]
     end
   end
 

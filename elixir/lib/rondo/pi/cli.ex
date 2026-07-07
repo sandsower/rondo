@@ -4,6 +4,7 @@ defmodule Rondo.Pi.CLI do
   """
 
   require Logger
+  alias Rondo.Agent.Env
   alias Rondo.{Config, PathSafety}
   alias Rondo.Pi.StreamParser
 
@@ -52,7 +53,8 @@ defmodule Rondo.Pi.CLI do
               :stderr_to_stdout,
               {:line, @port_line_bytes},
               {:cd, Path.expand(workspace)},
-              {:args, spawn_args}
+              {:args, spawn_args},
+              {:env, Env.port_env(opts)}
             ]
           )
 

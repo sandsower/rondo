@@ -109,7 +109,7 @@ defmodule Rondo.Linear.PaginationTest do
     assert length(context.snapshot["attachments"]) == 1
     assert length(context.snapshot["relations"]) == 1
     assert length(context.snapshot["inverse_relations"]) == 1
-    assert context.snapshot["custom_fields"]["GitHub PR"] == "https://github.com/sandsower/rondo/pull/123"
+    assert context.snapshot["custom_fields"] == %{}
 
     assert_received {:graphql_query, query,
                      %{
@@ -124,7 +124,7 @@ defmodule Rondo.Linear.PaginationTest do
 
     assert query =~ "comments(first: $commentFirst)"
     assert query =~ "attachments(first: $attachmentFirst)"
-    assert query =~ "customFields"
+    refute query =~ "customFields"
   end
 
   test "fetch by ids omits issues filtered out by tracker visibility" do
@@ -256,12 +256,6 @@ defmodule Rondo.Linear.PaginationTest do
                 "createdAt" => nil,
                 "updatedAt" => nil
               }
-            ]
-          },
-          "customFields" => %{
-            "nodes" => [
-              %{"name" => "GitHub PR", "value" => "https://github.com/sandsower/rondo/pull/123"},
-              %{"name" => "Notes", "value" => "ready for follow-up"}
             ]
           },
           "createdAt" => nil,
