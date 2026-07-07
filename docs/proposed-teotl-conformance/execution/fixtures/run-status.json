@@ -1,0 +1,19 @@
+{
+  "run_id": "RUN-sample-0001",
+  "status": "completed",
+  "event_cursor": "rondo.core/v1:0",
+  "last_event": {
+    "type": "rondo.run.evidence_recorded",
+    "sequence": 5,
+    "repo_id": "sample-repo",
+    "run_id": "RUN-sample-0001",
+    "artifact_kind": "delivery_artifact",
+    "uri": "rondo-run://RUN-sample-0001/artifacts/delivery-artifact.json",
+    "timestamp": "2026-05-10T15:30:40Z",
+    "namespace": { "repo_id": "sample-repo", "run_id": "RUN-sample-0001" }
+  },
+  "evidence_pointers": [
+    { "artifact_kind": "agent_events", "uri": "rondo-run://RUN-sample-0001/artifacts/agent-events.ndjson" },
+    { "artifact_kind": "delivery_artifact", "uri": "rondo-run://RUN-sample-0001/artifacts/delivery-artifact.json" }
+  ]
+}

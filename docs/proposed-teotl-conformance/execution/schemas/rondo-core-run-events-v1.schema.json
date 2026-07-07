@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://crust.local/schemas/rondo-core-run-events-v1.schema.json",
+  "title": "Rondo Core run.events response and event families v1",
+  "description": "Payload schema for the rondo.core/v1 run.events operation and the three event families a consumer receives.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["events", "next_event_cursor"],
+  "properties": {
+    "events": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/event" }
+    },
+    "next_event_cursor": { "$ref": "#/$defs/cursor" }
+  },
+  "$defs": {
+    "cursor": {
+      "type": "string",
+      "pattern": "^rondo\\.core/v1:\\d+$",
+      "description": "Opaque append-only cursor carrying the count already consumed."
+    },
+    "timestamp": {
+      "type": "string",
+      "description": "ISO-8601 UTC timestamp giving deterministic time context."
+    },
+    "namespace": {
+      "type": "object",
+      "description": "Namespace context sufficient for deterministic display/replay.",
+      "additionalProperties": false,
+      "properties": {
+        "service_id": { "type": "string", "minLength": 1 },
+        "repo_id": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "event": {
+      "type": "object",
+      "required": ["type", "sequence", "timestamp", "namespace"],
+      "properties": {
+        "type": { "type": "string", "pattern": "^rondo\\." },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "namespace": { "$ref": "#/$defs/namespace" }
+      },
+      "oneOf": [
+        { "$ref": "#/$defs/serviceStatusChanged" },
+        { "$ref": "#/$defs/runStatusChanged" },
+        { "$ref": "#/$defs/runEvidenceRecorded" }
+      ]
+    },
+    "serviceStatusChanged": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "sequence", "timestamp", "namespace", "service_id", "status"],
+      "properties": {
+        "type": { "const": "rondo.service.status_changed" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "namespace": { "$ref": "#/$defs/namespace" },
+        "service_id": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "minLength": 1 }
+      }
+    },
+    "runStatusChanged": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "sequence", "timestamp", "namespace", "repo_id", "run_id", "status"],
+      "properties": {
+        "type": { "const": "rondo.run.status_changed" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "namespace": { "$ref": "#/$defs/namespace" },
+        "repo_id": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["running", "paused", "completed", "failed", "terminated"] }
+      }
+    },
+    "runEvidenceRecorded": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "sequence", "timestamp", "namespace", "repo_id", "run_id", "artifact_kind", "uri"],
+      "properties": {
+        "type": { "const": "rondo.run.evidence_recorded" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "namespace": { "$ref": "#/$defs/namespace" },
+        "repo_id": { "type": "string", "minLength": 1 },
+        "run_id": { "type": "string", "minLength": 1 },
+        "artifact_kind": { "type": "string", "minLength": 1 },
+        "uri": {
+          "type": "string",
+          "description": "Run-scoped evidence pointer; never an absolute workspace/ledger path.",
+          "pattern": "^(rondo-run://|file://)"
+        }
+      }
+    }
+  }
+}

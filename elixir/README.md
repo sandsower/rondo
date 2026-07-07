@@ -475,6 +475,27 @@ mutates the ledger and never runs anything. `--workspace-root` defaults to
 `Rondo.Config.workspace_root/0`; `--json` prints the machine-readable form. See the
 moduledoc in `lib/mix/tasks/rondo.scorecard.ex` for the full field reference.
 
+### Run event feed (rondo.core/v1)
+
+```bash
+mix rondo.run_events --repo-id REPO --run-id RUN [--service-id ID] [--cursor CURSOR]
+mix rondo.run_events --repo-id REPO --run-id RUN --status
+```
+
+Exposes a run's lifecycle as an externally consumable, versioned event feed - the
+event half of the provisional `rondo.core/v1` execution contract. It routes
+rondo's internal `rondo.events/v0` evidence (through the `Rondo.RunEvidence.EventStream`
+seam) plus the run-ledger manifest into three contract event families
+(`rondo.service.status_changed`, `rondo.run.status_changed`,
+`rondo.run.evidence_recorded`) and prints the `run.events` / `run.status` JSON
+response. It is read-only and speaks only contract concepts (`service_id`,
+`repo_id`, `run_id`, opaque `event_cursor`); a consumer tails an active run by
+re-invoking with the previous `next_event_cursor` and replays an archived run
+from an empty cursor, without relaunching completed work. The CLI is the
+transport over the `Rondo.Core.EventFeed` BEAM API; see
+`../docs/adr/0001-run-event-feed-transport.md` and the minimal external consumer
+at `examples/run_events_tail.py`.
+
 ### Live end-to-end test (opt-in)
 
 `make e2e` proves the full production path against real services: Linear issue fetch,
