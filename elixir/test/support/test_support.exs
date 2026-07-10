@@ -33,7 +33,11 @@ defmodule Rondo.TestSupport do
 
         File.mkdir_p!(workflow_root)
         workflow_file = Path.join(workflow_root, "WORKFLOW.md")
-        write_workflow_file!(workflow_file)
+
+        write_workflow_file!(workflow_file,
+          workspace_root: Path.join(workflow_root, "workspaces")
+        )
+
         Workflow.set_workflow_file_path(workflow_file)
         if Process.whereis(Rondo.WorkflowStore), do: Rondo.WorkflowStore.force_reload()
         stop_default_http_server()
@@ -42,6 +46,7 @@ defmodule Rondo.TestSupport do
 
         on_exit(fn ->
           stop_default_http_server()
+          Rondo.TestSupport.restore_default_orchestrator()
           Workflow.clear_workflow_file_path()
           Application.delete_env(:rondo, :server_port_override)
           Application.delete_env(:rondo, :memory_tracker_issues)
@@ -56,6 +61,13 @@ defmodule Rondo.TestSupport do
   end
 
   def write_workflow_file!(path, overrides \\ []) do
+    overrides =
+      Keyword.put_new(
+        overrides,
+        :workspace_root,
+        Path.join(Path.dirname(path), "workspaces")
+      )
+
     workflow = workflow_content(overrides)
     dir = Path.dirname(path)
     tmp_path = Path.join(dir, ".#{Path.basename(path)}.#{System.unique_integer([:positive, :monotonic])}.tmp")
@@ -73,6 +85,21 @@ defmodule Rondo.TestSupport do
 
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
+
+  @doc false
+  def restore_default_orchestrator do
+    if Process.whereis(Rondo.RunSupervisor) && is_nil(Process.whereis(Rondo.Orchestrator)) do
+      case Supervisor.restart_child(Rondo.RunSupervisor, Rondo.Orchestrator) do
+        {:ok, _pid} -> :ok
+        {:ok, _pid, _info} -> :ok
+        {:error, {:already_started, _pid}} -> :ok
+        {:error, :running} -> :ok
+        {:error, reason} -> raise "failed to restore the default orchestrator: #{inspect(reason)}"
+      end
+    else
+      :ok
+    end
+  end
 
   def stop_default_http_server do
     was_trapping = Process.flag(:trap_exit, true)

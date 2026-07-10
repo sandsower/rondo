@@ -43,14 +43,19 @@ defmodule Rondo.PatchArtifactTest do
     assert %{
              "kind" => "patch",
              "path" => "artifacts/changes.patch",
+             "recorded_at" => patch_recorded_at,
              "status" => "present"
-           } in manifest["artifacts"]
+           } = Enum.find(manifest["artifacts"], &(&1["kind"] == "patch"))
 
     assert %{
              "kind" => "patch_metadata",
              "path" => "artifacts/patch.json",
+             "recorded_at" => metadata_recorded_at,
              "status" => "present"
-           } in manifest["artifacts"]
+           } = Enum.find(manifest["artifacts"], &(&1["kind"] == "patch_metadata"))
+
+    assert {:ok, _datetime, 0} = DateTime.from_iso8601(patch_recorded_at)
+    assert {:ok, _datetime, 0} = DateTime.from_iso8601(metadata_recorded_at)
 
     # the patch applies cleanly to a fresh checkout of the recorded base ref
     eval_dir = Path.join(workspace_root, "clean-eval")
@@ -147,8 +152,11 @@ defmodule Rondo.PatchArtifactTest do
              "path" => "artifacts/changes.patch",
              "exportable" => false,
              "blocked_reason" => "patch_contains_secret",
+             "recorded_at" => recorded_at,
              "status" => "present"
-           } in manifest["artifacts"]
+           } = Enum.find(manifest["artifacts"], &(&1["kind"] == "patch"))
+
+    assert {:ok, _datetime, 0} = DateTime.from_iso8601(recorded_at)
 
     assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "patch_secret_scan"))
   end

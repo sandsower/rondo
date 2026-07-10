@@ -91,6 +91,56 @@ defmodule Rondo.RunEvidence.EventStreamTest do
     assert Enum.map(events, & &1["event"]) == ["session_started", "result"]
   end
 
+  test "repair_torn_tail preserves complete records and makes the next append readable" do
+    run_dir = tmp_dir("event-stream-torn-tail")
+    path = EventStream.path(run_dir)
+    File.mkdir_p!(Path.dirname(path))
+
+    File.write!(path, "{\"schema\":\"rondo.events/v0\",\"event\":\"complete\"}\n{\"partial\":")
+
+    assert :ok = EventStream.repair_torn_tail(run_dir)
+    assert File.read!(path) == "{\"schema\":\"rondo.events/v0\",\"event\":\"complete\"}\n"
+
+    assert :ok =
+             EventStream.append(
+               run_dir,
+               EventStream.normalize_event(%{"event" => "after_repair"}, timestamp: "t")
+             )
+
+    assert Enum.map(EventStream.read(run_dir), & &1["event"]) == ["complete", "after_repair"]
+  end
+
+  test "repair_torn_tail preserves valid final records that lack only a newline" do
+    for {name, contents, expected} <- [
+          {
+            "single",
+            ~s({"schema":"rondo.events/v0","event":"single"}),
+            ["single", "after_repair"]
+          },
+          {
+            "following",
+            ~s({"schema":"rondo.events/v0","event":"first"}\n{"schema":"rondo.events/v0","event":"second"}),
+            ["first", "second", "after_repair"]
+          }
+        ] do
+      run_dir = tmp_dir("event-stream-valid-tail-#{name}")
+      path = EventStream.path(run_dir)
+      File.mkdir_p!(Path.dirname(path))
+      File.write!(path, contents)
+
+      assert :ok = EventStream.repair_torn_tail(run_dir)
+      assert String.ends_with?(File.read!(path), "\n")
+
+      assert :ok =
+               EventStream.append(
+                 run_dir,
+                 EventStream.normalize_event(%{"event" => "after_repair"}, timestamp: "t")
+               )
+
+      assert Enum.map(EventStream.read(run_dir), & &1["event"]) == expected
+    end
+  end
+
   test "cumulative_usage_deltas diffs repeated cumulative snapshots and never goes negative" do
     events = [
       %{"usage" => %{"input_tokens" => 10, "output_tokens" => 5, "total_tokens" => 15}},

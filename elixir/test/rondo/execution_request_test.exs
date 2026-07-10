@@ -1,6 +1,7 @@
 defmodule Rondo.ExecutionRequestTest do
   use Rondo.TestSupport, async: true
 
+  alias Rondo.Beislid.ExportValidator.Error
   alias Rondo.ExecutionRequest
   alias Rondo.Linear.Issue
 
@@ -82,6 +83,439 @@ defmodule Rondo.ExecutionRequestTest do
     assert request.issue.description =~ "## Proof requirements\n\n```json\n"
     assert request.issue.description =~ "bei-131-gates"
     assert request.issue.description =~ "proof-requirement-v1"
+  end
+
+  describe "prepare_core_submission/3" do
+    test "accepts the committed producer golden and preserves exact evidence" do
+      manifest_path =
+        Path.expand(
+          "../../../.beislid/exports/ron-136-ron-137-p0-integrity/slices/ron-136-claude-adapter-parity.json",
+          __DIR__
+        )
+
+      digest = manifest_path |> File.read!() |> sha256()
+
+      assert {:ok, prepared} =
+               ExecutionRequest.prepare_core_submission(
+                 manifest_path,
+                 digest,
+                 "repo:producer-golden"
+               )
+
+      assert prepared.source_contract.schema == "approved-slice-v1"
+      assert prepared.manifest_evidence.bytes == File.read!(manifest_path)
+      assert prepared.approval_evidence.version == 2
+      assert prepared.approval_evidence.approved_at == "2026-07-03T10:06:41Z"
+      assert prepared.approval_evidence.verdict == "approve"
+    end
+
+    test "returns a canonical approved intake with the caller repo id and verified digest" do
+      export = approved_export("slice-123")
+
+      assert {:ok, prepared} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo:opaque/123"
+               )
+
+      identity = execution_identity("repo:opaque/123", export.digest)
+      expected_issue_id = "execution-request:#{identity}"
+      expected_identifier = "execution-request-#{identity}"
+
+      assert %Issue{
+               id: ^expected_issue_id,
+               identifier: ^expected_identifier,
+               title: "Execution request slice-123"
+             } = prepared.issue
+
+      assert prepared.repo_id == "repo:opaque/123"
+      assert prepared.policy_file == nil
+      assert prepared.source_contract.schema == "approved-slice-v1"
+      assert prepared.source_contract.slice_id == "slice-123"
+      assert prepared.source_contract.path == export.canonical_manifest_path
+      assert prepared.source_contract.sha256 == export.digest
+      assert prepared.manifest_evidence.source_path == export.canonical_manifest_path
+      assert prepared.manifest_evidence.sha256 == export.digest
+      assert prepared.manifest_evidence.bytes == File.read!(export.manifest_path)
+      assert prepared.approval_evidence.source_path == export.bundle_path
+      assert prepared.approval_evidence.sha256 == sha256(File.read!(export.bundle_path))
+      assert prepared.approval_evidence.bytes == File.read!(export.bundle_path)
+      assert prepared.approval_evidence.kind == "approved-slice-plan-export-v0"
+      assert prepared.approval_evidence.version == 1
+      assert prepared.approval_evidence.status == "approved"
+      assert prepared.approval_evidence.approved_at == "2026-07-09T12:00:00Z"
+      assert prepared.approval_evidence.approved_by == "Rondo Test"
+      assert prepared.approval_evidence.slice_id == "slice-123"
+      assert prepared.approval_evidence.verdict == "approve"
+
+      assert {:ok, other_repo} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo:opaque/other"
+               )
+
+      refute other_repo.issue.id == prepared.issue.id
+      refute other_repo.issue.identifier == prepared.issue.identifier
+
+      changed_export =
+        approved_export("slice-123",
+          manifest: %{prompt: "Implement the same display slice with different approved bytes."}
+        )
+
+      assert {:ok, changed_manifest} =
+               ExecutionRequest.prepare_core_submission(
+                 changed_export.manifest_path,
+                 changed_export.digest,
+                 "repo:opaque/123"
+               )
+
+      refute changed_manifest.issue.id == prepared.issue.id
+      refute changed_manifest.issue.identifier == prepared.issue.identifier
+      assert changed_manifest.issue.title == prepared.issue.title
+    end
+
+    test "rejects path-like slice ids before they become internal path components" do
+      export = approved_export("..")
+
+      assert {:error, %Error{code: :unsafe_export_path}} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-path-safety"
+               )
+    end
+
+    test "requires a lowercase SHA-256 and an exact digest match" do
+      export = approved_export("slice-digest")
+
+      assert {:error, :core_intake_invalid_expected_sha256} =
+               ExecutionRequest.prepare_core_submission(export.manifest_path, "not-a-digest", "repo-1")
+
+      wrong_digest = String.duplicate("0", 64)
+
+      assert {:error, {:core_intake_manifest_sha256_mismatch, ^wrong_digest, actual_digest}} =
+               ExecutionRequest.prepare_core_submission(export.manifest_path, wrong_digest, "repo-1")
+
+      assert actual_digest == export.digest
+    end
+
+    test "requires a bounded exact opaque repo id without normalizing it" do
+      export = approved_export("slice-repo")
+
+      for repo_id <- [
+            nil,
+            "",
+            "   ",
+            " padded",
+            "padded ",
+            "control\ncharacter",
+            "control\0character",
+            String.duplicate("r", 513)
+          ] do
+        assert {:error, :core_intake_invalid_repo_id} =
+                 ExecutionRequest.prepare_core_submission(export.manifest_path, export.digest, repo_id)
+      end
+
+      assert {:ok, prepared} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo id preserved/opaquely"
+               )
+
+      assert prepared.repo_id == "repo id preserved/opaquely"
+
+      assert {:ok, max_length} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 String.duplicate("r", 512)
+               )
+
+      assert byte_size(max_length.repo_id) == 512
+    end
+
+    test "resolves the manifest action policy relative to the canonical manifest" do
+      export =
+        approved_export("slice-policy",
+          manifest: %{
+            runner_extensions: %{
+              action_policy: %{policy_file: "policies/action-policy.json"}
+            }
+          }
+        )
+
+      policy_file = Path.join(Path.dirname(export.manifest_path), "policies/action-policy.json")
+      File.mkdir_p!(Path.dirname(policy_file))
+      File.write!(policy_file, Jason.encode!(%{"version" => "beislid.action-policy/v1"}))
+
+      assert {:ok, prepared} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-1"
+               )
+
+      assert prepared.policy_file ==
+               Path.expand(
+                 "policies/action-policy.json",
+                 Path.dirname(export.canonical_manifest_path)
+               )
+    end
+
+    test "preserves RunOnce action-policy validation errors" do
+      invalid_extensions =
+        approved_export("slice-extensions", manifest: %{runner_extensions: "invalid"})
+
+      assert {:error, {:invalid_manifest_runner_extensions, "invalid"}} =
+               ExecutionRequest.prepare_core_submission(
+                 invalid_extensions.manifest_path,
+                 invalid_extensions.digest,
+                 "repo-1"
+               )
+
+      invalid_policy_file =
+        approved_export("slice-policy-value",
+          manifest: %{runner_extensions: %{action_policy: %{policy_file: 123}}}
+        )
+
+      assert {:error, {:invalid_manifest_policy_file, 123}} =
+               ExecutionRequest.prepare_core_submission(
+                 invalid_policy_file.manifest_path,
+                 invalid_policy_file.digest,
+                 "repo-1"
+               )
+
+      missing_policy_file =
+        approved_export("slice-policy-missing",
+          manifest: %{
+            runner_extensions: %{action_policy: %{policy_file: "missing-policy.json"}}
+          }
+        )
+
+      expected_missing =
+        Path.expand("missing-policy.json", Path.dirname(missing_policy_file.canonical_manifest_path))
+
+      assert {:error, {:manifest_policy_file_unreadable, ^expected_missing}} =
+               ExecutionRequest.prepare_core_submission(
+                 missing_policy_file.manifest_path,
+                 missing_policy_file.digest,
+                 "repo-1"
+               )
+    end
+
+    test "accepts both producer slice schema literals" do
+      export = approved_export("slice-schema", manifest: %{schema: "rondo-execution-request-v1"})
+
+      assert {:ok, prepared} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-1"
+               )
+
+      assert prepared.source_contract.schema == "rondo-execution-request-v1"
+    end
+
+    test "returns a stable manifest JSON error without exposing manifest contents" do
+      export = approved_export("slice-invalid-json")
+      invalid_json = "{not json SECRET-MANIFEST-BODY"
+      File.write!(export.manifest_path, invalid_json)
+      digest = sha256(invalid_json)
+
+      assert {:error, %Error{code: :invalid_export} = validation_error} =
+               error =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 digest,
+                 "repo-1"
+               )
+
+      assert %{path: "selected-slice.json", rule: :invalid_json} in validation_error.violations
+
+      refute inspect(error) =~ "SECRET-MANIFEST-BODY"
+    end
+
+    test "rejects missing, non-regular, and symlink manifest paths" do
+      export = approved_export("slice-path")
+      missing = Path.join(Path.dirname(export.manifest_path), "missing.json")
+
+      assert {:error, %Error{code: :unsafe_export_path}} =
+               ExecutionRequest.prepare_core_submission(
+                 "relative/slices/slice-path.json",
+                 export.digest,
+                 "repo-1"
+               )
+
+      assert {:error, %Error{code: :unsafe_export_path}} =
+               ExecutionRequest.prepare_core_submission(missing, export.digest, "repo-1")
+
+      assert {:error, %Error{code: :unsafe_export_path}} =
+               ExecutionRequest.prepare_core_submission(
+                 Path.dirname(export.manifest_path),
+                 export.digest,
+                 "repo-1"
+               )
+
+      symlink = Path.join(Path.dirname(export.manifest_path), "symlink.json")
+      File.ln_s!(export.manifest_path, symlink)
+
+      assert {:error, %Error{code: :unsafe_export_path}} =
+               ExecutionRequest.prepare_core_submission(symlink, export.digest, "repo-1")
+    end
+
+    test "rejects manifest paths inconsistent with the approved export layout" do
+      export = approved_export("slice-layout", filename: "other.json")
+
+      assert {:error, %Error{code: :invalid_export}} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-1"
+               )
+    end
+
+    test "requires a regular nonsymlinked sibling bundle.json" do
+      export = approved_export("slice-bundle-path")
+      File.rm!(export.bundle_path)
+
+      assert {:error, %Error{code: :unsafe_export_path}} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-1"
+               )
+
+      real_bundle = Path.join(export.bundle_dir, "real-bundle.json")
+      File.write!(real_bundle, Jason.encode!(approved_bundle("slice-bundle-path")))
+      File.ln_s!(real_bundle, export.bundle_path)
+
+      assert {:error, %Error{code: :unsafe_export_path}} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-1"
+               )
+    end
+
+    test "requires a parseable approved-slice-plan-export-v0 bundle" do
+      export = approved_export("slice-bundle-shape")
+      File.write!(export.bundle_path, "{not json SECRET-MANIFEST-BODY")
+
+      assert {:error, %Error{code: :invalid_export} = validation_error} =
+               error =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-1"
+               )
+
+      assert %{path: "bundle.json", rule: :invalid_json} in validation_error.violations
+
+      refute inspect(error) =~ "SECRET-MANIFEST-BODY"
+
+      write_bundle(export, %{kind: "other-kind"})
+
+      assert {:error, %Error{code: :invalid_export}} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-1"
+               )
+
+      write_bundle(export, %{status: "draft"})
+
+      assert {:error, %Error{code: :unapproved_export}} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-1"
+               )
+
+      write_bundle(export, %{version: 0})
+
+      assert {:error, %Error{code: :invalid_export}} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-1"
+               )
+
+      write_bundle(export, %{approval: %{"approved_by" => " "}})
+
+      assert {:error, %Error{code: :unapproved_export}} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-1"
+               )
+    end
+
+    test "requires the slice to be listed and honors optional verdict evidence" do
+      export = approved_export("slice-verdict")
+      write_bundle(export, %{children: []})
+
+      assert {:error, %Error{code: :invalid_export}} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-1"
+               )
+
+      write_bundle(export, %{approval: %{"verdicts" => %{"slice-verdict" => "reject"}}})
+
+      assert {:ok, rejected_verdict_metadata} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-1"
+               )
+
+      assert rejected_verdict_metadata.approval_evidence.verdict == "reject"
+
+      write_bundle(export, %{approval: %{"verdicts" => %{}}})
+
+      assert {:ok, missing_selected_verdict} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-1"
+               )
+
+      assert missing_selected_verdict.approval_evidence.verdict == nil
+
+      write_bundle(export, %{
+        approval: %{
+          "approved_at" => "2026-07-09T12:00:00Z",
+          "approved_by" => "Rondo Test",
+          "verdicts" => nil
+        }
+      })
+
+      assert {:ok, nil_verdict_map} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-1"
+               )
+
+      assert nil_verdict_map.approval_evidence.verdict == nil
+
+      bundle = approved_bundle(export.slice_id)
+      bundle = put_in(bundle, ["approval"], Map.delete(bundle["approval"], "verdicts"))
+      File.write!(export.bundle_path, Jason.encode!(bundle))
+
+      assert {:ok, prepared} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo-1"
+               )
+
+      assert prepared.approval_evidence.verdict == nil
+    end
   end
 
   test "rejects invalid JSON" do
@@ -180,10 +614,121 @@ defmodule Rondo.ExecutionRequestTest do
   end
 
   defp raw_manifest_path(name, content) do
-    dir = Path.join(System.tmp_dir!(), "rondo-execution-request-#{System.unique_integer([:positive])}")
+    {:ok, canonical_tmp} = Rondo.PathSafety.canonicalize(System.tmp_dir!())
+
+    dir =
+      Path.join(
+        canonical_tmp,
+        "rondo-execution-request-#{System.unique_integer([:positive])}"
+      )
+
     File.mkdir_p!(dir)
     path = Path.join(dir, "#{name}.json")
     File.write!(path, content)
     path
   end
+
+  defp approved_export(slice_id, opts \\ []) do
+    {:ok, canonical_tmp} = Rondo.PathSafety.canonicalize(System.tmp_dir!())
+
+    bundle_dir =
+      Path.join(
+        canonical_tmp,
+        "rondo-approved-export-#{slice_id}-#{System.unique_integer([:positive])}"
+      )
+
+    slices_dir = Path.join(bundle_dir, "slices")
+    File.mkdir_p!(slices_dir)
+
+    manifest =
+      Map.merge(
+        %{
+          schema: "approved-slice-v1",
+          slice_id: slice_id,
+          prompt: "Implement #{slice_id}.",
+          repo: %{
+            url: "https://example.test/rondo.git",
+            base_ref: "main",
+            base_sha: String.duplicate("a", 40)
+          }
+        },
+        Keyword.get(opts, :manifest, %{})
+      )
+
+    manifest_json = Jason.encode!(manifest)
+    filename = Keyword.get(opts, :filename, "#{slice_id}.json")
+    manifest_path = Path.join(slices_dir, filename)
+    File.write!(manifest_path, manifest_json)
+    File.write!(Path.join(slices_dir, "#{slice_id}.md"), "# #{slice_id}\n")
+
+    bundle_path = Path.join(bundle_dir, "bundle.json")
+    File.write!(bundle_path, Jason.encode!(approved_bundle(slice_id)))
+
+    {:ok, canonical_manifest_path} = Rondo.PathSafety.canonicalize(manifest_path)
+    canonical_bundle_dir = canonical_manifest_path |> Path.dirname() |> Path.dirname()
+
+    %{
+      bundle_dir: canonical_bundle_dir,
+      bundle_path: Path.join(canonical_bundle_dir, "bundle.json"),
+      manifest_path: manifest_path,
+      canonical_manifest_path: canonical_manifest_path,
+      digest: sha256(manifest_json),
+      slice_id: slice_id
+    }
+  end
+
+  defp approved_bundle(slice_id) do
+    %{
+      "kind" => "approved-slice-plan-export-v0",
+      "version" => 1,
+      "status" => "approved",
+      "generated_from" => "test",
+      "source_work_contract" => "test",
+      "slice_plan" => %{},
+      "children" => [%{"id" => slice_id}],
+      "dependency_graph" => %{slice_id => []},
+      "proof_requirements" => [],
+      "guides_and_gates" => %{},
+      "approval" => %{
+        "approved_at" => "2026-07-09T12:00:00Z",
+        "approved_by" => "Rondo Test",
+        "verdicts" => %{slice_id => "approve"}
+      },
+      "runner_extensions" => %{},
+      "validation" => %{
+        "schema_version" => "approved-slice-plan-export-v0",
+        "rubric_version" => "afk-rubric-v1"
+      },
+      "ownership" => %{},
+      "supersedes" => nil
+    }
+  end
+
+  defp write_bundle(export, overrides) do
+    bundle =
+      Map.merge(
+        approved_bundle(export.slice_id),
+        stringify_keys(overrides),
+        fn
+          "approval", existing, update when is_map(existing) and is_map(update) ->
+            Map.merge(existing, update)
+
+          _key, _existing, update ->
+            update
+        end
+      )
+
+    File.write!(export.bundle_path, Jason.encode!(bundle))
+  end
+
+  defp stringify_keys(map) do
+    Map.new(map, fn {key, value} -> {to_string(key), value} end)
+  end
+
+  defp sha256(contents) do
+    :crypto.hash(:sha256, contents)
+    |> Base.encode16(case: :lower)
+  end
+
+  defp execution_identity(repo_id, digest), do: sha256(repo_id <> <<0>> <> digest)
 end

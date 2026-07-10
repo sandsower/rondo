@@ -1,6 +1,6 @@
 # ADR 0001: Transport for the rondo.core/v1 run event feed
 
-Status: accepted (RON-166)
+Status: amended by RON-149
 Date: 2026-07-06
 
 ## Context
@@ -31,7 +31,7 @@ We must pick a transport for the first implementation. Constraints and context:
 
 ## Decision
 
-**Local BEAM API as the core, a CLI as the transport.**
+**Local BEAM API as the core, with CLI and loopback HTTP transports.**
 
 - `Rondo.Core.EventFeed` is the reusable local BEAM API. It builds the contract
   event stream from the durable run ledger (manifest + the `rondo.events/v0`
@@ -40,16 +40,20 @@ We must pick a transport for the first implementation. Constraints and context:
 - `mix rondo.run_events` is the CLI transport over that API. It takes only
   contract concepts as flags (`--repo-id`, `--run-id`, `--service-id`,
   `--cursor`) and prints the `run.events`/`run.status` JSON response on stdout.
+- The RON-149 Core intake bridge adds loopback-only HTTP submission, status,
+  and event routes over the same BEAM API.
+  The HTTP surface rejects non-loopback peers before parsing request bodies and
+  keeps evidence identifiers opaque.
 
 A minimal external consumer (`elixir/examples/run_events_tail.py`) tails a run
 end to end using only the CLI and contract concepts.
 
 ## Rationale
 
-- **Simplest thing that supports cursor replay for a local herd.** Both crust
-  and standalone rondo already shell out to rondo (escript / mix tasks); a CLI
-  needs no listener, port, auth, or service discovery. Re-invoking the CLI with
-  the previous `next_event_cursor` gives replay and tailing for free.
+- **One projection, two local transports.** The CLI remains the simplest
+  standalone transport, while the existing optional Rondo HTTP service gives
+  Crust a durable operator boundary without invoking a Rondo subprocess.
+  Both transports reuse the same ledger-backed projection and cursor semantics.
 - **In-process coordinators keep the BEAM API.** A coordinator already on the
   BEAM (or a future HTTP/file-tail adapter) can call `Rondo.Core.EventFeed`
   directly; the CLI is a thin shell over it, so no logic is trapped in the
@@ -62,9 +66,10 @@ end to end using only the CLI and contract concepts.
 
 ## Alternatives considered
 
-- **HTTP endpoint.** Rejected for now: adds a listener, port management, and auth
-  surface with no remote requirement. The BEAM API leaves this open as a future
-  additive adapter without contract changes.
+- **Remote HTTP endpoint.** Rejected: the Core surface has no remote trust or
+  authentication contract.
+  RON-149 accepts only the existing optional listener with strict loopback peer
+  enforcement.
 - **File-tail (consumer reads the NDJSON directly).** Rejected: it would force
   consumers to understand ledger paths and raw `rondo.events/v0` shapes - exactly
   the coupling RON-129 removed. The contract also forbids inferring ledger/
@@ -93,8 +98,9 @@ deterministic.
 - `rondo.run.evidence_recorded` <- the manifest artifact catalog (RON-128
   `Rondo.RunEvidence.ArtifactCatalog`) unioned with artifact-linked events from
   the `rondo.events/v0` stream (RON-129 seam), deduped by `uri`. Evidence is
-  exposed as run-scoped `rondo-run://<run_id>/<relative-path>` pointers (absolute
-  paths degrade to `file://`), so consumers never infer ledger/workspace layout.
+  exposed only as run-scoped `rondo-run://` pointers. Unsafe, absolute, or
+  oversized source paths degrade to bounded opaque hashes, so consumers never
+  infer ledger/workspace layout.
 - `rondo.service.status_changed` <- a run-scoped `running` marker at run start.
   Full service lifecycle is `service.status` territory, out of `run.events`
   scope; this keeps at least one event of each contract family available.

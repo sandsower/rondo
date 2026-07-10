@@ -205,7 +205,15 @@ defmodule Rondo.Workspace do
   end
 
   defp safe_identifier(identifier) do
-    String.replace(identifier || "issue", ~r/[^a-zA-Z0-9._-]/, "_")
+    raw_identifier = to_string(identifier || "issue")
+    sanitized = String.replace(raw_identifier, ~r/[^a-zA-Z0-9._-]/, "_")
+
+    if sanitized in ["", ".", ".."] do
+      digest = :crypto.hash(:sha256, raw_identifier) |> Base.encode16(case: :lower)
+      "issue-#{digest}"
+    else
+      sanitized
+    end
   end
 
   defp clean_tmp_artifacts(workspace, issue_context, opts) do

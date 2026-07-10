@@ -1,4 +1,6 @@
 {
+  "surface": "rondo.core/v1",
+  "repo_id": "sample-repo",
   "run_id": "RUN-sample-0001",
   "status": "completed",
   "event_cursor": "rondo.core/v1:0",

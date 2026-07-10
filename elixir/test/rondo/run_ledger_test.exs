@@ -54,6 +54,46 @@ defmodule Rondo.RunLedgerTest do
     assert ledger.next_seq == 2
   end
 
+  test "create_run keeps path-like identifiers inside the run ledger root" do
+    workspace_root = tmp_dir("ledger-path-like-identifier")
+    issue = %{issue_fixture() | id: "issue-path-like", identifier: ".."}
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "safe0001"
+             )
+
+    run_root = Path.join(workspace_root, ".rondo_runs")
+    assert strict_descendant?(ledger.run_dir, run_root)
+    assert strict_descendant?(ledger.manifest_path, run_root)
+    refute Path.basename(Path.dirname(ledger.run_dir)) in ["", ".", ".."]
+  end
+
+  test "create_run rejects a symlinked identifier that escapes the run ledger root" do
+    workspace_root = tmp_dir("ledger-symlink-escape")
+    run_root = Path.join(workspace_root, ".rondo_runs")
+    outside_root = Path.join(workspace_root, "outside")
+    escaped_identifier = Path.join(run_root, "MT-ESCAPE")
+    File.mkdir_p!(run_root)
+    File.mkdir_p!(outside_root)
+    File.ln_s!(outside_root, escaped_identifier)
+
+    issue = %{issue_fixture() | id: "issue-escape", identifier: "MT-ESCAPE"}
+
+    assert {:error, {:run_dir_outside_root, run_dir, ^run_root}} =
+             RunLedger.create_run(issue,
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "safe0002"
+             )
+
+    {:ok, canonical_outside_root} = Rondo.PathSafety.canonicalize(outside_root)
+    assert String.starts_with?(run_dir, canonical_outside_root <> "/")
+    assert Path.wildcard(Path.join(outside_root, "**/manifest.json")) == []
+  end
+
   test "record_model_routing_decision preserves fallback metadata in the manifest and checkpoint" do
     workspace_root = tmp_dir("ledger-model-routing-fallback")
     issue = issue_fixture()
@@ -217,6 +257,219 @@ defmodule Rondo.RunLedgerTest do
 
     invalid_source_manifest = decode_json!(invalid_source_ledger.manifest_path)
     refute Map.has_key?(invalid_source_manifest, "source_contract")
+  end
+
+  test "execution-request admission freezes exact slice and approval bytes before acceptance" do
+    workspace_root = tmp_dir("ledger-freeze-execution-request")
+    source_path = Path.join(workspace_root, "approved-slice.json")
+    source_bytes = ~s({"schema":"approved-slice-v1","slice_id":"slice-123"})
+    File.write!(source_path, source_bytes)
+    source_sha256 = sha256(source_bytes)
+    bundle_path = Path.join(workspace_root, "bundle.json")
+    bundle_bytes = ~s({"kind":"approved-slice-plan-export-v0","status":"approved","approval":{"verdicts":{"slice-123":"approve"}}})
+    File.write!(bundle_path, bundle_bytes)
+    bundle_sha256 = sha256(bundle_bytes)
+
+    source_contract = %{
+      schema: "approved-slice-v1",
+      slice_id: "slice-123",
+      path: source_path,
+      sha256: source_sha256
+    }
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "f2ee2e00",
+               run_source: "execution_request",
+               source_contract: source_contract,
+               execution_request_admission: %{
+                 repo_id: "repo-1",
+                 manifest_sha256: source_sha256
+               }
+             )
+
+    assert decode_json!(ledger.manifest_path)["admission"]["phase"] == "admitting"
+
+    evidence = %{
+      source_contract: source_contract,
+      manifest_evidence: %{
+        source_path: source_path,
+        sha256: source_sha256,
+        bytes: source_bytes
+      },
+      approval_evidence: %{
+        source_path: bundle_path,
+        sha256: bundle_sha256,
+        bytes: bundle_bytes,
+        kind: "approved-slice-plan-export-v0",
+        version: 1,
+        status: "approved",
+        approved_at: "2026-07-09T12:00:00Z",
+        approved_by: "Rondo Test",
+        slice_id: "slice-123",
+        verdict: "approve"
+      }
+    }
+
+    assert {:ok, frozen_ledger, frozen_contract} =
+             RunLedger.freeze_execution_request(ledger, evidence)
+
+    frozen_path = Path.join(ledger.run_dir, "artifacts/execution-request.json")
+    frozen_bundle_path = Path.join(ledger.run_dir, "artifacts/approval-bundle.json")
+    assert frozen_contract.path == frozen_path
+    assert frozen_contract.source_path == source_path
+    assert frozen_contract.sha256 == source_sha256
+    assert File.read!(frozen_path) == source_bytes
+    assert File.read!(frozen_bundle_path) == bundle_bytes
+
+    manifest = decode_json!(frozen_ledger.manifest_path)
+    assert manifest["admission"]["phase"] == "admitting"
+    assert manifest["source_contract"]["path"] == frozen_path
+    assert manifest["source_contract"]["source_path"] == source_path
+    assert manifest["source_contract"]["sha256"] == source_sha256
+
+    assert manifest["approval_evidence"] == %{
+             "kind" => "approved-slice-plan-export-v0",
+             "path" => frozen_bundle_path,
+             "sha256" => bundle_sha256,
+             "version" => 1,
+             "approved_at" => "2026-07-09T12:00:00Z",
+             "approved_by" => "Rondo Test",
+             "slice_id" => "slice-123",
+             "source_path" => bundle_path,
+             "status" => "approved",
+             "verdict" => "approve"
+           }
+
+    assert %{
+             "kind" => "execution_request",
+             "path" => "artifacts/execution-request.json",
+             "sha256" => ^source_sha256,
+             "status" => "present",
+             "recorded_at" => execution_recorded_at
+           } = Enum.find(manifest["artifacts"], &(&1["kind"] == "execution_request"))
+
+    assert %{
+             "kind" => "approval_bundle",
+             "path" => "artifacts/approval-bundle.json",
+             "sha256" => ^bundle_sha256,
+             "status" => "present",
+             "recorded_at" => approval_recorded_at
+           } = Enum.find(manifest["artifacts"], &(&1["kind"] == "approval_bundle"))
+
+    assert {:ok, _, 0} = DateTime.from_iso8601(execution_recorded_at)
+    assert {:ok, _, 0} = DateTime.from_iso8601(approval_recorded_at)
+
+    assert [%{"kind" => "execution_request_frozen"}] = manifest["checkpoints"]
+
+    assert {:ok, accepted_ledger} =
+             RunLedger.accept_execution_request(frozen_ledger, %{
+               repo_id: "repo-1",
+               manifest_sha256: source_sha256
+             })
+
+    accepted = decode_json!(accepted_ledger.manifest_path)
+    assert accepted["admission"]["phase"] == "accepted"
+    assert accepted["status"] == "running"
+    assert Enum.any?(accepted["checkpoints"], &(&1["kind"] == "execution_request_accepted"))
+  end
+
+  test "freeze_execution_request rejects slice or approval bytes changed after preparation" do
+    workspace_root = tmp_dir("ledger-freeze-execution-request-changed")
+    source_path = Path.join(workspace_root, "approved-slice.json")
+    approved_bytes = ~s({"schema":"approved-slice-v1","slice_id":"slice-123"})
+    File.write!(source_path, approved_bytes)
+
+    source_contract = %{
+      schema: "approved-slice-v1",
+      slice_id: "slice-123",
+      path: source_path,
+      sha256: sha256(approved_bytes)
+    }
+
+    bundle_path = Path.join(workspace_root, "bundle.json")
+    approved_bundle = ~s({"kind":"approved-slice-plan-export-v0","status":"approved"})
+    File.write!(bundle_path, approved_bundle)
+
+    evidence = %{
+      source_contract: source_contract,
+      manifest_evidence: %{
+        source_path: source_path,
+        sha256: sha256(approved_bytes),
+        bytes: approved_bytes
+      },
+      approval_evidence: %{
+        source_path: bundle_path,
+        sha256: sha256(approved_bundle),
+        bytes: approved_bundle,
+        kind: "approved-slice-plan-export-v0",
+        version: 1,
+        status: "approved",
+        approved_at: "2026-07-09T12:00:00Z",
+        approved_by: "Rondo Test",
+        slice_id: "slice-123",
+        verdict: "approve"
+      }
+    }
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "f2ee2e01",
+               source_contract: source_contract
+             )
+
+    File.write!(source_path, ~s({"schema":"approved-slice-v1","slice_id":"mutated"}))
+
+    assert {:error, :execution_request_source_changed} =
+             RunLedger.freeze_execution_request(ledger, evidence)
+
+    refute File.exists?(Path.join(ledger.run_dir, "artifacts/execution-request.json"))
+    manifest = decode_json!(ledger.manifest_path)
+    assert manifest["source_contract"]["path"] == source_path
+    assert manifest["checkpoints"] == []
+
+    File.write!(source_path, approved_bytes)
+    File.write!(bundle_path, ~s({"kind":"approved-slice-plan-export-v0","status":"revoked"}))
+
+    assert {:error, :approval_bundle_source_changed} =
+             RunLedger.freeze_execution_request(ledger, evidence)
+
+    refute File.exists?(Path.join(ledger.run_dir, "artifacts/approval-bundle.json"))
+  end
+
+  test "rejected execution-request attempts are terminal and remain retryable" do
+    workspace_root = tmp_dir("ledger-execution-request-rejected")
+    digest = String.duplicate("a", 64)
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "f2ee2e02",
+               run_source: "execution_request",
+               repo_id: "repo-1",
+               source_contract: %{sha256: digest},
+               execution_request_admission: %{
+                 repo_id: "repo-1",
+                 manifest_sha256: digest
+               }
+             )
+
+    assert {:ok, rejected} =
+             RunLedger.reject_execution_request(ledger, "spawn_failed", %{
+               detail: "worker unavailable"
+             })
+
+    manifest = decode_json!(rejected.manifest_path)
+    assert manifest["admission"]["phase"] == "rejected"
+    assert manifest["admission"]["reason"] == "spawn_failed"
+    assert manifest["status"] == "failed"
+    assert manifest["failure_classification"] == "admission_rejected"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "execution_request_rejected"))
   end
 
   test "create_run generates unique run IDs across attempts" do
@@ -1224,29 +1477,54 @@ defmodule Rondo.RunLedgerTest do
 
     manifest = decode_json!(ledger.manifest_path)
 
-    assert %{
-             "kind" => "present_thing",
-             "path" => "artifacts/exists.txt",
-             "status" => "present"
-           } in manifest["artifacts"]
+    for {kind, status} <- [
+          {"present_thing", "present"},
+          {"missing_thing", "missing"},
+          {"skipped_thing", "skipped"},
+          {"failed_thing", "failed"}
+        ] do
+      artifact = Enum.find(manifest["artifacts"], &(&1["kind"] == kind))
+      assert artifact["path"] in ["artifacts/exists.txt", "artifacts/nope.txt"]
+      assert artifact["status"] == status
+      assert {:ok, _, 0} = DateTime.from_iso8601(artifact["recorded_at"])
+    end
+  end
 
-    assert %{
-             "kind" => "missing_thing",
-             "path" => "artifacts/nope.txt",
-             "status" => "missing"
-           } in manifest["artifacts"]
+  test "artifact recorded_at is assigned once and preserved through active-to-terminal upserts" do
+    workspace_root = tmp_dir("ledger-artifact-recorded-at")
 
-    assert %{
-             "kind" => "skipped_thing",
-             "path" => "artifacts/nope.txt",
-             "status" => "skipped"
-           } in manifest["artifacts"]
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "record01"
+             )
 
-    assert %{
-             "kind" => "failed_thing",
-             "path" => "artifacts/nope.txt",
-             "status" => "failed"
-           } in manifest["artifacts"]
+    initial_manifest = decode_json!(ledger.manifest_path)
+    [agent_events] = initial_manifest["artifacts"]
+    assert agent_events["recorded_at"] == DateTime.to_iso8601(@now)
+
+    path = "artifacts/result.json"
+    File.write!(Path.join(ledger.run_dir, path), "{}")
+    assert {:ok, ledger} = RunLedger.link_artifacts(ledger, [%{kind: "result", path: path}])
+    active = decode_json!(ledger.manifest_path)
+    recorded_at = Enum.find(active["artifacts"], &(&1["kind"] == "result"))["recorded_at"]
+
+    assert {:ok, ledger} =
+             RunLedger.link_artifacts(ledger, [
+               %{
+                 kind: "result",
+                 path: path,
+                 status: "present",
+                 recorded_at: "2099-01-01T00:00:00Z"
+               }
+             ])
+
+    assert {:ok, ledger} = RunLedger.complete_run(ledger, :terminated, %{reason: "test"})
+    terminal = decode_json!(ledger.manifest_path)
+    result = Enum.find(terminal["artifacts"], &(&1["kind"] == "result"))
+    assert result["recorded_at"] == recorded_at
+    assert Enum.find(terminal["artifacts"], &(&1["kind"] == "agent_events"))["recorded_at"] == DateTime.to_iso8601(@now)
   end
 
   test "manifest checkpoint index is reconciled against checkpoint files on disk" do
@@ -1296,6 +1574,99 @@ defmodule Rondo.RunLedgerTest do
       |> Enum.sort()
 
     assert index_files == disk_files
+  end
+
+  test "a corrupted Core event index refuses ledger writes without changing durable state" do
+    workspace_root = tmp_dir("ledger-corrupt-core-index")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "badindex"
+             )
+
+    manifest = decode_json!(ledger.manifest_path)
+
+    corrupt_manifest =
+      update_in(manifest, ["core_event_feed_v1", "events", Access.at(0)], fn descriptor ->
+        Map.put(descriptor, "type", "unsupported")
+      end)
+
+    corrupt_bytes = Jason.encode!(corrupt_manifest)
+    File.write!(ledger.manifest_path, corrupt_bytes)
+
+    event_path = Path.join(ledger.run_dir, "artifacts/agent-events.ndjson")
+    event_before = if File.exists?(event_path), do: File.read!(event_path), else: :missing
+    checkpoint_files_before = Path.wildcard(Path.join(ledger.run_dir, "checkpoints/*.json"))
+
+    assert {:error, {:core_event_index_corrupt, _reason}} =
+             RunLedger.write_checkpoint(ledger, :dispatch, %{attempt: 1}, timestamp: @now)
+
+    assert {:error, {:core_event_index_corrupt, _reason}} =
+             RunLedger.append_agent_event(ledger, %{event: :session_started}, timestamp: @now)
+
+    assert File.read!(ledger.manifest_path) == corrupt_bytes
+    assert Path.wildcard(Path.join(ledger.run_dir, "checkpoints/*.json")) == checkpoint_files_before
+    assert if(File.exists?(event_path), do: File.read!(event_path), else: :missing) == event_before
+  end
+
+  test "a missing terminal checkpoint alias fails closed before ledger mutation" do
+    workspace_root = tmp_dir("ledger-corrupt-terminal-alias")
+
+    assert {:ok, ledger} =
+             RunLedger.create_run(issue_fixture(),
+               workspace_root: workspace_root,
+               now: @now,
+               random_suffix: "badalias"
+             )
+
+    assert {:ok, ledger} =
+             RunLedger.complete_run(ledger, "completed", %{summary: "done"}, timestamp: @now)
+
+    valid_manifest = decode_json!(ledger.manifest_path)
+
+    terminal_index =
+      Enum.find_index(valid_manifest["core_event_feed_v1"]["events"], fn descriptor ->
+        descriptor["type"] == "run_status" and
+          descriptor["status"] == "completed" and
+          String.starts_with?(descriptor["identity"], "checkpoint:")
+      end)
+
+    assert is_integer(terminal_index)
+
+    terminal_descriptor =
+      get_in(valid_manifest, ["core_event_feed_v1", "events", Access.at(terminal_index)])
+
+    assert terminal_descriptor["aliases"] == ["run:terminal:completed"]
+
+    for corrupt_descriptor <- [
+          Map.delete(terminal_descriptor, "aliases"),
+          Map.put(terminal_descriptor, "aliases", [])
+        ] do
+      corrupt_manifest =
+        put_in(
+          valid_manifest,
+          ["core_event_feed_v1", "events", Access.at(terminal_index)],
+          corrupt_descriptor
+        )
+
+      corrupt_bytes = Jason.encode!(corrupt_manifest)
+      File.write!(ledger.manifest_path, corrupt_bytes)
+
+      event_path = Path.join(ledger.run_dir, "artifacts/agent-events.ndjson")
+      event_before = if File.exists?(event_path), do: File.read!(event_path), else: :missing
+
+      assert {:error, {:core_event_index_corrupt, {:invalid_descriptor, ^terminal_index, :invalid_aliases}}} =
+               RunLedger.append_agent_event(
+                 ledger,
+                 %{event: :result, payload: "must-not-land"},
+                 timestamp: @now
+               )
+
+      assert File.read!(ledger.manifest_path) == corrupt_bytes
+      assert if(File.exists?(event_path), do: File.read!(event_path), else: :missing) == event_before
+    end
   end
 
   test "reconciled_manifest deduplicates orphaned checkpoints that share seq numbers with the index" do
@@ -1421,8 +1792,11 @@ defmodule Rondo.RunLedgerTest do
     assert %{
              "kind" => "final_report",
              "path" => "artifacts/final-report.json",
-             "status" => "present"
-           } in manifest["artifacts"]
+             "status" => "present",
+             "recorded_at" => recorded_at
+           } = Enum.find(manifest["artifacts"], &(&1["kind"] == "final_report"))
+
+    assert {:ok, _, 0} = DateTime.from_iso8601(recorded_at)
 
     assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "final_report_validated"))
   end
@@ -1793,8 +2167,11 @@ defmodule Rondo.RunLedgerTest do
     assert %{
              "kind" => "resolved_thing",
              "path" => "artifacts/present.txt",
-             "status" => "present"
-           } in updated_manifest["artifacts"]
+             "status" => "present",
+             "recorded_at" => recorded_at
+           } = List.first(updated_manifest["artifacts"])
+
+    assert {:ok, _, 0} = DateTime.from_iso8601(recorded_at)
   end
 
   test "agent metadata update replaces non-map agent in on-disk manifest" do
@@ -1973,8 +2350,22 @@ defmodule Rondo.RunLedgerTest do
 
     manifest = decode_json!(ledger.manifest_path)
 
-    assert %{"kind" => "archive", "path" => archive_relative_path, "status" => "present"} in manifest["artifacts"]
-    assert %{"kind" => "delivery_artifact", "path" => "artifacts/delivery-artifact.json", "status" => "present"} in manifest["artifacts"]
+    assert %{
+             "kind" => "archive",
+             "path" => ^archive_relative_path,
+             "status" => "present",
+             "recorded_at" => archive_recorded_at
+           } = Enum.find(manifest["artifacts"], &(&1["kind"] == "archive"))
+
+    assert %{
+             "kind" => "delivery_artifact",
+             "path" => "artifacts/delivery-artifact.json",
+             "status" => "present",
+             "recorded_at" => delivery_recorded_at
+           } = Enum.find(manifest["artifacts"], &(&1["kind"] == "delivery_artifact"))
+
+    assert {:ok, _, 0} = DateTime.from_iso8601(archive_recorded_at)
+    assert {:ok, _, 0} = DateTime.from_iso8601(delivery_recorded_at)
 
     delivery_artifact = decode_json!(Path.join(ledger.run_dir, "artifacts/delivery-artifact.json"))
     assert delivery_artifact["outputs"]["archive"] == archive_relative_path
@@ -2024,6 +2415,17 @@ defmodule Rondo.RunLedgerTest do
   end
 
   defp decode_json!(path), do: path |> File.read!() |> Jason.decode!()
+
+  defp sha256(contents) do
+    :crypto.hash(:sha256, contents)
+    |> Base.encode16(case: :lower)
+  end
+
+  defp strict_descendant?(path, root) do
+    {:ok, canonical_path} = Rondo.PathSafety.canonicalize(path)
+    {:ok, canonical_root} = Rondo.PathSafety.canonicalize(root)
+    canonical_path != canonical_root and String.starts_with?(canonical_path, canonical_root <> "/")
+  end
 
   defp git!(cd, args) do
     {output, 0} = System.cmd("git", args, cd: cd, stderr_to_stdout: true)
