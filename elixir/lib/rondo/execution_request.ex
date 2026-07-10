@@ -3,14 +3,46 @@ defmodule Rondo.ExecutionRequest do
   Loader for local approved-slice / execution-request manifests.
   """
 
+  alias Rondo.Beislid.ExportValidator
   alias Rondo.Linear.Issue
 
   @schemas ["approved-slice-v1", "rondo-execution-request-v1"]
+  @max_repo_id_bytes 512
+  @control_character_pattern ~r/[\x00-\x1F\x7F-\x9F]/u
+  @sha256_pattern ~r/\A[0-9a-f]{64}\z/
   @metadata_keys ~w(source_ticket parent_contract repo boundaries dependencies proof_requirements allowed_actions process_provider memory_provider output_expectations runner_extensions model_routing model_routing_hints)
 
   @type t :: %{
           issue: Issue.t(),
           source_contract: map()
+        }
+
+  @type prepared_submission :: %{
+          issue: Issue.t(),
+          source_contract: map(),
+          repo_id: String.t(),
+          policy_file: Path.t() | nil,
+          manifest_evidence: evidence(),
+          approval_evidence: approval_evidence()
+        }
+
+  @type evidence :: %{
+          source_path: Path.t(),
+          sha256: String.t(),
+          bytes: binary()
+        }
+
+  @type approval_evidence :: %{
+          source_path: Path.t(),
+          sha256: String.t(),
+          bytes: binary(),
+          kind: String.t(),
+          version: pos_integer(),
+          status: String.t(),
+          approved_at: String.t(),
+          approved_by: String.t(),
+          slice_id: String.t(),
+          verdict: term()
         }
 
   @spec load(Path.t()) :: {:ok, t()} | {:error, term()}
@@ -29,12 +61,144 @@ defmodule Rondo.ExecutionRequest do
 
   def load(path), do: {:error, {:invalid_execution_request_path, path}}
 
+  @spec prepare_core_submission(Path.t(), String.t(), String.t()) ::
+          {:ok, prepared_submission()} | {:error, term()}
+  def prepare_core_submission(path, expected_sha256, repo_id) do
+    with :ok <- validate_expected_sha256(expected_sha256),
+         :ok <- validate_repo_id(repo_id),
+         {:ok, export} <- validate_export(path),
+         digest = export.manifest.sha256,
+         :ok <- verify_sha256(expected_sha256, digest),
+         {:ok, payload} <- decode_validated_manifest(export.manifest),
+         {:ok, request} <-
+           normalize(
+             payload,
+             export.manifest.source_path,
+             export.manifest.bytes
+           ),
+         {:ok, policy_file} <- resolve_manifest_policy_file(request.source_contract) do
+      identity = execution_identity(repo_id, digest)
+
+      issue = %{
+        request.issue
+        | id: "execution-request:#{identity}",
+          identifier: "execution-request-#{identity}"
+      }
+
+      {:ok,
+       %{
+         issue: issue,
+         source_contract: request.source_contract,
+         repo_id: repo_id,
+         policy_file: policy_file,
+         manifest_evidence: %{
+           source_path: export.manifest.source_path,
+           sha256: digest,
+           bytes: export.manifest.bytes
+         },
+         approval_evidence: %{
+           source_path: export.bundle.source_path,
+           sha256: export.bundle.sha256,
+           bytes: export.bundle.bytes,
+           kind: export.approval.bundle_kind,
+           version: export.approval.bundle_version,
+           status: export.approval.bundle_status,
+           approved_at: export.approval.approved_at,
+           approved_by: export.approval.approved_by,
+           slice_id: export.approval.selected_slice,
+           verdict: export.approval.verdict
+         }
+       }}
+    end
+  end
+
   defp read_manifest(path) do
     case File.read(path) do
       {:ok, json} -> {:ok, json}
       {:error, reason} -> {:error, {:execution_request_read_failed, path, reason}}
     end
   end
+
+  defp validate_expected_sha256(expected_sha256)
+       when is_binary(expected_sha256) do
+    if Regex.match?(@sha256_pattern, expected_sha256) do
+      :ok
+    else
+      {:error, :core_intake_invalid_expected_sha256}
+    end
+  end
+
+  defp validate_expected_sha256(_expected_sha256),
+    do: {:error, :core_intake_invalid_expected_sha256}
+
+  defp validate_repo_id(repo_id) when is_binary(repo_id) do
+    if repo_id == "" or String.trim(repo_id) != repo_id or
+         byte_size(repo_id) > @max_repo_id_bytes or
+         Regex.match?(@control_character_pattern, repo_id) do
+      {:error, :core_intake_invalid_repo_id}
+    else
+      :ok
+    end
+  end
+
+  defp validate_repo_id(_repo_id), do: {:error, :core_intake_invalid_repo_id}
+
+  defp validate_export(path) when is_binary(path),
+    do: ExportValidator.validate(path)
+
+  defp validate_export(_path), do: {:error, :core_intake_invalid_manifest_path}
+
+  defp verify_sha256(expected_sha256, actual_sha256) do
+    if expected_sha256 == actual_sha256 do
+      :ok
+    else
+      {:error, {:core_intake_manifest_sha256_mismatch, expected_sha256, actual_sha256}}
+    end
+  end
+
+  defp execution_identity(repo_id, digest), do: sha256(repo_id <> <<0>> <> digest)
+
+  defp decode_validated_manifest(%{bytes: bytes}) do
+    case Jason.decode(bytes) do
+      {:ok, payload} when is_map(payload) -> {:ok, payload}
+      _other -> {:error, :core_intake_validated_manifest_invalid}
+    end
+  end
+
+  # Keep this resolution behavior aligned with Rondo.RunOnce: policy paths are
+  # relative to the manifest, nil is allowed, and unreadable files fail closed.
+  defp resolve_manifest_policy_file(source_contract) do
+    case Map.get(source_contract, :runner_extensions) do
+      nil -> {:ok, nil}
+      extensions when is_map(extensions) -> resolve_manifest_action_policy(extensions, source_contract)
+      other -> {:error, {:invalid_manifest_runner_extensions, other}}
+    end
+  end
+
+  defp resolve_manifest_action_policy(extensions, source_contract) do
+    case Map.get(extensions, "action_policy") do
+      nil -> {:ok, nil}
+      action_policy when is_map(action_policy) -> resolve_manifest_policy_path(Map.get(action_policy, "policy_file"), source_contract)
+      other -> {:error, {:invalid_manifest_runner_extensions, other}}
+    end
+  end
+
+  defp resolve_manifest_policy_path(nil, _source_contract), do: {:ok, nil}
+
+  defp resolve_manifest_policy_path(value, source_contract) when is_binary(value) do
+    resolved = Path.expand(value, Path.dirname(source_contract.path))
+
+    case File.stat(resolved) do
+      {:ok, %File.Stat{type: :regular, access: access}} when access in [:read, :read_write] ->
+        {:ok, resolved}
+
+      _other ->
+        {:error, {:manifest_policy_file_unreadable, resolved}}
+    end
+  end
+
+  defp resolve_manifest_policy_path(value, _source_contract),
+    do: {:error, {:invalid_manifest_policy_file, value}}
 
   defp normalize(payload, path, json) when is_map(payload) do
     with {:ok, schema} <- required_string(payload, "schema"),

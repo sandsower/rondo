@@ -14,12 +14,13 @@ defmodule Mix.Tasks.Rondo.RunEventsTaskTest do
     :ok
   end
 
-  defp build_run(root) do
+  defp build_run(root, repo_id) do
     issue = %{id: "i1", identifier: "RON-TASK", title: "task", state: "open"}
 
     {:ok, ledger} =
       RunLedger.create_run(issue,
         workspace_root: root,
+        repo_id: repo_id,
         now: @started,
         random_suffix: "taskcafe",
         started_at: DateTime.to_iso8601(@started)
@@ -32,7 +33,7 @@ defmodule Mix.Tasks.Rondo.RunEventsTaskTest do
 
   test "prints the run.events JSON response" do
     root = tmp_dir("run-events-task")
-    ledger = build_run(root)
+    ledger = build_run(root, "repo-x")
 
     output =
       capture_io(fn ->
@@ -47,7 +48,7 @@ defmodule Mix.Tasks.Rondo.RunEventsTaskTest do
 
   test "prints the run.status JSON response with --status" do
     root = tmp_dir("run-status-task")
-    ledger = build_run(root)
+    ledger = build_run(root, "repo")
 
     output =
       capture_io(fn ->
@@ -59,16 +60,44 @@ defmodule Mix.Tasks.Rondo.RunEventsTaskTest do
     assert decoded["event_cursor"] == "rondo.core/v1:0"
   end
 
-  test "resolves a run directly via --run-dir" do
-    root = tmp_dir("run-events-task-dir")
-    ledger = build_run(root)
+  test "requires repo_id and run_id before lookup" do
+    assert run_error(["--run-id", "run", "--workspace-root", "/must-not-be-read"]) ==
+             ":missing_repo_id"
 
+    assert run_error(["--repo-id", "repo", "--workspace-root", "/must-not-be-read"]) ==
+             ":missing_run_id"
+  end
+
+  test "rejects the retired --run-dir option before lookup" do
+    assert run_error([
+             "--repo-id",
+             "repo",
+             "--run-id",
+             "run",
+             "--run-dir",
+             "/must-not-be-read"
+           ]) == ":invalid_options"
+  end
+
+  test "rejects unknown options before lookup" do
+    assert run_error([
+             "--repo-id",
+             "repo",
+             "--run-id",
+             "run",
+             "--workspace-root",
+             "/must-not-be-read",
+             "--future-option"
+           ]) == ":invalid_options"
+  end
+
+  defp run_error(argv) do
     output =
-      capture_io(fn ->
-        assert :ok = RunEvents.run(["--repo-id", "repo", "--run-id", ledger.run_id, "--run-dir", ledger.run_dir])
+      capture_io(:stderr, fn ->
+        assert catch_exit(RunEvents.run(argv)) == {:shutdown, 1}
       end)
 
-    assert Jason.decode!(output)["events"] != []
+    output |> Jason.decode!() |> Map.fetch!("error")
   end
 
   defp tmp_dir(name) do

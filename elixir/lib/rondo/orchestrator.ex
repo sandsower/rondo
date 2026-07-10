@@ -9,13 +9,18 @@ defmodule Rondo.Orchestrator do
 
   alias Rondo.Agent.Adapter, as: AgentAdapter
   alias Rondo.AgentRunner
+  alias Rondo.Beislid.ExportValidator
   alias Rondo.Config
+  alias Rondo.Core.{EventFeed, RunLocator}
   alias Rondo.Escalation
+  alias Rondo.ExecutionRequest
   alias Rondo.Interrupt
   alias Rondo.Linear.Issue
+  alias Rondo.PathSafety
   alias Rondo.ReleaseLoop
   alias Rondo.RunDecision
   alias Rondo.RunLedger
+  alias Rondo.RunRecovery
   alias Rondo.SideEffectPolicy
   alias Rondo.StatusDashboard
   alias Rondo.Tracker
@@ -55,6 +60,12 @@ defmodule Rondo.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :execution_request_runner,
+      :execution_request_task_starter,
+      :execution_request_after_prepare,
+      :execution_request_after_accept,
+      :task_supervisor,
+      :run_recovery,
       running: %{},
       completed: MapSet.new(),
       claimed: MapSet.new(),
@@ -74,52 +85,99 @@ defmodule Rondo.Orchestrator do
   end
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
     now_ms = System.monotonic_time(:millisecond)
+    task_supervisor = Keyword.get(opts, :task_supervisor, Rondo.TaskSupervisor)
 
-    paused_interrupts = load_paused_interrupts()
+    case maybe_recover_runs(opts, task_supervisor) do
+      :ok ->
+        paused_interrupts = load_paused_interrupts()
 
-    state = %State{
-      poll_interval_ms: Config.poll_interval_ms(),
-      max_concurrent_agents: Config.max_concurrent_agents(),
-      next_poll_due_at_ms: now_ms,
-      poll_check_in_progress: false,
-      tick_timer_ref: nil,
-      tick_token: nil,
-      claimed: MapSet.new(Map.keys(paused_interrupts)),
-      retry_attempts: %{},
-      paused_interrupts: paused_interrupts,
-      dispatch_blockers: [],
-      claude_totals: @empty_claude_totals,
-      claude_rate_limits: nil,
-      archived_runs: load_archived_runs()
-    }
+        state = %State{
+          poll_interval_ms: Config.poll_interval_ms(),
+          max_concurrent_agents: Config.max_concurrent_agents(),
+          next_poll_due_at_ms: now_ms,
+          poll_check_in_progress: false,
+          tick_timer_ref: nil,
+          tick_token: nil,
+          execution_request_runner: Keyword.get(opts, :execution_request_runner, &AgentRunner.run/3),
+          execution_request_task_starter:
+            Keyword.get(
+              opts,
+              :execution_request_task_starter,
+              &Task.Supervisor.start_child/2
+            ),
+          execution_request_after_prepare: Keyword.get(opts, :execution_request_after_prepare, fn _prepared -> :ok end),
+          execution_request_after_accept: Keyword.get(opts, :execution_request_after_accept, fn _submission -> :ok end),
+          task_supervisor: task_supervisor,
+          run_recovery: Keyword.get(opts, :run_recovery, false),
+          claimed: MapSet.new(Map.keys(paused_interrupts)),
+          retry_attempts: %{},
+          paused_interrupts: paused_interrupts,
+          dispatch_blockers: [],
+          claude_totals: @empty_claude_totals,
+          claude_rate_limits: nil,
+          archived_runs: load_archived_runs()
+        }
 
-    Process.flag(:trap_exit, true)
-    Rondo.TimeSeries.init()
-    schedule_timeseries_sample()
-    run_terminal_workspace_cleanup()
-    state = schedule_tick(state, 0)
+        Process.flag(:trap_exit, true)
+        Rondo.TimeSeries.init()
+        schedule_timeseries_sample()
+        run_terminal_workspace_cleanup()
+        state = schedule_tick(state, 0)
 
-    {:ok, state}
+        {:ok, state}
+
+      {:error, reason} ->
+        {:stop, {:run_recovery_failed, reason}}
+    end
+  end
+
+  defp maybe_recover_runs(opts, task_supervisor) do
+    if Keyword.get(opts, :run_recovery, false) do
+      recovery_fun = Keyword.get(opts, :run_recovery_fun, &RunRecovery.reconcile/1)
+
+      with [] <- Task.Supervisor.children(task_supervisor),
+           {:ok, _results} <-
+             recovery_fun.(
+               workspace_root: Config.workspace_root(),
+               worker_supervisor_quiescent: true
+             ) do
+        :ok
+      else
+        children when is_list(children) ->
+          {:error, {:worker_supervisor_not_quiescent, length(children)}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    else
+      :ok
+    end
+  rescue
+    error -> {:error, {:run_recovery_crashed, Exception.message(error)}}
   end
 
   @impl true
-  def terminate(reason, %{running: running}) do
-    running
-    |> Map.values()
-    |> Enum.each(fn running_entry ->
-      try do
-        terminate_run_ledger_on_shutdown(running_entry, reason)
-        terminate_running_child(running_entry)
-      rescue
-        error ->
-          Logger.error(
-            "Shutdown cleanup failed #{running_entry_context(running_entry)} " <>
-              "error=#{Exception.message(error)} stacktrace=#{inspect(__STACKTRACE__)}"
-          )
-      end
-    end)
+  def terminate(reason, %{running: running} = state) do
+    if defer_to_startup_recovery?(state, reason) do
+      Logger.warning("Coupled supervisor restart detected; deferring durable terminalization to startup recovery")
+    else
+      running
+      |> Map.values()
+      |> Enum.each(fn running_entry ->
+        try do
+          terminate_running_child(running_entry)
+          terminate_run_ledger_on_shutdown(running_entry, reason)
+        rescue
+          error ->
+            Logger.error(
+              "Shutdown cleanup failed #{running_entry_context(running_entry)} " <>
+                "error=#{Exception.message(error)} stacktrace=#{inspect(__STACKTRACE__)}"
+            )
+        end
+      end)
+    end
 
     :ok
   end
@@ -149,8 +207,11 @@ defmodule Rondo.Orchestrator do
 
   defp terminate_run_ledger_on_shutdown(_running_entry, _reason), do: :ok
 
-  defp terminate_running_child(%{pid: pid}) when is_pid(pid) do
-    terminate_task(pid)
+  defp terminate_running_child(%{pid: pid} = running_entry) when is_pid(pid) do
+    terminate_task(
+      pid,
+      Map.get(running_entry, :task_supervisor, Rondo.TaskSupervisor)
+    )
   end
 
   defp terminate_running_child(_running_entry), do: :ok
@@ -199,48 +260,30 @@ defmodule Rondo.Orchestrator do
         {:noreply, state}
 
       issue_id ->
-        {running_entry, state} = pop_running_entry(state, issue_id)
-        running_entry = refresh_running_entry_state(running_entry)
-        state = record_session_completion_totals(state, running_entry)
-        session_id = running_entry_session_id(running_entry)
+        if defer_to_startup_recovery?(state) do
+          Logger.warning("Worker stopped after coupled supervisor failure issue_id=#{issue_id}; deferring durable terminalization to startup recovery")
 
-        state =
-          cond do
-            reason == :normal ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+          {:noreply, state}
+        else
+          {running_entry, state} = pop_running_entry(state, issue_id)
+          running_entry = refresh_running_entry_state(running_entry)
+          state = record_session_completion_totals(state, running_entry)
+          session_id = running_entry_session_id(running_entry)
 
-              state
-              |> archive_running_entry(running_entry, reason)
-              |> complete_issue(issue_id)
-              |> schedule_issue_retry(issue_id, 1, %{
-                identifier: running_entry.identifier,
-                delay_type: :continuation
-              })
+          state =
+            handle_finished_agent_task(
+              state,
+              issue_id,
+              running_entry,
+              reason,
+              session_id
+            )
 
-            action_policy_guidance_exit?(reason) ->
-              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=action_policy_guidance")
-              pause_running_entry(state, issue_id, running_entry, reason)
+          Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
 
-            final_report_invalid_exit?(reason) ->
-              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=final_report_invalid")
-              pause_running_entry(state, issue_id, running_entry, reason)
-
-            pause_after_gate_failure?(running_entry, reason) ->
-              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=repeated_gate_failure")
-              pause_running_entry(state, issue_id, running_entry, reason)
-
-            model_routing_exhausted_exit?(reason) ->
-              Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=model_routing_exhausted")
-              pause_running_entry(state, issue_id, running_entry, reason)
-
-            true ->
-              handle_run_completion(state, issue_id, running_entry, reason, session_id)
-          end
-
-        Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
-
-        notify_dashboard()
-        {:noreply, state}
+          notify_dashboard()
+          {:noreply, state}
+        end
     end
   end
 
@@ -300,6 +343,76 @@ defmodule Rondo.Orchestrator do
     {:noreply, state}
   end
 
+  defp defer_to_startup_recovery?(%State{
+         run_recovery: true,
+         task_supervisor: task_supervisor
+       }) do
+    is_nil(GenServer.whereis(task_supervisor))
+  end
+
+  defp defer_to_startup_recovery?(_state), do: false
+
+  defp defer_to_startup_recovery?(%State{run_recovery: true}, reason) do
+    not graceful_shutdown_reason?(reason)
+  end
+
+  defp defer_to_startup_recovery?(_state, _reason), do: false
+
+  defp graceful_shutdown_reason?(:normal), do: true
+  defp graceful_shutdown_reason?(:shutdown), do: true
+  defp graceful_shutdown_reason?({:shutdown, _detail}), do: true
+  defp graceful_shutdown_reason?(_reason), do: false
+
+  defp handle_finished_agent_task(
+         state,
+         issue_id,
+         %{source: :execution_request} = running_entry,
+         reason,
+         session_id
+       ) do
+    handle_execution_request_completion(
+      state,
+      issue_id,
+      running_entry,
+      reason,
+      session_id
+    )
+  end
+
+  defp handle_finished_agent_task(state, issue_id, running_entry, reason, session_id) do
+    cond do
+      reason == :normal ->
+        Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+        state
+        |> archive_running_entry(running_entry, reason)
+        |> complete_issue(issue_id)
+        |> schedule_issue_retry(issue_id, 1, %{
+          identifier: running_entry.identifier,
+          delay_type: :continuation
+        })
+
+      action_policy_guidance_exit?(reason) ->
+        Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=action_policy_guidance")
+        pause_running_entry(state, issue_id, running_entry, reason)
+
+      final_report_invalid_exit?(reason) ->
+        Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=final_report_invalid")
+        pause_running_entry(state, issue_id, running_entry, reason)
+
+      pause_after_gate_failure?(running_entry, reason) ->
+        Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=repeated_gate_failure")
+        pause_running_entry(state, issue_id, running_entry, reason)
+
+      model_routing_exhausted_exit?(reason) ->
+        Logger.warning("Agent task paused for issue_id=#{issue_id} session_id=#{session_id} reason=model_routing_exhausted")
+        pause_running_entry(state, issue_id, running_entry, reason)
+
+      true ->
+        handle_run_completion(state, issue_id, running_entry, reason, session_id)
+    end
+  end
+
   defp maybe_dispatch(%State{} = state) do
     state =
       state
@@ -355,7 +468,11 @@ defmodule Rondo.Orchestrator do
 
   defp reconcile_running_issues(%State{} = state) do
     state = reconcile_stalled_running_issues(state)
-    running_ids = Map.keys(state.running)
+
+    running_ids =
+      state.running
+      |> Enum.reject(fn {_issue_id, entry} -> execution_request_entry?(entry) end)
+      |> Enum.map(fn {issue_id, _entry} -> issue_id end)
 
     if running_ids == [] do
       state
@@ -383,13 +500,26 @@ defmodule Rondo.Orchestrator do
        do: state
 
   defp reconcile_paused_interrupts(%State{} = state) do
-    paused_ids = Map.keys(state.paused_interrupts)
+    tracker_paused_interrupts =
+      Enum.reject(state.paused_interrupts, fn {_issue_id, entry} ->
+        execution_request_entry?(entry)
+      end)
 
+    paused_ids = Enum.map(tracker_paused_interrupts, fn {issue_id, _entry} -> issue_id end)
+
+    if paused_ids == [] do
+      state
+    else
+      reconcile_tracker_paused_interrupts(state, paused_ids, tracker_paused_interrupts)
+    end
+  end
+
+  defp reconcile_tracker_paused_interrupts(state, paused_ids, tracker_paused_interrupts) do
     case Tracker.fetch_issue_states_by_ids(paused_ids) do
       {:ok, issues} ->
         issues_by_id = Map.new(issues, &{&1.id, &1})
 
-        Enum.reduce(state.paused_interrupts, state, fn {issue_id, paused_entry}, state_acc ->
+        Enum.reduce(tracker_paused_interrupts, state, fn {issue_id, paused_entry}, state_acc ->
           issue = Map.get(issues_by_id, issue_id)
           reconcile_paused_interrupt(state_acc, issue_id, paused_entry, issue)
         end)
@@ -673,7 +803,12 @@ defmodule Rondo.Orchestrator do
         end
 
         if is_pid(pid) do
-          terminate_task(pid)
+          terminate_task(
+            pid,
+            Map.get(running_entry, :task_supervisor) ||
+              state.task_supervisor ||
+              Rondo.TaskSupervisor
+          )
         end
 
         if is_reference(ref) do
@@ -729,14 +864,24 @@ defmodule Rondo.Orchestrator do
 
       Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; restarting with backoff")
 
-      next_attempt = next_retry_attempt_from_running(running_entry)
+      if execution_request_entry?(running_entry) do
+        terminate_running_issue(
+          state,
+          issue_id,
+          false,
+          nil,
+          {:execution_request_stalled, elapsed_ms}
+        )
+      else
+        next_attempt = next_retry_attempt_from_running(running_entry)
 
-      state
-      |> terminate_running_issue(issue_id, false)
-      |> schedule_issue_retry(issue_id, next_attempt, %{
-        identifier: identifier,
-        error: "stalled for #{elapsed_ms}ms without claude activity"
-      })
+        state
+        |> terminate_running_issue(issue_id, false)
+        |> schedule_issue_retry(issue_id, next_attempt, %{
+          identifier: identifier,
+          error: "stalled for #{elapsed_ms}ms without claude activity"
+        })
+      end
     else
       state
     end
@@ -760,8 +905,8 @@ defmodule Rondo.Orchestrator do
 
   defp last_activity_timestamp(_running_entry), do: nil
 
-  defp terminate_task(pid) when is_pid(pid) do
-    case Task.Supervisor.terminate_child(Rondo.TaskSupervisor, pid) do
+  defp terminate_task(pid, task_supervisor) when is_pid(pid) do
+    case Task.Supervisor.terminate_child(task_supervisor, pid) do
       :ok ->
         :ok
 
@@ -770,7 +915,7 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  defp terminate_task(_pid), do: :ok
+  defp terminate_task(_pid, _task_supervisor), do: :ok
 
   defp choose_issues(issues, state) do
     terminal_states = terminal_state_set()
@@ -1575,70 +1720,24 @@ defmodule Rondo.Orchestrator do
 
   defp release_loop_pr_metadata(_pr), do: %{}
 
-  defp start_agent_for_issue(%State{} = state, issue, attempt, attempt_metadata, recipient, ledger, agent_opts \\ []) do
+  defp start_agent_for_issue(%State{} = state, issue, attempt, attempt_metadata, recipient, ledger, agent_opts) do
     merged_opts = Keyword.merge(escalation_agent_opts(attempt_metadata), agent_opts)
-    worker_host = worker_host_label(Keyword.get(merged_opts, :worker_host))
 
-    case Task.Supervisor.start_child(Rondo.TaskSupervisor, fn ->
-           base_opts = [
-             attempt: normalize_retry_attempt(attempt),
-             run_dir: run_ledger_dir(ledger),
-             run_ledger: ledger
-           ]
-
-           AgentRunner.run(issue, recipient, Keyword.merge(base_opts, merged_opts))
-         end) do
-      {:ok, pid} ->
-        ref = Process.monitor(pid)
-
-        ledger =
-          write_run_ledger_checkpoint(ledger, :spawned, %{
-            pid: inspect(pid),
-            attempt: normalize_retry_attempt(attempt)
-          })
-
-        Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "n/a"}")
-
-        running =
-          Map.put(state.running, issue.id, %{
-            pid: pid,
-            ref: ref,
-            identifier: issue.identifier,
-            issue: issue,
-            session_id: nil,
-            run_id: run_ledger_id(ledger),
-            run_dir: run_ledger_dir(ledger),
-            workspace: expected_workspace_for_issue(issue),
-            worker_host: Keyword.get(merged_opts, :worker_host),
-            ledger: ledger,
-            run_ref: nil,
-            last_claude_message: nil,
-            last_claude_timestamp: nil,
-            last_claude_event: nil,
-            claude_input_tokens: 0,
-            claude_output_tokens: 0,
-            claude_total_tokens: 0,
-            claude_last_reported_input_tokens: 0,
-            claude_last_reported_output_tokens: 0,
-            claude_last_reported_total_tokens: 0,
-            claude_last_reported_cost: 0,
-            claude_usage_accounting_ref: nil,
-            turn_count: 0,
-            retry_attempt: normalize_retry_attempt(attempt),
-            retry_failure_reason: Keyword.get(attempt_metadata, :failure_reason),
-            attempt_chain: Keyword.get(attempt_metadata, :attempt_chain, []),
-            started_at: DateTime.utc_now(),
-            latest_gate: nil,
-            model_routing_context: Keyword.get(merged_opts, :model_routing_context),
-            event_log: []
-          })
-
-        %{
-          state
-          | running: running,
-            claimed: MapSet.put(state.claimed, issue.id),
-            retry_attempts: Map.delete(state.retry_attempts, issue.id)
-        }
+    case spawn_agent_for_issue(
+           state,
+           issue,
+           attempt,
+           attempt_metadata,
+           recipient,
+           ledger,
+           merged_opts,
+           %{
+             runner: &AgentRunner.run/3,
+             metadata: %{source: :tracker}
+           }
+         ) do
+      {:ok, state, _running_entry} ->
+        state
 
       {:error, reason} ->
         ledger = complete_run_ledger(ledger, :failed, %{phase: "spawn", reason: inspect(reason)})
@@ -1652,6 +1751,149 @@ defmodule Rondo.Orchestrator do
         })
     end
   end
+
+  defp spawn_agent_for_issue(
+         %State{} = state,
+         issue,
+         attempt,
+         attempt_metadata,
+         recipient,
+         ledger,
+         merged_opts,
+         %{runner: runner, metadata: metadata}
+       ) do
+    worker_host = worker_host_label(Keyword.get(merged_opts, :worker_host))
+    start_gate = Map.get(metadata, :start_gate)
+    strict_ledger? = Map.get(metadata, :strict_ledger, false)
+
+    task_starter =
+      Map.get(metadata, :task_starter, &Task.Supervisor.start_child/2)
+
+    task = fn ->
+      base_opts = [
+        attempt: normalize_retry_attempt(attempt),
+        run_dir: run_ledger_dir(ledger),
+        run_ledger: ledger
+      ]
+
+      await_start_gate(start_gate)
+      runner.(issue, recipient, Keyword.merge(base_opts, merged_opts))
+    end
+
+    case start_supervised_task(task_starter, state.task_supervisor, task) do
+      {:ok, pid} ->
+        ref = Process.monitor(pid)
+
+        case persist_spawn_checkpoint(
+               ledger,
+               pid,
+               normalize_retry_attempt(attempt),
+               strict_ledger?
+             ) do
+          {:ok, ledger} ->
+            Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "n/a"}")
+
+            running_entry =
+              %{
+                pid: pid,
+                ref: ref,
+                identifier: issue.identifier,
+                issue: issue,
+                session_id: nil,
+                run_id: run_ledger_id(ledger),
+                run_dir: run_ledger_dir(ledger),
+                workspace: expected_workspace_for_issue(issue),
+                worker_host: Keyword.get(merged_opts, :worker_host),
+                task_supervisor: state.task_supervisor,
+                ledger: ledger,
+                run_ref: nil,
+                last_claude_message: nil,
+                last_claude_timestamp: nil,
+                last_claude_event: nil,
+                claude_input_tokens: 0,
+                claude_output_tokens: 0,
+                claude_total_tokens: 0,
+                claude_last_reported_input_tokens: 0,
+                claude_last_reported_output_tokens: 0,
+                claude_last_reported_total_tokens: 0,
+                claude_last_reported_cost: 0,
+                claude_usage_accounting_ref: nil,
+                turn_count: 0,
+                retry_attempt: normalize_retry_attempt(attempt),
+                retry_failure_reason: Keyword.get(attempt_metadata, :failure_reason),
+                attempt_chain: Keyword.get(attempt_metadata, :attempt_chain, []),
+                started_at: DateTime.utc_now(),
+                latest_gate: nil,
+                model_routing_context: Keyword.get(merged_opts, :model_routing_context),
+                event_log: []
+              }
+              |> Map.merge(
+                Map.drop(metadata, [
+                  :start_gate,
+                  :task_starter,
+                  :strict_ledger
+                ])
+              )
+              |> maybe_put_start_gate(start_gate)
+
+            state = %{
+              state
+              | running: Map.put(state.running, issue.id, running_entry),
+                claimed: MapSet.put(state.claimed, issue.id),
+                retry_attempts: Map.delete(state.retry_attempts, issue.id)
+            }
+
+            {:ok, state, running_entry}
+
+          {:error, reason} ->
+            Process.demonitor(ref, [:flush])
+            terminate_task(pid, state.task_supervisor)
+            {:error, {:spawn_checkpoint_failed, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+
+      other ->
+        {:error, {:invalid_task_starter_result, other}}
+    end
+  end
+
+  defp start_supervised_task(task_starter, task_supervisor, task) do
+    task_starter.(task_supervisor, task)
+  rescue
+    error -> {:error, {:task_starter_crashed, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:task_starter_failed, kind, reason}}
+  end
+
+  defp persist_spawn_checkpoint(ledger, pid, attempt, true) do
+    RunLedger.write_checkpoint(ledger, :spawned, %{
+      pid: inspect(pid),
+      attempt: attempt
+    })
+  end
+
+  defp persist_spawn_checkpoint(ledger, pid, attempt, false) do
+    {:ok,
+     write_run_ledger_checkpoint(ledger, :spawned, %{
+       pid: inspect(pid),
+       attempt: attempt
+     })}
+  end
+
+  defp await_start_gate(nil), do: :ok
+
+  defp await_start_gate(token) when is_reference(token) do
+    receive do
+      {:rondo_start_execution, ^token} -> :ok
+    end
+  end
+
+  defp maybe_put_start_gate(running_entry, nil), do: running_entry
+
+  defp maybe_put_start_gate(running_entry, token),
+    do: Map.put(running_entry, :start_gate, token)
 
   defp escalation_agent_opts(metadata) do
     opts =
@@ -1679,6 +1921,37 @@ defmodule Rondo.Orchestrator do
     case Keyword.get(metadata, :max_turns) do
       n when is_integer(n) and n > 0 -> Keyword.put(opts, :max_turns, n)
       _ -> opts
+    end
+  end
+
+  defp handle_execution_request_completion(
+         %State{} = state,
+         issue_id,
+         running_entry,
+         reason,
+         session_id
+       ) do
+    cond do
+      reason == :normal ->
+        Logger.info("Execution request completed for issue_id=#{issue_id} session_id=#{session_id}")
+
+        state
+        |> archive_running_entry(running_entry, reason)
+        |> release_claim(issue_id)
+
+      action_policy_guidance_exit?(reason) or final_report_invalid_exit?(reason) or
+        pause_after_gate_failure?(running_entry, reason) or
+          model_routing_exhausted_exit?(reason) ->
+        Logger.warning("Execution request paused for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
+
+        pause_running_entry(state, issue_id, running_entry, reason)
+
+      true ->
+        Logger.warning("Execution request stopped for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
+
+        state
+        |> archive_running_entry(running_entry, reason)
+        |> release_claim(issue_id)
     end
   end
 
@@ -2181,7 +2454,10 @@ defmodule Rondo.Orchestrator do
       final_report: Map.get(running_entry, :final_report),
       model_routing_context: Map.get(running_entry, :model_routing_context) || get_in(interrupt, ["resume", "model_routing_context"]),
       interrupt: interrupt,
-      tracker_visibility: "known",
+      tracker_visibility: if(execution_request_entry?(running_entry), do: "not_applicable", else: "known"),
+      source: Map.get(running_entry, :source, :tracker),
+      repo_id: Map.get(running_entry, :repo_id),
+      manifest_sha256: Map.get(running_entry, :manifest_sha256),
       ledger: ledger
     }
   end
@@ -2393,6 +2669,8 @@ defmodule Rondo.Orchestrator do
     do: workspace
 
   defp running_entry_workspace(%{issue: %Issue{} = issue}), do: expected_workspace_for_issue(issue)
+  defp running_entry_workspace(%{identifier: identifier}) when is_binary(identifier), do: Path.join(Config.workspace_root(), identifier)
+  defp running_entry_workspace(_running_entry), do: nil
 
   defp running_entry_worker_host(%{worker_host: worker_host}), do: worker_host_label(worker_host)
 
@@ -2405,8 +2683,6 @@ defmodule Rondo.Orchestrator do
   defp worker_host_label(%{host: host}) when is_binary(host), do: host
   defp worker_host_label(host) when is_binary(host), do: host
   defp worker_host_label(_host), do: nil
-  defp running_entry_workspace(%{identifier: identifier}) when is_binary(identifier), do: Path.join(Config.workspace_root(), identifier)
-  defp running_entry_workspace(_running_entry), do: nil
 
   defp running_entry_run_ref(%{run_ref: run_ref}) when not is_nil(run_ref), do: run_ref
   defp running_entry_run_ref(%{ledger: %RunLedger{manifest: %{"agent" => %{"run_ref" => run_ref}}}}), do: run_ref
@@ -2770,6 +3046,29 @@ defmodule Rondo.Orchestrator do
     "paused_claim"
   end
 
+  @spec submit_execution_request(map()) :: {:ok, map()} | {:error, term()} | :unavailable
+  def submit_execution_request(params) do
+    submit_execution_request(__MODULE__, params)
+  end
+
+  @spec submit_execution_request(GenServer.server(), map()) ::
+          {:ok, map()} | {:error, term()} | :unavailable
+  def submit_execution_request(server, params) when is_map(params) do
+    case GenServer.whereis(server) do
+      pid when is_pid(pid) ->
+        try do
+          GenServer.call(pid, {:submit_execution_request, params}, 15_000)
+        catch
+          :exit, _reason -> :unavailable
+        end
+
+      _other ->
+        :unavailable
+    end
+  end
+
+  def submit_execution_request(_server, _params), do: {:error, :invalid_request}
+
   @spec submit_guidance(String.t(), String.t()) :: {:ok, map()} | {:error, term()} | :unavailable
   def submit_guidance(issue_id, guidance) do
     submit_guidance(__MODULE__, issue_id, guidance)
@@ -2830,10 +3129,23 @@ defmodule Rondo.Orchestrator do
   end
 
   @impl true
+  def handle_call({:submit_execution_request, params}, _from, state) do
+    {reply, state} = admit_execution_request(state, params)
+
+    if match?({:ok, _submission}, reply) do
+      notify_dashboard()
+    end
+
+    {:reply, reply, state}
+  end
+
   def handle_call({:submit_guidance, issue_ref, guidance}, _from, state) do
     case paused_interrupt_lookup(state, issue_ref) do
       nil ->
         {:reply, {:error, :guidance_interrupt_not_found}, state}
+
+      {_issue_id, %{source: :execution_request}} ->
+        {:reply, {:error, :execution_request_guidance_unsupported}, state}
 
       {issue_id, paused_entry} ->
         {reply, state} = apply_guidance_response(state, issue_id, paused_entry, String.trim(guidance))
@@ -2853,6 +3165,9 @@ defmodule Rondo.Orchestrator do
         %{
           issue_id: issue_id,
           identifier: metadata.identifier,
+          source: Map.get(metadata, :source, :tracker),
+          repo_id: Map.get(metadata, :repo_id),
+          manifest_sha256: Map.get(metadata, :manifest_sha256),
           state: metadata.issue.state,
           session_id: metadata.session_id,
           run_id: Map.get(metadata, :run_id),
@@ -2894,10 +3209,19 @@ defmodule Rondo.Orchestrator do
       Map.get(state, :dispatch_blockers, [])
       |> Enum.map(&normalize_dispatch_blocker_snapshot/1)
 
+    tracker_paused_ids =
+      state.paused_interrupts
+      |> Enum.reject(fn {_issue_id, entry} -> execution_request_entry?(entry) end)
+      |> Enum.map(fn {issue_id, _entry} -> issue_id end)
+
     paused_issues_by_id =
-      case Tracker.fetch_issue_states_by_ids(Map.keys(state.paused_interrupts)) do
-        {:ok, issues} -> Map.new(issues, &{&1.id, &1})
-        _ -> %{}
+      if tracker_paused_ids == [] do
+        %{}
+      else
+        case Tracker.fetch_issue_states_by_ids(tracker_paused_ids) do
+          {:ok, issues} -> Map.new(issues, &{&1.id, &1})
+          _ -> %{}
+        end
       end
 
     paused =
@@ -2910,6 +3234,9 @@ defmodule Rondo.Orchestrator do
         %{
           issue_id: issue_id,
           identifier: Map.get(metadata, :identifier),
+          source: Map.get(metadata, :source, :tracker),
+          repo_id: Map.get(metadata, :repo_id),
+          manifest_sha256: Map.get(metadata, :manifest_sha256),
           state: Map.get(metadata, :state),
           paused_state: Map.get(metadata, :paused_state),
           tracker_state: tracker_state,
@@ -2971,6 +3298,422 @@ defmodule Rondo.Orchestrator do
        requested_at: DateTime.utc_now(),
        operations: ["poll", "reconcile"]
      }, state}
+  end
+
+  defp admit_execution_request(%State{} = state, params) do
+    case Config.validate!() do
+      :ok ->
+        prepare_and_admit_execution_request(state, params)
+
+      {:error, reason} ->
+        {{:error, {:configuration_invalid, reason}}, state}
+    end
+  rescue
+    error ->
+      Logger.error("Execution request admission failed error=#{Exception.message(error)}")
+      {{:error, :execution_request_admission_failed}, state}
+  end
+
+  defp prepare_and_admit_execution_request(state, params) do
+    case ExecutionRequest.prepare_core_submission(
+           request_value(params, :manifest_path),
+           request_value(params, :manifest_sha256),
+           request_value(params, :repo_id)
+         ) do
+      {:ok, prepared} ->
+        case state.execution_request_after_prepare.(prepared) do
+          :ok -> admit_prepared_execution_request(state, prepared)
+          {:error, reason} -> {{:error, reason}, state}
+        end
+
+      {:error, reason} ->
+        {{:error, normalize_execution_request_error(reason)}, state}
+    end
+  end
+
+  defp normalize_execution_request_error(reason)
+       when reason in [
+              :core_intake_invalid_expected_sha256,
+              :core_intake_invalid_repo_id,
+              :core_intake_invalid_manifest_path
+            ],
+       do: :invalid_request
+
+  defp normalize_execution_request_error({:core_intake_manifest_sha256_mismatch, _expected, _actual}),
+    do: :digest_conflict
+
+  defp normalize_execution_request_error(%ExportValidator.Error{
+         code: :unapproved_export
+       }),
+       do: :unapproved_manifest
+
+  defp normalize_execution_request_error(%ExportValidator.Error{
+         code: :unsafe_export_path
+       }),
+       do: :invalid_request
+
+  defp normalize_execution_request_error(%ExportValidator.Error{}),
+    do: :invalid_manifest
+
+  defp normalize_execution_request_error(_reason), do: :invalid_manifest
+
+  defp admit_prepared_execution_request(%State{} = state, prepared) do
+    source_sha256 = Map.fetch!(prepared.source_contract, :sha256)
+
+    case RunLocator.find_accepted_by_source_sha256(
+           prepared.repo_id,
+           source_sha256
+         ) do
+      {:ok, %{manifest: manifest}} ->
+        {{:ok, execution_submission(manifest, prepared.repo_id, true)}, state}
+
+      {:ok, nil} ->
+        dispatch_prepared_execution_request(state, prepared)
+
+      {:error, reason} ->
+        {{:error, reason}, state}
+    end
+  end
+
+  defp dispatch_prepared_execution_request(%State{} = state, prepared) do
+    issue = prepared.issue
+
+    case dispatch_capacity_blocker(issue, state, state.running) do
+      nil ->
+        start_prepared_execution_request(state, prepared)
+
+      _blocker ->
+        {{:error, :capacity_exhausted}, state}
+    end
+  end
+
+  defp start_prepared_execution_request(%State{} = state, prepared) do
+    case select_worker_host(state, prepared.issue, []) do
+      {:ok, worker_host} ->
+        with {:ok, ledger, frozen_source_contract} <-
+               create_execution_request_ledger(prepared, worker_host),
+             {:ok, state, running_entry} <-
+               spawn_execution_request_agent(
+                 state,
+                 prepared,
+                 frozen_source_contract,
+                 ledger,
+                 worker_host
+               ),
+             {:ok, state, accepted_entry, submission} <-
+               accept_execution_request_agent(state, prepared, running_entry) do
+          finish_execution_request_start(
+            state,
+            prepared,
+            accepted_entry,
+            submission
+          )
+        else
+          {:error, {:ledger_create_failed, _reason} = error} ->
+            {{:error, error}, state}
+
+          {:error, {:ledger_checkpoint_failed, _reason} = error} ->
+            {{:error, error}, state}
+
+          {:error, {:ledger_freeze_failed, _reason} = error} ->
+            {{:error, error}, state}
+
+          {:error, {:agent_spawn_failed, _reason} = error} ->
+            {{:error, error}, state}
+
+          {:error, {:ledger_accept_failed, _reason} = error, failed_state} ->
+            {{:error, error}, failed_state}
+
+          {:error, error, failed_state} ->
+            {{:error, error}, failed_state}
+
+          {:error, error} ->
+            {{:error, error}, state}
+        end
+
+      {:wait, _reason} ->
+        {{:error, :capacity_exhausted}, state}
+    end
+  end
+
+  defp create_execution_request_ledger(prepared, worker_host) do
+    opts = [
+      repo_id: prepared.repo_id,
+      run_source: "execution_request",
+      source_contract: prepared.source_contract,
+      execution_request_admission: %{
+        repo_id: prepared.repo_id,
+        manifest_sha256: Map.fetch!(prepared.source_contract, :sha256)
+      }
+    ]
+
+    opts =
+      if is_binary(prepared.policy_file) do
+        Keyword.put(opts, :action_policy_policy_file, prepared.policy_file)
+      else
+        opts
+      end
+
+    opts =
+      if is_map(worker_host) do
+        opts
+        |> Keyword.put(:worker_host, worker_host)
+        |> Keyword.put(:git_runner, Rondo.RemoteShell.git_runner(worker_host: worker_host))
+      else
+        opts
+      end
+
+    case RunLedger.create_run(prepared.issue, opts) do
+      {:ok, ledger} ->
+        freeze_execution_request_ledger(ledger, prepared)
+
+      {:error, reason} ->
+        {:error, {:ledger_create_failed, reason}}
+    end
+  end
+
+  defp freeze_execution_request_ledger(ledger, prepared) do
+    case RunLedger.freeze_execution_request(ledger, prepared) do
+      {:ok, ledger, frozen_source_contract} ->
+        case write_execution_request_dispatch_checkpoint(ledger, prepared) do
+          {:ok, ledger} -> {:ok, ledger, frozen_source_contract}
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        stable_reason = execution_request_freeze_error(reason)
+
+        reject_execution_request_attempt(
+          ledger,
+          "freeze_failed",
+          %{
+            phase: "execution_request_freeze",
+            reason: stable_reason
+          },
+          {:ledger_freeze_failed, stable_reason}
+        )
+    end
+  end
+
+  defp execution_request_freeze_error(reason) when is_atom(reason), do: reason
+  defp execution_request_freeze_error({kind, _detail}) when is_atom(kind), do: kind
+  defp execution_request_freeze_error(_reason), do: :execution_request_freeze_failed
+
+  defp write_execution_request_dispatch_checkpoint(ledger, prepared) do
+    payload = %{
+      issue_id: prepared.issue.id,
+      issue_identifier: prepared.issue.identifier,
+      source: "execution_request",
+      repo_id: prepared.repo_id,
+      manifest_sha256: Map.fetch!(prepared.source_contract, :sha256),
+      attempt: 0
+    }
+
+    case RunLedger.write_checkpoint(ledger, :dispatch, payload, source: %{surface: EventFeed.surface()}) do
+      {:ok, ledger} ->
+        {:ok, ledger}
+
+      {:error, reason} ->
+        reject_execution_request_attempt(
+          ledger,
+          "checkpoint_failed",
+          %{phase: "dispatch_checkpoint"},
+          {:ledger_checkpoint_failed, reason}
+        )
+    end
+  end
+
+  defp spawn_execution_request_agent(
+         state,
+         prepared,
+         frozen_source_contract,
+         ledger,
+         worker_host
+       ) do
+    agent_opts = [
+      source_contract: frozen_source_contract,
+      trackerless: true,
+      worker_host: worker_host
+    ]
+
+    agent_opts =
+      if is_binary(ledger.policy_file) do
+        Keyword.put(agent_opts, :action_policy_policy_file, ledger.policy_file)
+      else
+        agent_opts
+      end
+
+    metadata = %{
+      source: :execution_request,
+      repo_id: prepared.repo_id,
+      manifest_sha256: Map.fetch!(prepared.source_contract, :sha256),
+      start_gate: make_ref(),
+      strict_ledger: true,
+      task_starter: state.execution_request_task_starter
+    }
+
+    case spawn_agent_for_issue(
+           state,
+           prepared.issue,
+           nil,
+           [],
+           self(),
+           ledger,
+           agent_opts,
+           %{
+             runner: state.execution_request_runner,
+             metadata: metadata
+           }
+         ) do
+      {:ok, state, running_entry} ->
+        {:ok, state, running_entry}
+
+      {:error, reason} ->
+        reject_execution_request_attempt(
+          ledger,
+          "spawn_failed",
+          %{phase: "spawn", reason: inspect(reason)},
+          {:agent_spawn_failed, reason}
+        )
+    end
+  end
+
+  defp accept_execution_request_agent(state, prepared, running_entry) do
+    identity = %{
+      repo_id: prepared.repo_id,
+      manifest_sha256: Map.fetch!(prepared.source_contract, :sha256)
+    }
+
+    case RunLedger.accept_execution_request(running_entry.ledger, identity) do
+      {:ok, accepted_ledger} ->
+        accepted_entry = Map.put(running_entry, :ledger, accepted_ledger)
+
+        state = %{
+          state
+          | running:
+              Map.put(
+                state.running,
+                prepared.issue.id,
+                accepted_entry
+              )
+        }
+
+        submission =
+          execution_submission(
+            accepted_ledger.manifest,
+            prepared.repo_id,
+            false
+          )
+
+        {:ok, state, accepted_entry, submission}
+
+      {:error, reason} ->
+        state = discard_unaccepted_execution_request(state, prepared.issue.id, running_entry)
+
+        case reject_execution_request_attempt(
+               running_entry.ledger,
+               "accept_failed",
+               %{phase: "accept", reason: inspect(reason)},
+               {:ledger_accept_failed, reason}
+             ) do
+          {:error, error} -> {:error, error, state}
+        end
+    end
+  end
+
+  defp reject_execution_request_attempt(
+         ledger,
+         reason,
+         details,
+         outward_error
+       ) do
+    case RunLedger.reject_execution_request(ledger, reason, details) do
+      {:ok, _rejected} ->
+        {:error, outward_error}
+
+      {:error, rejection_error} ->
+        {:error, {:ledger_rejection_failed, rejection_error}}
+    end
+  end
+
+  defp discard_unaccepted_execution_request(state, issue_id, running_entry) do
+    if is_reference(running_entry.ref) do
+      Process.demonitor(running_entry.ref, [:flush])
+    end
+
+    terminate_running_child(running_entry)
+
+    %{
+      state
+      | running: Map.delete(state.running, issue_id),
+        claimed: MapSet.delete(state.claimed, issue_id)
+    }
+  end
+
+  defp finish_execution_request_start(
+         state,
+         prepared,
+         accepted_entry,
+         submission
+       ) do
+    case invoke_execution_request_after_accept(
+           state.execution_request_after_accept,
+           submission
+         ) do
+      :ok ->
+        release_execution_request_agent(accepted_entry)
+        {{:ok, submission}, state}
+
+      {:error, reason} ->
+        failed_state =
+          discard_unaccepted_execution_request(
+            state,
+            prepared.issue.id,
+            accepted_entry
+          )
+
+        _ =
+          RunLedger.complete_run(accepted_entry.ledger, :failed, %{
+            phase: "start_gate",
+            reason: inspect(reason)
+          })
+
+        {{:error, {:execution_request_start_failed, reason}}, failed_state}
+    end
+  end
+
+  defp invoke_execution_request_after_accept(callback, submission) do
+    case callback.(submission) do
+      :ok -> :ok
+      {:error, _reason} = error -> error
+      other -> {:error, {:invalid_after_accept_result, other}}
+    end
+  rescue
+    error -> {:error, {:after_accept_crashed, Exception.message(error)}}
+  catch
+    kind, reason -> {:error, {:after_accept_failed, kind, reason}}
+  end
+
+  defp release_execution_request_agent(%{pid: pid, start_gate: token})
+       when is_pid(pid) and is_reference(token) do
+    send(pid, {:rondo_start_execution, token})
+    :ok
+  end
+
+  defp execution_submission(manifest, repo_id, deduplicated) do
+    %{
+      surface: EventFeed.surface(),
+      service_id: "rondo-core",
+      repo_id: repo_id,
+      run_id: Map.get(manifest, "run_id"),
+      status: Map.get(manifest, "status") || "unknown",
+      event_cursor: EventFeed.initial_cursor(),
+      deduplicated: deduplicated
+    }
+  end
+
+  defp request_value(params, key) do
+    Map.get(params, key) || Map.get(params, Atom.to_string(key))
   end
 
   defp integrate_claude_update(running_entry, %{event: event, timestamp: timestamp} = update) do
@@ -3410,6 +4153,9 @@ defmodule Rondo.Orchestrator do
 
   defp append_to_event_log(log, entry, _max), do: [entry | log]
 
+  defp refresh_running_entry_state(%{source: :execution_request} = running_entry),
+    do: running_entry
+
   defp refresh_running_entry_state(%{issue: %Issue{id: issue_id} = issue} = running_entry) do
     case Tracker.fetch_issue_states_by_ids([issue_id]) do
       {:ok, [%Issue{state: current_state} | _]} ->
@@ -3424,6 +4170,12 @@ defmodule Rondo.Orchestrator do
 
   defp refresh_running_entry_state(running_entry), do: running_entry
 
+  defp execution_request_entry?(entry) when is_map(entry) do
+    Map.get(entry, :source) == :execution_request
+  end
+
+  defp execution_request_entry?(_entry), do: false
+
   defp archive_running_entry(state, running_entry, reason) do
     issue = Map.get(running_entry, :issue)
     identifier = Map.get(running_entry, :identifier)
@@ -3433,7 +4185,9 @@ defmodule Rondo.Orchestrator do
     ledger =
       running_entry
       |> Map.get(:ledger)
-      |> maybe_record_retry_run_decision(running_entry, reason)
+      |> maybe_record_completion_run_decision(running_entry, reason)
+
+    ownership = archive_ownership(running_entry)
 
     archived_entry =
       %{
@@ -3441,8 +4195,11 @@ defmodule Rondo.Orchestrator do
         identifier: identifier,
         issue_title: issue && issue.title,
         issue_url: issue && issue.url,
-        project: Config.linear_project_slug(),
-        repo: tracker_repo(),
+        project: ownership.project,
+        repo: ownership.repo,
+        source: ownership.source,
+        repo_id: ownership.repo_id,
+        manifest_sha256: Map.get(running_entry, :manifest_sha256),
         workspace: Map.get(running_entry, :workspace),
         run_id: Map.get(running_entry, :run_id),
         run_dir: Map.get(running_entry, :run_dir),
@@ -3491,6 +4248,26 @@ defmodule Rondo.Orchestrator do
     %{state | archived_runs: [index_entry | existing]}
   end
 
+  defp archive_ownership(%{source: :execution_request} = running_entry) do
+    repo_id = Map.get(running_entry, :repo_id)
+
+    %{
+      project: nil,
+      repo: repo_id,
+      source: :execution_request,
+      repo_id: repo_id
+    }
+  end
+
+  defp archive_ownership(_running_entry) do
+    %{
+      project: Config.linear_project_slug(),
+      repo: tracker_repo(),
+      source: :tracker,
+      repo_id: nil
+    }
+  end
+
   defp archive_exit_reason(:normal), do: "completed"
   defp archive_exit_reason(:terminated), do: "terminated"
   defp archive_exit_reason(:handoff), do: "handed_off"
@@ -3514,6 +4291,17 @@ defmodule Rondo.Orchestrator do
     do: Map.put(entry, :non_active_state, state)
 
   defp maybe_put_non_active_state(entry, _reason, _issue), do: entry
+
+  defp maybe_record_completion_run_decision(
+         ledger,
+         %{source: :execution_request},
+         _reason
+       ),
+       do: ledger
+
+  defp maybe_record_completion_run_decision(ledger, running_entry, reason) do
+    maybe_record_retry_run_decision(ledger, running_entry, reason)
+  end
 
   defp maybe_record_retry_run_decision(nil, _running_entry, _reason), do: nil
 
@@ -3613,7 +4401,8 @@ defmodule Rondo.Orchestrator do
   end
 
   # --- Per-run file persistence ---
-  # Layout: <archive_root>/<IDENTIFIER>/<timestamp>.json
+  # Tracker layout: <archive_root>/<IDENTIFIER>/<timestamp>.json
+  # Execution-request layout: <archive_root>/<IDENTIFIER>/<timestamp>-<run_id>.json
 
   defp archived_run_context(entry) do
     "issue_id=#{entry[:issue_id] || "n/a"} " <>
@@ -3623,8 +4412,7 @@ defmodule Rondo.Orchestrator do
   defp persist_archived_run(entry) do
     identifier = entry[:identifier] || "unknown"
     timestamp = format_file_timestamp(entry[:started_at])
-    dir = Path.join(archive_root(), identifier)
-    path = Path.join(dir, "#{timestamp}.json")
+    filename = archive_filename(entry, timestamp)
 
     serializable =
       entry
@@ -3634,15 +4422,19 @@ defmodule Rondo.Orchestrator do
         Enum.map(log, fn e -> Map.update(e, :at, nil, &datetime_to_iso/1) end)
       end)
 
-    case Jason.encode(serializable) do
-      {:ok, json} ->
-        File.mkdir_p!(dir)
-        File.write!(path, json)
-        path
-
-      {:error, reason} ->
+    with true <- safe_archive_segment?(identifier),
+         true <- safe_archive_segment?(filename),
+         dir = Path.join(archive_root(), identifier),
+         path = Path.join(dir, filename),
+         :ok <- validate_archive_path(path),
+         {:ok, json} <- Jason.encode(serializable),
+         :ok <- File.mkdir_p(dir),
+         :ok <- validate_archive_path(path),
+         :ok <- File.write(path, json) do
+      path
+    else
+      reason ->
         Logger.warning("Failed to persist archived run #{archived_run_context(entry)} reason=#{inspect(reason)}")
-
         nil
     end
   rescue
@@ -3658,6 +4450,7 @@ defmodule Rondo.Orchestrator do
     with true <- safe_archive_segment?(identifier),
          true <- safe_archive_segment?(filename),
          path = Path.join([archive_root(), identifier, filename]),
+         :ok <- validate_archive_path(path),
          {:ok, json} <- File.read(path),
          {:ok, entry} <- decode_archived_json(json) do
       {:ok, deserialize_archived_entry(entry)}
@@ -3730,9 +4523,18 @@ defmodule Rondo.Orchestrator do
       latest_gate: Map.get(interrupt, "gate"),
       model_routing_context: get_in(interrupt, ["resume", "model_routing_context"]),
       interrupt: interrupt,
-      tracker_visibility: "unknown",
+      tracker_visibility: if(execution_request_manifest?(manifest), do: "not_applicable", else: "unknown"),
+      source: if(execution_request_manifest?(manifest), do: :execution_request, else: :tracker),
+      repo_id: get_in(manifest, ["repo", "repo_id"]),
+      manifest_sha256: get_in(manifest, ["source_contract", "sha256"]),
       ledger: ledger
     }
+  end
+
+  defp execution_request_manifest?(manifest) when is_map(manifest) do
+    Map.get(manifest, "source") == "execution_request" or
+      (is_binary(get_in(manifest, ["repo", "repo_id"])) and
+         is_binary(get_in(manifest, ["source_contract", "sha256"])))
   end
 
   defp run_ledger_from_manifest(%{"run_id" => run_id, "run_dir" => run_dir} = manifest, manifest_path)
@@ -3774,9 +4576,14 @@ defmodule Rondo.Orchestrator do
   end
 
   defp load_archive_identifiers(root) do
-    case File.ls(root) do
-      {:ok, identifiers} -> Enum.map(identifiers, &Path.join(root, &1))
-      {:error, _} -> []
+    with :ok <- validate_archive_root(root),
+         {:ok, identifiers} <- File.ls(root) do
+      identifiers
+      |> Enum.filter(&safe_archive_segment?/1)
+      |> Enum.map(&Path.join(root, &1))
+      |> Enum.filter(&(validate_archive_path(&1) == :ok))
+    else
+      _ -> []
     end
   end
 
@@ -3801,7 +4608,8 @@ defmodule Rondo.Orchestrator do
   end
 
   defp load_archived_run_file(path) do
-    with {:ok, json} <- File.read(path),
+    with :ok <- validate_archive_path(path),
+         {:ok, json} <- File.read(path),
          {:ok, entry} when is_map(entry) <- Jason.decode(json) do
       entry
       |> deserialize_archived_entry()
@@ -3811,13 +4619,14 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  @archive_keys ~w(issue_id identifier issue_title issue_url project repo workspace pr_url run_id run_dir session_id state started_at finished_at exit_reason non_active_state turn_count tokens cost latest_gate event_log model_routing adapter final_report)
+  @archive_keys ~w(issue_id identifier issue_title issue_url project repo source repo_id manifest_sha256 workspace pr_url run_id run_dir session_id state started_at finished_at exit_reason non_active_state turn_count tokens cost latest_gate event_log model_routing adapter final_report)
   @token_keys ~w(input_tokens output_tokens total_tokens)
   @event_keys ~w(at event message tokens)
 
   defp deserialize_archived_entry(entry) when is_map(entry) do
     entry
     |> atomize_allowed_keys(@archive_keys)
+    |> Map.update(:source, :tracker, &deserialize_archive_source/1)
     |> Map.update(:tokens, %{}, &deserialize_token_map/1)
     |> Map.update(:event_log, [], &deserialize_event_log/1)
     |> Map.update(:started_at, nil, &parse_datetime/1)
@@ -3834,6 +4643,10 @@ defmodule Rondo.Orchestrator do
   end
 
   defp parse_datetime(other), do: other
+
+  defp deserialize_archive_source("execution_request"), do: :execution_request
+  defp deserialize_archive_source("tracker"), do: :tracker
+  defp deserialize_archive_source(source), do: source
 
   defp normalize_archived_run_snapshot(entry) when is_map(entry) do
     entry
@@ -3907,6 +4720,45 @@ defmodule Rondo.Orchestrator do
   end
 
   defp safe_archive_segment?(_segment), do: false
+
+  defp archive_filename(%{source: source, run_id: run_id}, timestamp)
+       when source in [:execution_request, "execution_request"] and is_binary(run_id) do
+    if safe_archive_segment?(run_id), do: "#{timestamp}-#{run_id}.json", else: nil
+  end
+
+  defp archive_filename(%{source: source}, _timestamp)
+       when source in [:execution_request, "execution_request"],
+       do: nil
+
+  defp archive_filename(_entry, timestamp), do: "#{timestamp}.json"
+
+  defp validate_archive_path(path) when is_binary(path) do
+    root = archive_root()
+
+    with :ok <- validate_archive_root(root),
+         {:ok, canonical_root} <- PathSafety.canonicalize(root),
+         {:ok, canonical_path} <- PathSafety.canonicalize(path),
+         true <- strict_descendant?(canonical_path, canonical_root) do
+      :ok
+    else
+      _ -> {:error, :archive_path_outside_root}
+    end
+  end
+
+  defp validate_archive_root(root) when is_binary(root) do
+    workspace_root = Path.expand(Config.workspace_root())
+
+    with {:ok, canonical_workspace_root} <- PathSafety.canonicalize(workspace_root),
+         {:ok, canonical_root} <- PathSafety.canonicalize(root),
+         true <- strict_descendant?(canonical_root, canonical_workspace_root) do
+      :ok
+    else
+      _ -> {:error, :archive_root_outside_workspace}
+    end
+  end
+
+  defp strict_descendant?(path, root),
+    do: path != root and String.starts_with?(path, root <> "/")
 
   defp archive_root do
     Path.join(Config.workspace_root(), ".rondo_archive")

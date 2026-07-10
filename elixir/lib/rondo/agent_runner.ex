@@ -68,6 +68,10 @@ defmodule Rondo.AgentRunner do
   @spec no_tracker_issue_state_fetcher([String.t()]) :: {:ok, []}
   def no_tracker_issue_state_fetcher(_issue_ids), do: {:ok, []}
 
+  @doc false
+  @spec no_tracker_issue_context_fetcher([String.t()]) :: {:ok, []}
+  def no_tracker_issue_context_fetcher(_issue_ids), do: {:ok, []}
+
   defp workspace_policy_opts(opts) do
     ledger_opts =
       case Keyword.get(opts, :run_ledger) do
@@ -733,9 +737,14 @@ defmodule Rondo.AgentRunner do
          {:ok, opts} <- model_routing_opts(provider, nil, issue, claude_update_recipient, opts, 1),
          {:ok, adapter} <- adapter_module(opts),
          {:ok, opts} <- ensure_model_selection_supported(adapter, issue, claude_update_recipient, opts, 1) do
-      issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
-      issue_context_fetcher = Keyword.get(opts, :issue_context_fetcher, &Tracker.fetch_issue_contexts_by_ids/1)
-      issue_context_snapshot = initial_issue_context_snapshot(issue, issue_context_fetcher)
+      {trackerless?, issue_state_fetcher, issue_context_fetcher} = tracker_fetchers(opts)
+
+      issue_context_snapshot =
+        if trackerless? do
+          UpdateDetector.snapshot_from_issue(issue)
+        else
+          initial_issue_context_snapshot(issue, issue_context_fetcher)
+        end
 
       run_dir =
         case Keyword.get(opts, :run_dir) do
@@ -750,6 +759,7 @@ defmodule Rondo.AgentRunner do
         issue_state_fetcher: issue_state_fetcher,
         issue_context_fetcher: issue_context_fetcher,
         issue_context_snapshot: issue_context_snapshot,
+        trackerless: trackerless?,
         adapter: adapter,
         process_provider: provider,
         max_turns: Keyword.get(opts, :max_turns, Config.agent_max_turns()),
@@ -2272,8 +2282,31 @@ defmodule Rondo.AgentRunner do
     end
   end
 
-  defp tracker_capable?(%{issue_state_fetcher: fetcher}) do
-    fetcher != (&__MODULE__.no_tracker_issue_state_fetcher/1)
+  defp tracker_capable?(%{trackerless: true}), do: false
+
+  defp tracker_capable?(%{issue_state_fetcher: fetcher}),
+    do: fetcher != (&__MODULE__.no_tracker_issue_state_fetcher/1)
+
+  defp tracker_fetchers(opts) do
+    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+
+    trackerless? =
+      Keyword.get(opts, :trackerless, false) == true or
+        issue_state_fetcher == (&__MODULE__.no_tracker_issue_state_fetcher/1)
+
+    if trackerless? do
+      {
+        true,
+        &__MODULE__.no_tracker_issue_state_fetcher/1,
+        &__MODULE__.no_tracker_issue_context_fetcher/1
+      }
+    else
+      {
+        false,
+        issue_state_fetcher,
+        Keyword.get(opts, :issue_context_fetcher, &Tracker.fetch_issue_contexts_by_ids/1)
+      }
+    end
   end
 
   defp clear_live_update_prompt(%{opts: opts} = context) when is_list(opts) do

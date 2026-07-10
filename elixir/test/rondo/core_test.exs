@@ -264,7 +264,7 @@ defmodule Rondo.CoreTest do
 
     on_exit(fn ->
       if is_nil(Process.whereis(Rondo.Orchestrator)) do
-        case Supervisor.restart_child(Rondo.Supervisor, Rondo.Orchestrator) do
+        case Supervisor.restart_child(Rondo.RunSupervisor, Rondo.Orchestrator) do
           {:ok, _pid} -> :ok
           {:error, {:already_started, _pid}} -> :ok
         end
@@ -272,7 +272,11 @@ defmodule Rondo.CoreTest do
     end)
 
     if is_pid(orchestrator_pid) do
-      assert :ok = Supervisor.terminate_child(Rondo.Supervisor, Rondo.Orchestrator)
+      assert :ok =
+               Supervisor.terminate_child(
+                 Rondo.RunSupervisor,
+                 Rondo.Orchestrator
+               )
     end
 
     assert {:ok, pid} = Rondo.start_link()
@@ -963,8 +967,29 @@ defmodule Rondo.CoreTest do
         labels: ["backend"]
       }
 
+      parent = self()
+
+      issue_state_fetcher = fn issue_ids ->
+        send(parent, {:unexpected_tracker_state_fetch, issue_ids})
+        {:ok, []}
+      end
+
+      issue_context_fetcher = fn issue_ids ->
+        send(parent, {:unexpected_tracker_context_fetch, issue_ids})
+        {:ok, []}
+      end
+
       before = MapSet.new(File.ls!(workspace_root))
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: &AgentRunner.no_tracker_issue_state_fetcher/1)
+
+      assert :ok =
+               AgentRunner.run(issue, nil,
+                 trackerless: true,
+                 issue_state_fetcher: issue_state_fetcher,
+                 issue_context_fetcher: issue_context_fetcher
+               )
+
+      refute_received {:unexpected_tracker_state_fetch, _issue_ids}
+      refute_received {:unexpected_tracker_context_fetch, _issue_ids}
       entries_after = MapSet.new(File.ls!(workspace_root))
 
       created =

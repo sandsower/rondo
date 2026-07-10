@@ -890,6 +890,11 @@ defmodule Rondo.OrchestratorStatusTest do
   end
 
   test "orchestrator accounts cumulative pi growth by positive deltas" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      poll_interval_ms: 60_000
+    )
+
     issue_id = "issue-pi-cumulative-growth"
 
     issue = %Issue{
@@ -2025,7 +2030,7 @@ defmodule Rondo.OrchestratorStatusTest do
 
     on_exit(fn ->
       if is_nil(Process.whereis(Rondo.Orchestrator)) do
-        case Supervisor.restart_child(Rondo.Supervisor, Rondo.Orchestrator) do
+        case Supervisor.restart_child(Rondo.RunSupervisor, Rondo.Orchestrator) do
           {:ok, _pid} -> :ok
           {:error, {:already_started, _pid}} -> :ok
         end
@@ -2033,7 +2038,11 @@ defmodule Rondo.OrchestratorStatusTest do
     end)
 
     if is_pid(orchestrator_pid) do
-      assert :ok = Supervisor.terminate_child(Rondo.Supervisor, Rondo.Orchestrator)
+      assert :ok =
+               Supervisor.terminate_child(
+                 Rondo.RunSupervisor,
+                 Rondo.Orchestrator
+               )
     end
 
     {:ok, pid} =

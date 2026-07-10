@@ -477,6 +477,8 @@ moduledoc in `lib/mix/tasks/rondo.scorecard.ex` for the full field reference.
 
 ### Run event feed (rondo.core/v1)
 
+The loopback HTTP submission and observation contract for approved single-manifest runs is documented in [Rondo Core v1 single-manifest API](../docs/rondo-core-v1.md).
+
 ```bash
 mix rondo.run_events --repo-id REPO --run-id RUN [--service-id ID] [--cursor CURSOR]
 mix rondo.run_events --repo-id REPO --run-id RUN --status

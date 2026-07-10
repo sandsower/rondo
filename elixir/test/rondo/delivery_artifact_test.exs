@@ -94,7 +94,15 @@ defmodule Rondo.DeliveryArtifactTest do
     assert File.exists?(delivery_path)
 
     manifest = decode_json!(ledger.manifest_path)
-    assert %{"kind" => "delivery_artifact", "path" => "artifacts/delivery-artifact.json", "status" => "present"} in manifest["artifacts"]
+
+    assert %{
+             "kind" => "delivery_artifact",
+             "path" => "artifacts/delivery-artifact.json",
+             "recorded_at" => recorded_at,
+             "status" => "present"
+           } = Enum.find(manifest["artifacts"], &(&1["kind"] == "delivery_artifact"))
+
+    assert {:ok, _datetime, 0} = DateTime.from_iso8601(recorded_at)
 
     artifact = decode_json!(delivery_path)
     assert artifact["schema"] == "rondo-delivery-artifact-v0"

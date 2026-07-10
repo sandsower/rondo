@@ -12,10 +12,12 @@ defmodule Rondo.RunLedger do
   the orchestrator and a worker task both hold ledger copies.
   """
 
-  alias Rondo.{Config, DeliveryArtifact, FinalReport, Linear.Issue, ProcessProvider, Redaction, RemoteShell}
-  alias Rondo.RunEvidence.{ArtifactCatalog, EventStream}
+  alias Rondo.{Config, DeliveryArtifact, FinalReport, Linear.Issue, PathSafety, ProcessProvider, Redaction, RemoteShell}
+  alias Rondo.RunEvidence.{ArtifactCatalog, CoreEventIndex, EventStream}
 
   @schema_version 1
+  @execution_request_artifact_relative_path "artifacts/execution-request.json"
+  @approval_bundle_artifact_relative_path "artifacts/approval-bundle.json"
   @final_report_relative_path "artifacts/final-report.json"
   @max_string_bytes 2_048
   @max_map_entries 50
@@ -25,6 +27,7 @@ defmodule Rondo.RunLedger do
   @lock_stale_seconds 60
   @lock_acquire_attempts 200
   @lock_retry_ms 10
+  @sha256_pattern ~r/\A[0-9a-f]{64}\z/
 
   defstruct [:run_id, :run_dir, :manifest_path, :next_seq, :manifest, :policy_file]
 
@@ -40,19 +43,290 @@ defmodule Rondo.RunLedger do
   @spec create_run(Issue.t() | map(), keyword()) :: {:ok, t()} | {:error, term()}
   def create_run(issue, opts \\ []), do: build_run(issue, opts)
 
+  @doc "Reopens a physically located durable run without trusting its stored path."
+  @spec open_run(Path.t()) :: {:ok, t()} | {:error, term()}
+  def open_run(run_dir) when is_binary(run_dir) do
+    with {:ok, canonical_run_dir} <- PathSafety.canonicalize(run_dir),
+         {:ok, manifest} <- load_manifest(canonical_run_dir),
+         :ok <- validate_stored_run_dir(manifest, canonical_run_dir) do
+      {:ok,
+       %__MODULE__{
+         run_id: Map.fetch!(manifest, "run_id"),
+         run_dir: canonical_run_dir,
+         manifest_path: Path.join(canonical_run_dir, "manifest.json"),
+         next_seq: next_sequence_from_manifest(manifest),
+         manifest: manifest,
+         policy_file: get_in(manifest, ["action_policy", "policy_file"])
+       }}
+    end
+  end
+
+  def open_run(_run_dir), do: {:error, :invalid_run_dir}
+
+  @doc "Fail-closed startup reconciliation for one orphaned running ledger."
+  @spec recover_orphaned_run(t(), keyword()) ::
+          {:ok, t(), :recovered | :unchanged} | {:error, term()}
+  def recover_orphaned_run(%__MODULE__{} = ledger, opts \\ []) do
+    if Keyword.get(opts, :worker_supervisor_quiescent, false) do
+      with_recovery_run_lock(ledger.run_dir, fn ->
+        do_recover_orphaned_run(ledger, opts)
+      end)
+    else
+      {:error, :worker_supervisor_not_quiescent}
+    end
+  end
+
+  defp validate_stored_run_dir(manifest, canonical_run_dir) do
+    with stored when is_binary(stored) <- Map.get(manifest, "run_dir"),
+         {:ok, canonical_stored} <- PathSafety.canonicalize(stored),
+         true <- canonical_stored == canonical_run_dir do
+      :ok
+    else
+      _other -> {:error, :run_dir_manifest_mismatch}
+    end
+  end
+
+  defp do_recover_orphaned_run(ledger, opts) do
+    manifest = latest_manifest(ledger)
+
+    if Map.get(manifest, "status") == "running" do
+      timestamp = opts |> Keyword.get(:timestamp, DateTime.utc_now()) |> datetime_to_iso()
+
+      payload = %{
+        reason: "orchestrator_restart",
+        previous_status: "running"
+      }
+
+      if unaccepted_execution_request?(manifest) do
+        recover_unaccepted_execution_request(
+          %{ledger | manifest: manifest},
+          payload,
+          timestamp
+        )
+      else
+        recover_accepted_or_tracker_run(
+          %{ledger | manifest: manifest},
+          payload,
+          timestamp
+        )
+      end
+    else
+      {:ok, %{ledger | manifest: manifest}, :unchanged}
+    end
+  end
+
+  defp unaccepted_execution_request?(manifest) do
+    Map.get(manifest, "source") == "execution_request" and
+      get_in(manifest, ["admission", "phase"]) != "accepted"
+  end
+
+  defp recover_unaccepted_execution_request(ledger, payload, timestamp) do
+    manifest_update = fn manifest ->
+      admission =
+        manifest
+        |> Map.get("admission", %{})
+        |> Map.put("phase", "rejected")
+        |> Map.put("reason", "orchestrator_restart")
+        |> Map.put("rejected_at", timestamp)
+        |> Map.put("updated_at", timestamp)
+
+      manifest
+      |> Map.put("admission", admission)
+      |> terminal_recovery_manifest(timestamp)
+    end
+
+    case do_write_checkpoint(
+           ledger,
+           :execution_request_rejected,
+           Map.put(payload, :phase, "rejected"),
+           timestamp: timestamp,
+           source: %{recovery: "orchestrator_startup"},
+           manifest_update: manifest_update
+         ) do
+      {:ok, recovered} -> {:ok, recovered, :recovered}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp recover_accepted_or_tracker_run(ledger, payload, timestamp) do
+    case do_write_checkpoint(
+           ledger,
+           :terminated,
+           payload,
+           timestamp: timestamp,
+           source: %{recovery: "orchestrator_startup"},
+           manifest_update: &terminal_recovery_manifest(&1, timestamp)
+         ) do
+      {:ok, recovered} -> {:ok, recovered, :recovered}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp terminal_recovery_manifest(manifest, timestamp) do
+    manifest
+    |> Map.put("status", "terminated")
+    |> put_in(["timestamps", "updated_at"], timestamp)
+    |> put_in(["timestamps", "finished_at"], timestamp)
+  end
+
+  @doc "Freezes one verified execution request and its approval bundle into run-owned evidence."
+  @spec freeze_execution_request(t(), map()) ::
+          {:ok, t(), map()} | {:error, term()}
+  def freeze_execution_request(
+        %__MODULE__{} = ledger,
+        %{
+          source_contract: source_contract,
+          manifest_evidence: manifest_evidence,
+          approval_evidence: approval_evidence
+        }
+      )
+      when is_map(source_contract) and is_map(manifest_evidence) and
+             is_map(approval_evidence) do
+    with {:ok, normalized} <-
+           execution_request_evidence(
+             source_contract,
+             manifest_evidence,
+             approval_evidence
+           ) do
+      with_run_lock(ledger.run_dir, fn ->
+        do_freeze_execution_request(
+          ledger,
+          source_contract,
+          normalized
+        )
+      end)
+    end
+  end
+
+  def freeze_execution_request(%__MODULE__{}, _source_contract),
+    do: {:error, :invalid_execution_request_source_contract}
+
+  @doc "Durably moves an execution-request attempt from admitting to accepted."
+  @spec accept_execution_request(t(), map()) :: {:ok, t()} | {:error, term()}
+  def accept_execution_request(%__MODULE__{} = ledger, identity)
+      when is_map(identity) do
+    timestamp = datetime_to_iso(DateTime.utc_now())
+    sanitized_identity = sanitize_value(identity)
+
+    manifest_update = fn manifest ->
+      admission =
+        manifest
+        |> Map.get("admission", %{})
+        |> Map.merge(sanitized_identity)
+        |> Map.put("phase", "accepted")
+        |> Map.put("accepted_at", timestamp)
+        |> Map.put("updated_at", timestamp)
+
+      Map.put(manifest, "admission", admission)
+    end
+
+    with_run_lock(ledger.run_dir, fn ->
+      case execution_request_admission_phase(ledger) do
+        "admitting" ->
+          do_write_checkpoint(
+            ledger,
+            :execution_request_accepted,
+            Map.put(sanitized_identity, "phase", "accepted"),
+            source: %{intake: "rondo_core"},
+            manifest_update: manifest_update
+          )
+
+        phase ->
+          {:error, {:invalid_execution_request_admission_transition, phase, "accepted"}}
+      end
+    end)
+  end
+
+  @doc "Durably rejects an unaccepted execution-request attempt as a terminal run."
+  @spec reject_execution_request(t(), String.t() | atom(), map(), keyword()) ::
+          {:ok, t()} | {:error, term()}
+  def reject_execution_request(
+        %__MODULE__{} = ledger,
+        reason,
+        details \\ %{},
+        opts \\ []
+      )
+      when is_map(details) do
+    timestamp = opts |> Keyword.get(:timestamp, DateTime.utc_now()) |> datetime_to_iso()
+    status = opts |> Keyword.get(:terminal_status, :failed) |> kind_to_string()
+    reason = kind_to_string(reason)
+
+    payload =
+      details
+      |> sanitize_value()
+      |> Map.merge(%{"phase" => "rejected", "reason" => reason})
+
+    manifest_update = fn manifest ->
+      admission =
+        manifest
+        |> Map.get("admission", %{})
+        |> Map.put("phase", "rejected")
+        |> Map.put("reason", reason)
+        |> Map.put("rejected_at", timestamp)
+        |> Map.put("updated_at", timestamp)
+
+      manifest
+      |> Map.put("admission", admission)
+      |> Map.put("status", status)
+      |> maybe_put_admission_failure_classification(status)
+      |> put_in(["timestamps", "updated_at"], timestamp)
+      |> put_in(["timestamps", "finished_at"], timestamp)
+    end
+
+    with_run_lock(ledger.run_dir, fn ->
+      case execution_request_admission_phase(ledger) do
+        "admitting" ->
+          do_write_checkpoint(
+            ledger,
+            :execution_request_rejected,
+            payload,
+            timestamp: timestamp,
+            source: Keyword.get(opts, :source, %{intake: "rondo_core"}),
+            manifest_update: manifest_update
+          )
+
+        phase ->
+          {:error, {:invalid_execution_request_admission_transition, phase, "rejected"}}
+      end
+    end)
+  end
+
+  defp execution_request_admission_phase(ledger) do
+    ledger
+    |> latest_manifest()
+    |> get_in(["admission", "phase"])
+  end
+
+  defp maybe_put_admission_failure_classification(manifest, "failed"),
+    do: Map.put(manifest, "failure_classification", "admission_rejected")
+
+  defp maybe_put_admission_failure_classification(manifest, _status), do: manifest
+
   defp build_run(issue, opts) when is_map(issue) do
     now = Keyword.get(opts, :now, DateTime.utc_now())
     workspace_root = opts |> Keyword.get(:workspace_root, Config.workspace_root()) |> Path.expand()
     safe_identifier = safe_identifier(issue_identifier(issue))
     run_id = run_id(safe_identifier, now, opts)
-    run_dir = Path.join([workspace_root, ".rondo_runs", safe_identifier, run_id])
+    run_root = Path.join(workspace_root, ".rondo_runs")
+    run_dir = Path.join([run_root, safe_identifier, run_id])
     manifest_path = Path.join(run_dir, "manifest.json")
     workspace = Keyword.get(opts, :workspace, Path.join(workspace_root, safe_identifier))
 
-    with :ok <- File.mkdir_p(Path.join(run_dir, "checkpoints")),
+    with :ok <- validate_run_dir(run_dir, run_root, workspace_root),
+         :ok <- File.mkdir_p(Path.join(run_dir, "checkpoints")),
          :ok <- File.mkdir_p(Path.join(run_dir, "artifacts")),
          {:ok, policy_snapshot} <- freeze_policy_file(run_dir, opts),
-         manifest = build_manifest(issue, opts, now, run_id, run_dir, workspace_root, workspace, policy_snapshot),
+         {:ok, manifest} <-
+           build_manifest(
+             issue,
+             opts,
+             now,
+             run_id,
+             run_dir,
+             workspace_root,
+             workspace,
+             policy_snapshot
+           ),
          :ok <- write_json_file(manifest_path, manifest) do
       {:ok,
        %__MODULE__{
@@ -64,6 +338,254 @@ defmodule Rondo.RunLedger do
          policy_file: Map.fetch!(policy_snapshot, "policy_file")
        }}
     end
+  end
+
+  defp do_freeze_execution_request(
+         ledger,
+         source_contract,
+         evidence
+       ) do
+    frozen_path = Path.join(ledger.run_dir, @execution_request_artifact_relative_path)
+
+    frozen_bundle_path =
+      Path.join(ledger.run_dir, @approval_bundle_artifact_relative_path)
+
+    with {:ok, source_bytes} <-
+           read_frozen_source(
+             evidence.manifest.source_path,
+             evidence.manifest.bytes,
+             evidence.manifest.sha256,
+             :execution_request
+           ),
+         {:ok, bundle_bytes} <-
+           read_frozen_source(
+             evidence.approval.source_path,
+             evidence.approval.bytes,
+             evidence.approval.sha256,
+             :approval_bundle
+           ),
+         :ok <-
+           write_execution_request_artifacts(
+             frozen_path,
+             source_bytes,
+             frozen_bundle_path,
+             bundle_bytes
+           ) do
+      frozen_contract =
+        source_contract
+        |> put_source_contract_value(:source_path, evidence.manifest.source_path)
+        |> put_source_contract_value(:path, frozen_path)
+
+      frozen_approval =
+        evidence.approval
+        |> Map.drop([:bytes])
+        |> Map.put(:source_path, evidence.approval.source_path)
+        |> Map.put(:path, frozen_bundle_path)
+
+      persist_frozen_execution_request(
+        ledger,
+        frozen_contract,
+        evidence.manifest.sha256,
+        frozen_approval
+      )
+    end
+  end
+
+  defp execution_request_evidence(
+         source_contract,
+         manifest_evidence,
+         approval_evidence
+       ) do
+    manifest = normalize_evidence_descriptor(manifest_evidence)
+    approval = normalize_evidence_descriptor(approval_evidence)
+    contract_sha256 = source_contract_value(source_contract, :sha256)
+
+    cond do
+      not valid_evidence_descriptor?(manifest) ->
+        {:error, :invalid_execution_request_source_contract}
+
+      not valid_evidence_descriptor?(approval) ->
+        {:error, :invalid_approval_bundle_evidence}
+
+      contract_sha256 != manifest.sha256 ->
+        {:error, :invalid_execution_request_source_contract}
+
+      not valid_approval_metadata?(approval) ->
+        {:error, :invalid_approval_bundle_evidence}
+
+      true ->
+        {:ok, %{manifest: manifest, approval: approval}}
+    end
+  end
+
+  defp normalize_evidence_descriptor(descriptor) do
+    %{
+      source_path: descriptor_value(descriptor, :source_path),
+      sha256: descriptor_value(descriptor, :sha256),
+      bytes: descriptor_value(descriptor, :bytes),
+      kind: descriptor_value(descriptor, :kind),
+      status: descriptor_value(descriptor, :status),
+      version: descriptor_value(descriptor, :version),
+      approved_at: descriptor_value(descriptor, :approved_at),
+      approved_by: descriptor_value(descriptor, :approved_by),
+      slice_id: descriptor_value(descriptor, :slice_id),
+      verdict: descriptor_value(descriptor, :verdict)
+    }
+  end
+
+  defp descriptor_value(descriptor, key),
+    do: Map.get(descriptor, key) || Map.get(descriptor, Atom.to_string(key))
+
+  defp valid_evidence_descriptor?(descriptor) do
+    is_binary(descriptor.source_path) and
+      Path.type(descriptor.source_path) == :absolute and
+      Path.expand(descriptor.source_path) == descriptor.source_path and
+      is_binary(descriptor.sha256) and Regex.match?(@sha256_pattern, descriptor.sha256) and
+      is_binary(descriptor.bytes) and sha256(descriptor.bytes) == descriptor.sha256
+  end
+
+  defp valid_approval_metadata?(approval) do
+    approval.kind == "approved-slice-plan-export-v0" and
+      is_integer(approval.version) and approval.version >= 1 and
+      approval.status == "approved" and
+      non_blank_string?(approval.approved_at) and
+      non_blank_string?(approval.approved_by) and
+      is_binary(approval.slice_id)
+  end
+
+  defp non_blank_string?(value),
+    do: is_binary(value) and String.trim(value) != ""
+
+  defp read_frozen_source(source_path, prepared_bytes, expected_sha256, kind) do
+    with {:ok, %File.Stat{type: :regular}} <- File.lstat(source_path),
+         {:ok, source_bytes} <- File.read(source_path),
+         true <-
+           source_bytes == prepared_bytes and
+             sha256(source_bytes) == expected_sha256 do
+      {:ok, source_bytes}
+    else
+      false -> {:error, source_changed_error(kind)}
+      _other -> {:error, source_unreadable_error(kind)}
+    end
+  end
+
+  defp source_changed_error(:execution_request), do: :execution_request_source_changed
+  defp source_changed_error(:approval_bundle), do: :approval_bundle_source_changed
+  defp source_unreadable_error(:execution_request), do: :execution_request_source_unreadable
+  defp source_unreadable_error(:approval_bundle), do: :approval_bundle_source_unreadable
+
+  defp write_execution_request_artifacts(
+         frozen_path,
+         source_bytes,
+         frozen_bundle_path,
+         bundle_bytes
+       ) do
+    with :ok <- write_frozen_artifact(frozen_path, source_bytes, :execution_request),
+         :ok <- write_frozen_artifact(frozen_bundle_path, bundle_bytes, :approval_bundle) do
+      :ok
+    else
+      {:error, reason} = error ->
+        _ = File.rm(frozen_path)
+        _ = File.rm(frozen_bundle_path)
+        if is_atom(reason), do: error, else: {:error, reason}
+    end
+  end
+
+  defp write_frozen_artifact(path, bytes, kind) do
+    case write_atomic(path, bytes) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {artifact_write_error(kind), reason}}
+    end
+  end
+
+  defp artifact_write_error(:execution_request),
+    do: :execution_request_artifact_write_failed
+
+  defp artifact_write_error(:approval_bundle),
+    do: :approval_bundle_artifact_write_failed
+
+  defp persist_frozen_execution_request(
+         ledger,
+         frozen_contract,
+         expected_sha256,
+         frozen_approval
+       ) do
+    execution_artifact =
+      normalize_artifact(
+        %{
+          "kind" => "execution_request",
+          "path" => @execution_request_artifact_relative_path,
+          "sha256" => expected_sha256
+        },
+        ledger.run_dir
+      )
+
+    approval_artifact =
+      normalize_artifact(
+        %{
+          "kind" => "approval_bundle",
+          "path" => @approval_bundle_artifact_relative_path,
+          "sha256" => frozen_approval.sha256
+        },
+        ledger.run_dir
+      )
+
+    manifest_update = fn manifest ->
+      manifest
+      |> Map.put("source_contract", sanitize_value(frozen_contract))
+      |> Map.put("approval_evidence", sanitize_value(frozen_approval))
+      |> Map.update("artifacts", [execution_artifact, approval_artifact], fn artifacts ->
+        artifacts
+        |> upsert_artifact(execution_artifact)
+        |> upsert_artifact(approval_artifact)
+      end)
+    end
+
+    case do_write_checkpoint(
+           ledger,
+           :execution_request_frozen,
+           %{
+             manifest: %{
+               path: @execution_request_artifact_relative_path,
+               sha256: expected_sha256
+             },
+             approval_bundle: %{
+               path: @approval_bundle_artifact_relative_path,
+               sha256: frozen_approval.sha256,
+               kind: frozen_approval.kind,
+               version: frozen_approval.version,
+               status: frozen_approval.status,
+               approved_at: frozen_approval.approved_at,
+               approved_by: frozen_approval.approved_by,
+               slice_id: frozen_approval.slice_id,
+               verdict: frozen_approval.verdict
+             }
+           },
+           source: %{intake: "rondo_core"},
+           manifest_update: manifest_update
+         ) do
+      {:ok, ledger} -> {:ok, ledger, frozen_contract}
+      {:error, reason} -> {:error, {:execution_request_manifest_update_failed, reason}}
+    end
+  end
+
+  defp source_contract_value(source_contract, key) do
+    Map.get(source_contract, key) || Map.get(source_contract, Atom.to_string(key))
+  end
+
+  defp put_source_contract_value(source_contract, key, value) do
+    string_key = Atom.to_string(key)
+
+    if Map.has_key?(source_contract, string_key) do
+      Map.put(source_contract, string_key, value)
+    else
+      Map.put(source_contract, key, value)
+    end
+  end
+
+  defp sha256(contents) do
+    :crypto.hash(:sha256, contents)
+    |> Base.encode16(case: :lower)
   end
 
   # Freezes the effective action-policy file into the run dir so the run is
@@ -104,14 +626,16 @@ defmodule Rondo.RunLedger do
     timestamp = opts |> Keyword.get(:timestamp, DateTime.utc_now()) |> datetime_to_iso()
     kind_string = kind_to_string(kind)
 
-    manifest =
-      ledger
-      |> latest_manifest()
-      |> reconciled_manifest(ledger.run_dir)
+    with {:ok, manifest} <- prepare_core_event_index(ledger) do
+      persist_checkpoint(ledger, manifest, kind_string, payload, timestamp, opts)
+    end
+  end
 
+  defp persist_checkpoint(ledger, manifest, kind_string, payload, timestamp, opts) do
     seq = next_sequence_from_manifest(manifest)
     relative_path = Path.join("checkpoints", checkpoint_filename(seq, kind_string))
     checkpoint_path = Path.join(ledger.run_dir, relative_path)
+    manifest_update = Keyword.get(opts, :manifest_update, & &1)
 
     checkpoint = %{
       "seq" => seq,
@@ -128,21 +652,24 @@ defmodule Rondo.RunLedger do
       "timestamp" => timestamp
     }
 
-    manifest_update = Keyword.get(opts, :manifest_update, & &1)
-
-    updated_manifest =
+    candidate_manifest =
       manifest
       |> Map.update("checkpoints", [checkpoint_index], &(&1 ++ [checkpoint_index]))
       |> put_in(["timestamps", "updated_at"], timestamp)
       |> manifest_update.()
 
-    if File.exists?(checkpoint_path) do
-      retry_on_collision(ledger, kind_string, timestamp, manifest_update, seq, relative_path, checkpoint)
-    else
-      with :ok <- write_json_file(checkpoint_path, checkpoint),
-           :ok <- write_json_file(ledger.manifest_path, updated_manifest) do
-        {:ok, %{ledger | next_seq: seq + 1, manifest: updated_manifest}}
+    with {:ok, updated_manifest} <- CoreEventIndex.refresh(candidate_manifest, ledger.run_dir) do
+      case File.exists?(checkpoint_path) do
+        true -> retry_on_collision(ledger, kind_string, timestamp, manifest_update, seq, relative_path, checkpoint)
+        false -> write_checkpoint_files(ledger, checkpoint_path, checkpoint, updated_manifest, seq)
       end
+    end
+  end
+
+  defp write_checkpoint_files(ledger, checkpoint_path, checkpoint, updated_manifest, seq) do
+    with :ok <- write_json_file(checkpoint_path, checkpoint),
+         :ok <- write_json_file(ledger.manifest_path, updated_manifest) do
+      {:ok, %{ledger | next_seq: seq + 1, manifest: updated_manifest}}
     end
   end
 
@@ -163,7 +690,12 @@ defmodule Rondo.RunLedger do
         sanitize_raw: &sanitize_agent_raw/1
       )
 
-    EventStream.append(ledger.run_dir, record)
+    with {:ok, manifest} <- prepare_core_event_index(ledger),
+         :ok <- EventStream.repair_torn_tail(ledger.run_dir),
+         :ok <- EventStream.append(ledger.run_dir, record),
+         {:ok, updated_manifest} <- CoreEventIndex.refresh(manifest, ledger.run_dir) do
+      write_json_file(ledger.manifest_path, updated_manifest)
+    end
   end
 
   @spec record_action_policy_decision(t(), map(), keyword()) :: {:ok, t()} | {:error, term()}
@@ -199,23 +731,32 @@ defmodule Rondo.RunLedger do
     else
       timestamp = DateTime.utc_now() |> datetime_to_iso()
 
-      manifest =
-        ledger
-        |> latest_manifest()
-        |> update_in(["agent"], fn
-          agent when is_map(agent) -> Map.merge(agent, agent_metadata)
-          _other -> agent_metadata
-        end)
-        |> put_in(["timestamps", "updated_at"], timestamp)
+      with {:ok, indexed_manifest} <- prepare_core_event_index(ledger) do
+        manifest =
+          indexed_manifest
+          |> merge_agent_metadata(agent_metadata)
+          |> put_in(["timestamps", "updated_at"], timestamp)
 
-      with :ok <- write_json_file(ledger.manifest_path, manifest) do
-        {:ok,
-         %{
-           ledger
-           | next_seq: next_sequence_from_manifest(manifest),
-             manifest: manifest
-         }}
+        persist_agent_metadata(ledger, manifest)
       end
+    end
+  end
+
+  defp merge_agent_metadata(manifest, agent_metadata) do
+    update_in(manifest, ["agent"], fn
+      agent when is_map(agent) -> Map.merge(agent, agent_metadata)
+      _other -> agent_metadata
+    end)
+  end
+
+  defp persist_agent_metadata(ledger, manifest) do
+    with :ok <- write_json_file(ledger.manifest_path, manifest) do
+      {:ok,
+       %{
+         ledger
+         | next_seq: next_sequence_from_manifest(manifest),
+           manifest: manifest
+       }}
     end
   end
 
@@ -351,24 +892,30 @@ defmodule Rondo.RunLedger do
       {:ok, ledger, :no_refresh}
     else
       timestamp = DateTime.utc_now() |> datetime_to_iso()
-      manifest = latest_manifest(ledger)
 
-      updated_manifest =
-        manifest
-        |> Map.update("artifacts", normalized_artifacts, fn existing ->
-          Enum.reduce(normalized_artifacts, existing, &upsert_artifact(&2, &1))
-        end)
-        |> put_in(["timestamps", "updated_at"], timestamp)
-
-      with :ok <- write_json_file(ledger.manifest_path, updated_manifest) do
-        ledger = %{
-          ledger
-          | next_seq: next_sequence_from_manifest(updated_manifest),
-            manifest: updated_manifest
-        }
-
-        {:ok, ledger, delivery_artifact_refresh_status(ledger, normalized_artifacts)}
+      with {:ok, manifest} <- prepare_core_event_index(ledger) do
+        persist_linked_artifacts(ledger, manifest, normalized_artifacts, timestamp)
       end
+    end
+  end
+
+  defp persist_linked_artifacts(ledger, manifest, normalized_artifacts, timestamp) do
+    candidate_manifest =
+      manifest
+      |> Map.update("artifacts", normalized_artifacts, fn existing ->
+        Enum.reduce(normalized_artifacts, existing, &upsert_artifact(&2, &1))
+      end)
+      |> put_in(["timestamps", "updated_at"], timestamp)
+
+    with {:ok, updated_manifest} <- CoreEventIndex.refresh(candidate_manifest, ledger.run_dir),
+         :ok <- write_json_file(ledger.manifest_path, updated_manifest) do
+      ledger = %{
+        ledger
+        | next_seq: next_sequence_from_manifest(updated_manifest),
+          manifest: updated_manifest
+      }
+
+      {:ok, ledger, delivery_artifact_refresh_status(ledger, normalized_artifacts)}
     end
   end
 
@@ -632,10 +1179,29 @@ defmodule Rondo.RunLedger do
         "finished_at" => nil
       },
       "checkpoints" => [],
-      "artifacts" => [%{"kind" => "agent_events", "path" => EventStream.relative_path(), "status" => "tracked"}]
+      "artifacts" => [
+        %{
+          "kind" => "agent_events",
+          "path" => EventStream.relative_path(),
+          "status" => "tracked",
+          "recorded_at" => iso_timestamp
+        }
+      ]
     }
+    |> maybe_put_run_source(Keyword.get(opts, :run_source))
     |> maybe_put_source_contract(Keyword.get(opts, :source_contract))
+    |> maybe_put_execution_request_admission(
+      Keyword.get(opts, :execution_request_admission),
+      iso_timestamp
+    )
+    |> CoreEventIndex.initialize(run_dir)
   end
+
+  defp maybe_put_run_source(manifest, source) when is_binary(source) do
+    Map.put(manifest, "source", source)
+  end
+
+  defp maybe_put_run_source(manifest, _source), do: manifest
 
   defp maybe_put_source_contract(manifest, nil), do: manifest
 
@@ -644,6 +1210,25 @@ defmodule Rondo.RunLedger do
   end
 
   defp maybe_put_source_contract(manifest, _source_contract), do: manifest
+
+  defp maybe_put_execution_request_admission(
+         manifest,
+         admission,
+         timestamp
+       )
+       when is_map(admission) do
+    admission =
+      admission
+      |> sanitize_value()
+      |> Map.put("phase", "admitting")
+      |> Map.put("admitting_at", timestamp)
+      |> Map.put("updated_at", timestamp)
+
+    Map.put(manifest, "admission", admission)
+  end
+
+  defp maybe_put_execution_request_admission(manifest, _admission, _timestamp),
+    do: manifest
 
   defp issue_snapshot(issue) do
     %{
@@ -662,7 +1247,7 @@ defmodule Rondo.RunLedger do
     runner = Keyword.get(opts, :git_runner, RemoteShell.git_runner(opts))
     worker_host = worker_host_snapshot(Keyword.get(opts, :worker_host))
 
-    %{
+    snapshot = %{
       "workspace_root" => Path.expand(workspace_root),
       "workspace" => Path.expand(workspace),
       "workspace_path" => Path.expand(workspace),
@@ -670,6 +1255,11 @@ defmodule Rondo.RunLedger do
       "base_commit" => workspace_git_value(runner, workspace, ["rev-parse", "HEAD"]),
       "base_branch" => workspace_git_value(runner, workspace, ["rev-parse", "--abbrev-ref", "HEAD"])
     }
+
+    case Keyword.get(opts, :repo_id) do
+      repo_id when is_binary(repo_id) -> Map.put(snapshot, "repo_id", repo_id)
+      _other -> snapshot
+    end
   end
 
   defp workspace_git_value(runner, workspace, args) do
@@ -694,10 +1284,6 @@ defmodule Rondo.RunLedger do
   end
 
   defp worker_host_snapshot(_host), do: nil
-
-  defp run_git(args, workspace) do
-    System.cmd("git", args, cd: workspace, stderr_to_stdout: true)
-  end
 
   defp process_provider_snapshot(opts) do
     provider =
@@ -741,6 +1327,19 @@ defmodule Rondo.RunLedger do
 
       {:error, reason} ->
         {:error, {:lock_failed, reason}}
+    end
+  end
+
+  # Startup recovery is invoked only after the coupled worker supervisor has
+  # been fully stopped. In that one quiescent boundary, a lock left behind by a
+  # killed VM cannot have a live owner and may be reclaimed immediately.
+  defp with_recovery_run_lock(run_dir, fun) do
+    lock_path = Path.join(run_dir, ".ledger.lock")
+
+    case File.rm(lock_path) do
+      :ok -> with_run_lock(run_dir, fun)
+      {:error, :enoent} -> with_run_lock(run_dir, fun)
+      {:error, reason} -> {:error, {:recovery_lock_reclaim_failed, reason}}
     end
   end
 
@@ -820,19 +1419,59 @@ defmodule Rondo.RunLedger do
     end
   end
 
-  # Retries a checkpoint write once when a file collision is detected.
-  # Re-derives the next sequence from the latest on-disk manifest so that
-  # the caller does not lose a checkpoint on a transient race.
-  defp retry_on_collision(ledger, kind_string, timestamp, manifest_update, _original_seq, original_relative_path, original_checkpoint) do
-    retry_manifest =
+  defp prepare_core_event_index(%__MODULE__{} = ledger) do
+    manifest =
       ledger
       |> latest_manifest()
       |> reconciled_manifest(ledger.run_dir)
 
+    with {:ok, indexed} <- CoreEventIndex.ensure(manifest, ledger.run_dir) do
+      persist_prepared_core_event_index(ledger, manifest, indexed)
+    end
+  end
+
+  defp persist_prepared_core_event_index(_ledger, manifest, manifest),
+    do: {:ok, manifest}
+
+  defp persist_prepared_core_event_index(ledger, _previous, indexed) do
+    case write_json_file(ledger.manifest_path, indexed) do
+      :ok -> {:ok, indexed}
+      {:error, reason} -> {:error, {:core_event_index_write_failed, reason}}
+    end
+  end
+
+  # Retries a checkpoint write once when a file collision is detected.
+  # Re-derives the next sequence from the latest on-disk manifest so that
+  # the caller does not lose a checkpoint on a transient race.
+  defp retry_on_collision(ledger, kind_string, timestamp, manifest_update, _original_seq, original_relative_path, original_checkpoint) do
+    latest = ledger |> latest_manifest() |> reconciled_manifest(ledger.run_dir)
+
+    with {:ok, retry_manifest} <- CoreEventIndex.ensure(latest, ledger.run_dir) do
+      retry_checkpoint_write(
+        ledger,
+        retry_manifest,
+        kind_string,
+        timestamp,
+        manifest_update,
+        original_relative_path,
+        original_checkpoint
+      )
+    end
+  end
+
+  defp retry_checkpoint_write(
+         ledger,
+         retry_manifest,
+         kind_string,
+         timestamp,
+         manifest_update,
+         original_relative_path,
+         original_checkpoint
+       ) do
     retry_seq = next_sequence_from_manifest(retry_manifest)
     retry_relative_path = Path.join("checkpoints", checkpoint_filename(retry_seq, kind_string))
     retry_checkpoint_path = Path.join(ledger.run_dir, retry_relative_path)
-    retry_checkpoint = %{original_checkpoint | "seq" => retry_seq}
+    retry_checkpoint = Map.put(original_checkpoint, "seq", retry_seq)
 
     retry_index = %{
       "seq" => retry_seq,
@@ -841,19 +1480,55 @@ defmodule Rondo.RunLedger do
       "timestamp" => timestamp
     }
 
-    retry_updated_manifest =
+    retry_candidate =
       retry_manifest
       |> Map.update("checkpoints", [retry_index], &(&1 ++ [retry_index]))
       |> put_in(["timestamps", "updated_at"], timestamp)
       |> manifest_update.()
 
+    with {:ok, updated} <- CoreEventIndex.refresh(retry_candidate, ledger.run_dir) do
+      persist_retry_checkpoint(
+        ledger,
+        retry_checkpoint_path,
+        retry_checkpoint,
+        updated,
+        retry_seq,
+        original_relative_path
+      )
+    end
+  end
+
+  defp persist_retry_checkpoint(
+         ledger,
+         retry_checkpoint_path,
+         retry_checkpoint,
+         updated_manifest,
+         retry_seq,
+         original_relative_path
+       ) do
     if File.exists?(retry_checkpoint_path) do
       {:error, {:checkpoint_collision, original_relative_path}}
     else
-      with :ok <- write_json_file(retry_checkpoint_path, retry_checkpoint),
-           :ok <- write_json_file(ledger.manifest_path, retry_updated_manifest) do
-        {:ok, %{ledger | next_seq: retry_seq + 1, manifest: retry_updated_manifest}}
-      end
+      write_retry_checkpoint_files(
+        ledger,
+        retry_checkpoint_path,
+        retry_checkpoint,
+        updated_manifest,
+        retry_seq
+      )
+    end
+  end
+
+  defp write_retry_checkpoint_files(
+         ledger,
+         retry_checkpoint_path,
+         retry_checkpoint,
+         updated_manifest,
+         retry_seq
+       ) do
+    with :ok <- write_json_file(retry_checkpoint_path, retry_checkpoint),
+         :ok <- write_json_file(ledger.manifest_path, updated_manifest) do
+      {:ok, %{ledger | next_seq: retry_seq + 1, manifest: updated_manifest}}
     end
   end
 
@@ -983,6 +1658,8 @@ defmodule Rondo.RunLedger do
   defp normalize_artifact(artifact, run_dir) do
     artifact
     |> sanitize_value()
+    |> Map.delete("recorded_at")
+    |> Map.delete(:recorded_at)
     |> ArtifactCatalog.normalize(run_dir)
   end
 
@@ -993,9 +1670,31 @@ defmodule Rondo.RunLedger do
   end
 
   defp safe_identifier(identifier) do
-    identifier
-    |> to_string()
-    |> String.replace(~r/[^a-zA-Z0-9._-]/, "_")
+    raw_identifier = to_string(identifier)
+    sanitized = String.replace(raw_identifier, ~r/[^a-zA-Z0-9._-]/, "_")
+
+    if sanitized in ["", ".", ".."] do
+      "issue-#{sha256(raw_identifier)}"
+    else
+      sanitized
+    end
+  end
+
+  defp validate_run_dir(run_dir, run_root, workspace_root) do
+    with {:ok, canonical_workspace_root} <- PathSafety.canonicalize(workspace_root),
+         {:ok, canonical_run_root} <- PathSafety.canonicalize(run_root),
+         {:ok, canonical_run_dir} <- PathSafety.canonicalize(run_dir) do
+      if strict_descendant?(canonical_run_root, canonical_workspace_root) and
+           strict_descendant?(canonical_run_dir, canonical_run_root) do
+        :ok
+      else
+        {:error, {:run_dir_outside_root, canonical_run_dir, run_root}}
+      end
+    end
+  end
+
+  defp strict_descendant?(path, root) do
+    path != root and String.starts_with?(path, root <> "/")
   end
 
   defp file_timestamp(%DateTime{} = datetime) do

@@ -61,6 +61,27 @@ defmodule Rondo.WorkspaceAndConfigTest do
     assert Path.basename(first_workspace) == "MT_Det"
   end
 
+  test "workspace keeps path-like identifiers inside the configured root" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "rondo-elixir-workspace-path-like-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        action_policy_command: fake_action_policy("allow")
+      )
+
+      assert {:ok, workspace} = Workspace.create_for_issue("..")
+      assert strict_descendant?(workspace, workspace_root)
+      refute Path.basename(workspace) in ["", ".", ".."]
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace reuses existing issue directory without deleting local changes" do
     workspace_root =
       Path.join(
@@ -1793,5 +1814,11 @@ defmodule Rondo.WorkspaceAndConfigTest do
     path
     |> Path.expand()
     |> String.replace_prefix("/var/", "/private/var/")
+  end
+
+  defp strict_descendant?(path, root) do
+    {:ok, canonical_path} = Rondo.PathSafety.canonicalize(path)
+    {:ok, canonical_root} = Rondo.PathSafety.canonicalize(root)
+    canonical_path != canonical_root and String.starts_with?(canonical_path, canonical_root <> "/")
   end
 end

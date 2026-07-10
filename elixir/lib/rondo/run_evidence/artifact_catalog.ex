@@ -17,12 +17,16 @@ defmodule Rondo.RunEvidence.ArtifactCatalog do
   def valid?(%{kind: kind, path: path}) when is_binary(kind) and is_binary(path), do: true
   def valid?(_artifact), do: false
 
-  @doc "Normalizes an artifact ref and fills in status when absent."
+  @doc "Normalizes an artifact ref and fills immutable recording metadata when absent."
   @spec normalize(artifact_ref(), Path.t()) :: artifact_ref()
   def normalize(%{} = artifact, run_dir) do
     artifact = stringify_keys(artifact)
     status = Map.get(artifact, "status") || status(artifact, run_dir)
-    Map.put(artifact, "status", status)
+    recorded_at = Map.get(artifact, "recorded_at") || recorded_at()
+
+    artifact
+    |> Map.put("status", status)
+    |> Map.put("recorded_at", recorded_at)
   end
 
   @doc "Returns an artifact ref status from its path relative to a run dir."
@@ -65,6 +69,8 @@ defmodule Rondo.RunEvidence.ArtifactCatalog do
   @doc "Upserts an artifact by `{kind, path}` identity."
   @spec upsert(term(), artifact_ref()) :: [artifact_ref()]
   def upsert(artifacts, artifact) when is_list(artifacts) and is_map(artifact) do
+    artifact = ensure_recorded_at(artifact)
+
     case artifact_identity(artifact) do
       nil ->
         artifacts
@@ -74,7 +80,9 @@ defmodule Rondo.RunEvidence.ArtifactCatalog do
     end
   end
 
-  def upsert(_artifacts, artifact) when is_map(artifact), do: [artifact]
+  def upsert(_artifacts, artifact) when is_map(artifact),
+    do: [ensure_recorded_at(artifact)]
+
   def upsert(artifacts, _artifact) when is_list(artifacts), do: artifacts
   def upsert(_artifacts, _artifact), do: []
 
@@ -93,7 +101,11 @@ defmodule Rondo.RunEvidence.ArtifactCatalog do
   end
 
   defp upsert_step(existing, artifact, identity, kept, false) do
-    if artifact_identity(existing) == identity, do: {kept ++ [artifact], true}, else: {kept ++ [existing], false}
+    if artifact_identity(existing) == identity do
+      {kept ++ [preserve_recorded_at(existing, artifact)], true}
+    else
+      {kept ++ [existing], false}
+    end
   end
 
   defp upsert_step(existing, _artifact, identity, kept, true) do
@@ -108,6 +120,32 @@ defmodule Rondo.RunEvidence.ArtifactCatalog do
   end
 
   defp artifact_identity(_artifact), do: nil
+
+  defp preserve_recorded_at(existing, artifact) do
+    recorded_at = Map.get(existing, "recorded_at") || Map.get(existing, :recorded_at)
+
+    if is_binary(recorded_at) do
+      artifact
+      |> Map.delete(:recorded_at)
+      |> Map.put("recorded_at", recorded_at)
+    else
+      artifact
+    end
+  end
+
+  defp ensure_recorded_at(artifact) do
+    if Map.has_key?(artifact, "recorded_at") or Map.has_key?(artifact, :recorded_at) do
+      artifact
+    else
+      Map.put(artifact, "recorded_at", recorded_at())
+    end
+  end
+
+  defp recorded_at do
+    DateTime.utc_now()
+    |> DateTime.truncate(:second)
+    |> DateTime.to_iso8601()
+  end
 
   defp stringify_keys(map) do
     Map.new(map, fn {key, value} -> {to_string(key), value} end)

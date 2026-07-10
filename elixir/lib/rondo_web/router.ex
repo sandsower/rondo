@@ -24,6 +24,9 @@ defmodule RondoWeb.Router do
   scope "/api/v1", RondoWeb do
     pipe_through(:api)
 
+    post("/execution-requests", CoreApiController, :submit_execution_request)
+    get("/runs/:run_id/events", CoreApiController, :run_events)
+    get("/runs/:run_id", CoreApiController, :run_status)
     get("/state", ObservabilityApiController, :state)
     post("/state", ObservabilityApiController, :state)
     get("/refresh", ObservabilityApiController, :method_not_allowed)

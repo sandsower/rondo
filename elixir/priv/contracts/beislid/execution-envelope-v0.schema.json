@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "execution-envelope-v0.schema.json",
+  "title": "Per-slice manifest exported from an approved execution-envelope-v0 slice",
+  "$comment": "BEI-134. Supported keyword subset (see scripts/schema_check.py): type, required, properties, enum, items, minimum, pattern only. Naming note: this file validates slices/<slice-id>.json - the runner-consumable projection the `envelope` skill writes per approved execution-envelope-v0 slice (docs/configuration.md 'Execution Envelope v0' and 'Export bundles'). Its own `schema` field literal is `approved-slice-v1` or `rondo-execution-request-v1`, not `execution-envelope-v0`; the filename follows the BEI-134 ticket naming for the pre-export envelope concept it projects from. docs/configuration.md's per-slice field-list sentence (~L646) also names boundaries, dependencies, proof_requirements, output_expectations, parent_contract, allowed_actions, and process_provider; those are declared below as unconstrained (`{}`) for doc/schema field-list parity because scripts/validate_export.py has never inspected their shape (observed to vary across committed bundles - e.g. `boundaries` is a list of strings in one fixture and an {include, exclude} object in a committed bundle - so declaring a type here would be new, unrequested enforcement). The following stay in scripts/validate_export.py as code: (1) `slice_id` must equal the slice id derived from the filename - needs the filename, which is outside the JSON payload; (2) `prompt` OR `body` must be present and non-empty - an OR requirement, not expressible without oneOf; (3) `runner_extensions.model_routing.candidates` and `.routing` must be non-empty when present - minItems isn't in the subset.",
+  "type": "object",
+  "required": ["schema", "slice_id", "repo"],
+  "properties": {
+    "schema": {
+      "enum": ["approved-slice-v1", "rondo-execution-request-v1"]
+    },
+    "slice_id": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "prompt": {
+      "type": "string",
+      "pattern": "\\S",
+      "$comment": "Optional here; scripts/validate_export.py requires prompt OR body to be a non-empty string (code-level OR, not schema-expressible)."
+    },
+    "body": {
+      "type": "string",
+      "pattern": "\\S",
+      "$comment": "Legacy alias for prompt; see prompt's $comment. Not named in docs/configuration.md's per-slice field list - see BEI-134 report."
+    },
+    "boundaries": {},
+    "dependencies": {},
+    "proof_requirements": {
+      "$comment": "proof-requirement-v1 items per docs/configuration.md 'Proof Requirement v1'; shape not enforced here (validator never inspects it on a slice manifest)."
+    },
+    "command_proofs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "command"],
+        "$comment": "RON-146 v0: executable exit-code command-proof, distinct from `proof_requirements` (proof-requirement-v1 attestation, see docs/configuration.md 'Proof Requirement v1'). Rondo's clean-eval executor runs `command` post-gates and grades by exit-code equality only (default `expected_exit: 0`). Optional array; absent/empty is valid on every slice (back-compat) - the `envelope` skill warns, but the validator never requires it, for a code-changing slice with none.",
+        "properties": {
+          "id": { "type": "string", "pattern": "\\S" },
+          "description": { "type": "string" },
+          "command": { "type": "string", "pattern": "\\S" },
+          "timeout_seconds": { "type": "integer", "minimum": 0 },
+          "expected_exit": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "output_expectations": {},
+    "parent_contract": {},
+    "repo": {
+      "type": "object",
+      "required": ["url", "base_ref", "base_sha"],
+      "properties": {
+        "url": { "type": "string", "pattern": "\\S" },
+        "base_ref": { "type": "string", "pattern": "\\S" },
+        "base_sha": { "type": "string", "pattern": "\\S" }
+      }
+    },
+    "allowed_actions": {},
+    "process_provider": {},
+    "runner_extensions": {
+      "properties": {
+        "model_routing": {
+          "type": "object",
+          "required": ["tier", "mode", "candidates"],
+          "properties": {
+            "tier": {
+              "enum": ["light", "standard", "heavy", "frontier"],
+              "$comment": "KNOWN_TIERS in scripts/validate_export.py."
+            },
+            "mode": {
+              "enum": ["prefer", "require"],
+              "$comment": "ALLOWED_ROUTING_MODES in scripts/validate_export.py."
+            },
+            "candidates": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "\\S" },
+              "$comment": "Must also be non-empty; enforced in code (minItems not in the supported subset)."
+            },
+            "routing": {
+              "type": "array",
+              "$comment": "Optional; when present must also be non-empty - enforced in code.",
+              "items": {
+                "type": "object",
+                "required": ["boundary", "tier", "mode"],
+                "properties": {
+                  "boundary": {
+                    "enum": ["planning", "implementation", "review_fix", "gate_repair"],
+                    "$comment": "KNOWN_BOUNDARIES in scripts/validate_export.py."
+                  },
+                  "tier": {
+                    "enum": ["light", "standard", "heavy", "frontier"]
+                  },
+                  "mode": {
+                    "enum": ["prefer", "require"]
+                  },
+                  "reason": { "type": "string", "pattern": "\\S" },
+                  "source": { "type": "object" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

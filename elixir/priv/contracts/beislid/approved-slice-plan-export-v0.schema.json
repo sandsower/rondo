@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "approved-slice-plan-export-v0.schema.json",
+  "title": "approved-slice-plan-export-v0 bundle.json",
+  "$comment": "BEI-134. Supported keyword subset (see scripts/schema_check.py): type, required, properties, enum, items, minimum, pattern only - no oneOf/anyOf/additionalProperties/minItems/minLength. This schema declares SHAPE for scripts/validate_export.py; it never rejects extra keys and stays silent on a field's inner shape when the validator itself never inspected that inner shape (declared here as `{}` for doc/schema field-list parity only). The following stay in scripts/validate_export.py as code because the subset above cannot express them: (1) `supersedes` presence + null-vs-64-char-lowercase-sha256 + version-pairing (version 1 requires supersedes null, version >= 2 requires a hash) - a cross-field conditional; (2) `children` must be a non-empty list, and duplicate slice ids across children - minItems and cross-item uniqueness aren't in the subset; (3) `dependency_graph` edges reference known slice ids, cycle detection, and `slice_plan.parallel_groups` transitive-dependency exclusion - graph semantics, not shape; (4) that every child id has a matching `slices/<id>.json` + `slices/<id>.md` file, and no orphan slice manifests - requires reading the filesystem alongside the JSON. RON-146 (resolved): the executable exit-code command-proof contract lives under the distinct per-slice `command_proofs` field (see execution-envelope-v0.schema.json), NOT under `proof_requirements` - `proof_requirements` here stays the untouched proof-requirement-v1 attestation shape (see docs/configuration.md 'Proof Requirement v1'); its inner shape remains unenforced at bundle level, as before BEI-134.",
+  "type": "object",
+  "required": [
+    "kind",
+    "version",
+    "status",
+    "generated_from",
+    "source_work_contract",
+    "slice_plan",
+    "children",
+    "dependency_graph",
+    "proof_requirements",
+    "guides_and_gates",
+    "approval",
+    "runner_extensions",
+    "validation",
+    "ownership"
+  ],
+  "properties": {
+    "kind": {
+      "enum": ["approved-slice-plan-export-v0"]
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "status": {
+      "enum": ["approved"],
+      "$comment": "Export validation is fail-closed: only approved bundles pass this gate. draft/paused/completed/superseded are valid pre-export execution-envelope-v0 states per docs/configuration.md ('Execution Envelope v0'), but bundle.json itself never carries them past validate_export.py."
+    },
+    "generated_from": {
+      "$comment": "Required as a key (see top-level `required`); its content has never been type-checked by the validator, so no constraint is declared here."
+    },
+    "source_work_contract": {
+      "$comment": "Required as a key; observed as both a string and an object across committed bundles/fixtures, and the validator never inspects its shape."
+    },
+    "slice_plan": {
+      "$comment": "Required as a key. May carry `parallel_groups` (validated in code against dependency_graph and children); the validator does not require slice_plan itself to be an object (a non-object slice_plan silently skips parallel_groups validation rather than failing)."
+    },
+    "children": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "source_ticket": {
+            "type": "string",
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    "dependency_graph": {
+      "type": "object"
+    },
+    "proof_requirements": {
+      "$comment": "proof-requirement-v1 items per docs/configuration.md 'Proof Requirement v1'; shape not enforced here (validator never inspected this array's shape at bundle level). RON-146's executable command-proof shape is a distinct field, `command_proofs`, declared per-slice in execution-envelope-v0.schema.json - it does not live here."
+    },
+    "guides_and_gates": {
+      "$comment": "Required as a key; content never type-checked by the validator."
+    },
+    "approval": {
+      "type": "object",
+      "required": ["approved_at", "approved_by"],
+      "properties": {
+        "approved_at": { "type": "string", "pattern": "\\S" },
+        "approved_by": { "type": "string", "pattern": "\\S" }
+      }
+    },
+    "runner_extensions": {
+      "$comment": "Required as a key at bundle level; the validator only ever inspects runner_extensions.model_routing on a per-SLICE manifest (see schemas/execution-envelope-v0.schema.json), never on the bundle itself."
+    },
+    "validation": {
+      "type": "object",
+      "required": ["schema_version", "rubric_version"],
+      "properties": {
+        "schema_version": {
+          "enum": ["approved-slice-plan-export-v0"]
+        },
+        "rubric_version": {
+          "enum": ["afk-rubric-v0", "afk-rubric-v1"],
+          "$comment": "Known rubric versions (KNOWN_RUBRIC_VERSIONS in scripts/validate_export.py); the validator rejects any rubric_version it does not know."
+        }
+      }
+    },
+    "ownership": {
+      "$comment": "Required as a key; content never type-checked by the validator."
+    },
+    "supersedes": {
+      "$comment": "Not in `required` above (matching REQUIRED_BUNDLE_FIELDS, which excludes it) but effectively mandatory: scripts/validate_export.py separately requires the key to be present and, when non-null, a 64-char lowercase sha256 hex digest, with version 1 requiring null and version >= 2 requiring a hash. That cross-field conditional is outside this schema's supported subset and stays in code."
+    }
+  }
+}

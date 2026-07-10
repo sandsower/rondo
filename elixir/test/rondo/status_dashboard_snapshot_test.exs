@@ -154,7 +154,7 @@ defmodule Rondo.StatusDashboardSnapshotTest do
 
     on_exit(fn ->
       if is_nil(Process.whereis(Rondo.Orchestrator)) do
-        case Supervisor.restart_child(Rondo.Supervisor, Rondo.Orchestrator) do
+        case Supervisor.restart_child(Rondo.RunSupervisor, Rondo.Orchestrator) do
           {:ok, _pid} -> :ok
           {:error, {:already_started, _pid}} -> :ok
         end
@@ -162,7 +162,11 @@ defmodule Rondo.StatusDashboardSnapshotTest do
     end)
 
     if is_pid(orchestrator_pid) do
-      assert :ok = Supervisor.terminate_child(Rondo.Supervisor, Rondo.Orchestrator)
+      assert :ok =
+               Supervisor.terminate_child(
+                 Rondo.RunSupervisor,
+                 Rondo.Orchestrator
+               )
     end
 
     snapshot =

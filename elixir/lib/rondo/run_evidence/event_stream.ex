@@ -82,6 +82,7 @@ defmodule Rondo.RunEvidence.EventStream do
       "usage" => sanitize.(fetch(event, :usage)),
       "raw" => event |> fetch_raw() |> sanitize_raw.()
     }
+    |> maybe_put_artifacts(sanitize, fetch(event, :artifacts))
     |> maybe_put_accounted_usage(sanitize, accounted_usage)
   end
 
@@ -101,6 +102,23 @@ defmodule Rondo.RunEvidence.EventStream do
         with :ok <- File.mkdir_p(Path.dirname(file)),
              {:ok, json} <- Jason.encode(payload) do
           File.write(file, json <> "\n", [:append])
+        end
+    end
+  end
+
+  @doc "Drops an incomplete final NDJSON fragment before the next locked append."
+  @spec repair_torn_tail(term()) :: :ok | {:error, term()}
+  def repair_torn_tail(source) do
+    case path(source) do
+      nil ->
+        {:error, :invalid_event_log_path}
+
+      file ->
+        case File.read(file) do
+          {:ok, ""} -> :ok
+          {:ok, contents} -> repair_contents(file, contents)
+          {:error, :enoent} -> :ok
+          {:error, reason} -> {:error, reason}
         end
     end
   end
@@ -189,6 +207,29 @@ defmodule Rondo.RunEvidence.EventStream do
     |> Enum.reject(&is_nil/1)
   end
 
+  defp repair_contents(_file, contents) when binary_part(contents, byte_size(contents) - 1, 1) == "\n",
+    do: :ok
+
+  defp repair_contents(file, contents) do
+    {complete_prefix, final_fragment} = split_final_fragment(contents)
+
+    case Jason.decode(final_fragment) do
+      {:ok, event} when is_map(event) -> File.write(file, contents <> "\n")
+      _invalid -> File.write(file, complete_prefix)
+    end
+  end
+
+  defp split_final_fragment(contents) do
+    case :binary.matches(contents, "\n") do
+      [] ->
+        {"", contents}
+
+      matches ->
+        {offset, 1} = List.last(matches)
+        {binary_part(contents, 0, offset + 1), binary_part(contents, offset + 1, byte_size(contents) - offset - 1)}
+    end
+  end
+
   defp decode_line(line) do
     case Jason.decode(line) do
       {:ok, event} when is_map(event) -> event
@@ -214,6 +255,12 @@ defmodule Rondo.RunEvidence.EventStream do
   defp maybe_put_accounted_usage(payload, sanitize, accounted_usage) do
     Map.put(payload, "accounted_usage", sanitize.(accounted_usage))
   end
+
+  defp maybe_put_artifacts(payload, sanitize, artifacts) when is_list(artifacts) do
+    Map.put(payload, "artifacts", sanitize.(artifacts))
+  end
+
+  defp maybe_put_artifacts(payload, _sanitize, _artifacts), do: payload
 
   defp fetch(map, key) when is_map(map) and is_atom(key) do
     Map.get(map, key, Map.get(map, Atom.to_string(key)))

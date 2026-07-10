@@ -64,8 +64,16 @@ defmodule Rondo.RunEvidence.ArtifactCatalogTest do
   end
 
   test "upserts artifacts by kind and path identity" do
+    recorded_at = "2026-07-09T12:00:00Z"
+
     existing = [
-      %{"kind" => "gate_results", "path" => "artifacts/gates/results.json", "status" => "missing", "old" => true},
+      %{
+        "kind" => "gate_results",
+        "path" => "artifacts/gates/results.json",
+        "status" => "missing",
+        "recorded_at" => recorded_at,
+        "old" => true
+      },
       %{"kind" => "gate_results", "path" => "artifacts/gates/results.json", "status" => "failed", "duplicate" => true},
       %{"kind" => "gate_results", "path" => "artifacts/gates/other.json", "status" => "present"}
     ]
@@ -79,7 +87,10 @@ defmodule Rondo.RunEvidence.ArtifactCatalogTest do
       })
 
     assert length(updated) == 2
-    assert [%{"new" => true, "status" => "present"}] = Enum.filter(updated, &(&1["path"] == "artifacts/gates/results.json"))
+
+    assert [%{"new" => true, "status" => "present", "recorded_at" => ^recorded_at}] =
+             Enum.filter(updated, &(&1["path"] == "artifacts/gates/results.json"))
+
     refute Enum.any?(updated, &Map.get(&1, "old"))
     refute Enum.any?(updated, &Map.get(&1, "duplicate"))
     assert Enum.any?(updated, &(&1["path"] == "artifacts/gates/other.json"))
@@ -88,14 +99,24 @@ defmodule Rondo.RunEvidence.ArtifactCatalogTest do
   test "upserts into malformed artifact lists defensively" do
     existing = [%{"kind" => "archive", "path" => "archive.json"}]
 
-    assert [%{"kind" => "archive", "path" => "archive.json"}] =
-             ArtifactCatalog.upsert(:not_a_list, %{"kind" => "archive", "path" => "archive.json"})
+    assert [%{"kind" => "archive", "path" => "archive.json", "recorded_at" => recorded_at}] =
+             ArtifactCatalog.upsert(:not_a_list, %{
+               "kind" => "archive",
+               "path" => "archive.json"
+             })
+
+    assert {:ok, _, 0} = DateTime.from_iso8601(recorded_at)
 
     assert existing == ArtifactCatalog.upsert(existing, %{"kind" => "bad"})
     assert existing == ArtifactCatalog.upsert(existing, :not_a_map)
 
-    assert [:not_a_ref, %{"kind" => "report", "path" => "artifacts/report.json"}] =
-             ArtifactCatalog.upsert([:not_a_ref], %{"kind" => "report", "path" => "artifacts/report.json"})
+    assert [:not_a_ref, %{"kind" => "report", "path" => "artifacts/report.json", "recorded_at" => report_recorded_at}] =
+             ArtifactCatalog.upsert([:not_a_ref], %{
+               "kind" => "report",
+               "path" => "artifacts/report.json"
+             })
+
+    assert {:ok, _, 0} = DateTime.from_iso8601(report_recorded_at)
 
     assert [] == ArtifactCatalog.upsert(:not_a_list, :not_a_map)
   end

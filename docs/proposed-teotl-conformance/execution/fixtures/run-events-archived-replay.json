@@ -1,4 +1,7 @@
 {
+  "surface": "rondo.core/v1",
+  "repo_id": "sample-repo",
+  "run_id": "RUN-sample-0001",
   "events": [
     {
       "type": "rondo.service.status_changed",
@@ -47,5 +50,6 @@
       "namespace": { "repo_id": "sample-repo", "run_id": "RUN-sample-0001" }
     }
   ],
-  "next_event_cursor": "rondo.core/v1:5"
+  "next_event_cursor": "rondo.core/v1:5",
+  "has_more": false
 }
