@@ -6,7 +6,7 @@ defmodule Rondo.CLI do
   alias Rondo.{LogFile, RunOnce}
 
   @switches [logs_root: :string, port: :integer, debug: :boolean]
-  @run_once_switches @switches ++ [issue: :string, manifest: :string]
+  @run_once_switches @switches ++ [issue: :string, manifest: :string, unsafe_child_credential_bypass: :boolean]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type evaluate_result :: :ok | :run_once_completed | {:error, String.t()}
@@ -17,8 +17,8 @@ defmodule Rondo.CLI do
           required(:set_server_port_override) => (non_neg_integer() | nil -> :ok | {:error, term()}),
           required(:ensure_all_started) => (-> ensure_started_result()),
           optional(:ensure_run_once_dependencies_started) => (-> ensure_started_result()),
-          required(:run_once) => (String.t() -> :ok | {:error, term()}),
-          required(:run_manifest) => (Path.t() -> :ok | {:error, term()})
+          required(:run_once) => function(),
+          required(:run_manifest) => function()
         }
 
   @spec main([String.t()]) :: no_return()
@@ -133,27 +133,46 @@ defmodule Rondo.CLI do
   defp run_once_target(opts, deps) do
     case run_once_target_values(opts) do
       {issue_id, nil} when is_binary(issue_id) ->
-        case Map.get(deps, :run_once, &RunOnce.run/1).(issue_id) do
+        run_opts = [
+          agent_opts: [
+            dispatch_origin: :run_once,
+            unsafe_child_credential_bypass: Keyword.get(opts, :unsafe_child_credential_bypass, false)
+          ]
+        ]
+
+        case invoke_runner(Map.get(deps, :run_once, &RunOnce.run/2), issue_id, run_opts) do
           :ok -> :ok
           {:error, reason} -> {:error, "run-once failed for issue #{issue_id}: #{inspect(reason)}"}
         end
 
       {nil, manifest_path} when is_binary(manifest_path) ->
-        expanded_manifest_path = Path.expand(manifest_path)
-
-        case Map.get(deps, :run_manifest, &RunOnce.run_manifest/1).(expanded_manifest_path) do
-          :ok -> :ok
-          {:error, reason} -> {:error, "run-once failed for manifest #{expanded_manifest_path}: #{inspect(reason)}"}
-        end
+        run_once_manifest(manifest_path, opts, deps)
 
       _ ->
         {:error, usage_message()}
     end
   end
 
+  defp run_once_manifest(manifest_path, opts, deps) do
+    if Keyword.get(opts, :unsafe_child_credential_bypass, false) do
+      {:error, "The unsafe child credential bypass is not available for manifest execution."}
+    else
+      expanded_manifest_path = Path.expand(manifest_path)
+      run_opts = [agent_opts: [dispatch_origin: :run_once]]
+
+      case invoke_runner(Map.get(deps, :run_manifest, &RunOnce.run_manifest/2), expanded_manifest_path, run_opts) do
+        :ok -> :ok
+        {:error, reason} -> {:error, "run-once failed for manifest #{expanded_manifest_path}: #{inspect(reason)}"}
+      end
+    end
+  end
+
+  defp invoke_runner(runner, target, opts) when is_function(runner, 2), do: runner.(target, opts)
+  defp invoke_runner(runner, target, _opts) when is_function(runner, 1), do: runner.(target)
+
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: rondo [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]\n       rondo run-once [--logs-root <path>] <path-to-WORKFLOW.md> (--issue <id> | --manifest <path>)"
+    "Usage: rondo [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]\n       rondo run-once [--logs-root <path>] [--unsafe-child-credential-bypass] <path-to-WORKFLOW.md> (--issue <id> | --manifest <path>)"
   end
 
   @spec runtime_deps() :: deps()
@@ -165,8 +184,8 @@ defmodule Rondo.CLI do
       set_server_port_override: &set_server_port_override/1,
       ensure_all_started: fn -> Application.ensure_all_started(:rondo) end,
       ensure_run_once_dependencies_started: &ensure_run_once_dependency_applications_started/0,
-      run_once: &RunOnce.run/1,
-      run_manifest: &RunOnce.run_manifest/1
+      run_once: &RunOnce.run/2,
+      run_manifest: &RunOnce.run_manifest/2
     }
   end
 

@@ -32,7 +32,7 @@ defmodule Rondo.RunOnce do
   @spec run(String.t(), keyword()) :: run_result()
   def run(issue_id, opts) when is_binary(issue_id) do
     deps = Keyword.get(opts, :deps, runtime_deps())
-    agent_opts = Keyword.get(opts, :agent_opts, [])
+    agent_opts = opts |> Keyword.get(:agent_opts, []) |> Keyword.put_new(:dispatch_origin, :run_once)
 
     with :ok <- validate_issue_id(issue_id),
          :ok <- Config.validate!(),
@@ -51,9 +51,10 @@ defmodule Rondo.RunOnce do
   def run_manifest(path, opts \\ []) do
     if is_binary(path) do
       deps = Keyword.get(opts, :deps, runtime_deps())
-      agent_opts = Keyword.get(opts, :agent_opts, [])
+      agent_opts = opts |> Keyword.get(:agent_opts, []) |> Keyword.put_new(:dispatch_origin, :run_once)
 
-      with :ok <- Config.validate!(),
+      with :ok <- reject_manifest_bypass(agent_opts),
+           :ok <- Config.validate!(),
            {:ok, %{issue: issue, source_contract: source_contract}} <- ExecutionRequest.load(path),
            {:ok, policy_file} <- manifest_policy_file(source_contract) do
         ledger_opts = manifest_ledger_opts(source_contract, policy_file)
@@ -61,6 +62,14 @@ defmodule Rondo.RunOnce do
       end
     else
       {:error, {:invalid_execution_request_path, path}}
+    end
+  end
+
+  defp reject_manifest_bypass(agent_opts) do
+    if Keyword.get(agent_opts, :unsafe_child_credential_bypass, false) do
+      {:error, :manifest_child_credential_bypass_forbidden}
+    else
+      :ok
     end
   end
 

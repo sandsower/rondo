@@ -711,6 +711,16 @@ defmodule Rondo.RunLedger do
     write_checkpoint(ledger, :action_policy_decision, payload, source: %{policy: "beislid_action_policy"})
   end
 
+  @spec record_child_launch_policy(t(), map()) :: {:ok, t()} | {:error, term()}
+  def record_child_launch_policy(%__MODULE__{} = ledger, evidence) when is_map(evidence) do
+    manifest_update = fn manifest -> put_in(manifest, ["agent", "child_launch"], sanitize_value(evidence)) end
+
+    write_checkpoint(ledger, :child_launch_policy_resolved, evidence,
+      source: %{policy: "rondo_child_launch"},
+      manifest_update: manifest_update
+    )
+  end
+
   @spec record_run_decision(t(), map(), keyword()) :: {:ok, t()} | {:error, term()}
   def record_run_decision(%__MODULE__{} = ledger, decision, opts \\ []) when is_map(decision) do
     write_checkpoint(ledger, :run_decision, decision, source: Keyword.get(opts, :source, %{decision: "rondo_run_decision"}))
@@ -1022,6 +1032,8 @@ defmodule Rondo.RunLedger do
 
   defp checkpoint_kind_for_event(:claude_starting), do: "workspace_ready"
   defp checkpoint_kind_for_event("claude_starting"), do: "workspace_ready"
+  defp checkpoint_kind_for_event(:child_launch_policy_resolved), do: "child_launch_policy_resolved"
+  defp checkpoint_kind_for_event("child_launch_policy_resolved"), do: "child_launch_policy_resolved"
   defp checkpoint_kind_for_event(:session_started), do: "turn_started"
   defp checkpoint_kind_for_event("session_started"), do: "turn_started"
   defp checkpoint_kind_for_event(:result), do: "turn_completed"

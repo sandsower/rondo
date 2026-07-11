@@ -130,6 +130,37 @@ defmodule Rondo.CLITest do
     refute_received :started
   end
 
+  test "run-once forwards an explicit child credential bypass only to issue execution" do
+    parent = self()
+    workflow_path = "tmp/run-once/WORKFLOW.md"
+    deps = run_once_deps(parent, Path.expand(workflow_path))
+
+    deps =
+      Map.put(deps, :run_once, fn issue_id, opts ->
+        send(parent, {:run_once_with_opts, issue_id, opts})
+        :ok
+      end)
+
+    assert :run_once_completed =
+             CLI.evaluate(
+               ["run-once", workflow_path, "--issue", "123", "--unsafe-child-credential-bypass"],
+               deps
+             )
+
+    assert_received {:run_once_with_opts, "123", opts}
+    assert Keyword.get(opts[:agent_opts], :dispatch_origin) == :run_once
+    assert Keyword.get(opts[:agent_opts], :unsafe_child_credential_bypass)
+
+    assert {:error, message} =
+             CLI.evaluate(
+               ["run-once", workflow_path, "--manifest", "request.json", "--unsafe-child-credential-bypass"],
+               deps
+             )
+
+    assert message =~ "not available for manifest execution"
+    refute_received {:run_manifest, _}
+  end
+
   test "run-once rejects both issue and manifest" do
     deps = run_once_deps(self(), Path.expand("WORKFLOW.md"))
 

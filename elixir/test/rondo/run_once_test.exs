@@ -5,6 +5,13 @@ defmodule Rondo.RunOnceTest do
 
   alias Rondo.RunOnce
 
+  test "manifest execution rejects the supervised child credential bypass before loading input" do
+    assert {:error, :manifest_child_credential_bypass_forbidden} =
+             RunOnce.run_manifest("does-not-matter.json",
+               agent_opts: [unsafe_child_credential_bypass: true]
+             )
+  end
+
   test "runs exactly one visible active issue" do
     parent = self()
 
