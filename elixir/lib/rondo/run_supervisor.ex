@@ -28,7 +28,7 @@ defmodule Rondo.RunSupervisor do
       |> Keyword.put(:task_supervisor, task_supervisor)
       |> Keyword.put(:run_recovery, true)
       |> Keyword.put(:service_mode, service_mode)
-      |> Keyword.put_new(:tracker_polling, service_mode != :trackerless_core)
+      |> Keyword.put(:tracker_polling, service_mode != :trackerless_core)
 
     children = [
       Supervisor.child_spec(

@@ -32,7 +32,11 @@ defmodule RondoWeb.CoreApiControllerTest do
     @spec snapshot(GenServer.server()) :: map()
     def snapshot(orchestrator) do
       send(self_config().test_pid, {:health_snapshot, orchestrator})
-      self_config().health_result
+
+      case self_config().health_result do
+        {:raise, message} -> raise message
+        result -> result
+      end
     end
 
     defp self_config, do: Application.fetch_env!(:rondo, :core_api_controller_test)
@@ -125,6 +129,15 @@ defmodule RondoWeb.CoreApiControllerTest do
     assert_receive {:health_snapshot, :orchestrator_test}
     refute conn.resp_body =~ "internal_path"
     refute conn.resp_body =~ "/must/not/leak"
+  end
+
+  test "GET health maps identity failures to the stable unavailable envelope" do
+    set_health_result({:raise, "identity unavailable"})
+
+    conn = request(:get, "/api/v1/health")
+
+    assert %{"error" => %{"code" => "core_unavailable"}} = decoded_response(conn, 503)
+    refute conn.resp_body =~ "identity unavailable"
   end
 
   test "POST execution-requests submits a validated request and returns 202 for a new run" do
@@ -713,6 +726,10 @@ defmodule RondoWeb.CoreApiControllerTest do
 
   defp set_events_result(result) do
     update_stub_result(:events_result, result)
+  end
+
+  defp set_health_result(result) do
+    update_stub_result(:health_result, result)
   end
 
   defp update_stub_result(key, result) do

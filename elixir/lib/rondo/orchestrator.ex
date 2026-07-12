@@ -40,6 +40,7 @@ defmodule Rondo.Orchestrator do
   @event_log_max_entries 100
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @core_maintenance_interval_ms 5_000
   @missing_issue_terminate_threshold 3
   @empty_claude_totals %{
     input_tokens: 0,
@@ -62,6 +63,8 @@ defmodule Rondo.Orchestrator do
       :tick_token,
       :tracker_polling,
       :service_mode,
+      :core_maintenance_interval_ms,
+      :core_maintenance_timer_ref,
       :execution_request_runner,
       :execution_request_task_starter,
       :execution_request_after_prepare,
@@ -90,12 +93,12 @@ defmodule Rondo.Orchestrator do
   def init(opts) do
     now_ms = System.monotonic_time(:millisecond)
     task_supervisor = Keyword.get(opts, :task_supervisor, Rondo.TaskSupervisor)
-    tracker_polling = Keyword.get(opts, :tracker_polling, true)
     service_mode = Keyword.get(opts, :service_mode, :tracker_daemon)
+    tracker_polling = service_mode != :trackerless_core and Keyword.get(opts, :tracker_polling, true)
 
     case maybe_recover_runs(opts, task_supervisor) do
       :ok ->
-        paused_interrupts = load_paused_interrupts()
+        paused_interrupts = load_paused_interrupts(service_mode)
 
         state = %State{
           poll_interval_ms: Config.poll_interval_ms(),
@@ -106,6 +109,8 @@ defmodule Rondo.Orchestrator do
           tick_token: nil,
           tracker_polling: tracker_polling,
           service_mode: service_mode,
+          core_maintenance_interval_ms: Keyword.get(opts, :core_maintenance_interval_ms, @core_maintenance_interval_ms),
+          core_maintenance_timer_ref: nil,
           execution_request_runner: Keyword.get(opts, :execution_request_runner, &AgentRunner.run/3),
           execution_request_task_starter:
             Keyword.get(
@@ -131,6 +136,7 @@ defmodule Rondo.Orchestrator do
         schedule_timeseries_sample()
         if tracker_polling, do: run_terminal_workspace_cleanup()
         state = if tracker_polling, do: schedule_tick(state, 0), else: state
+        state = maybe_schedule_core_maintenance(state)
 
         {:ok, state}
 
@@ -225,6 +231,14 @@ defmodule Rondo.Orchestrator do
   @impl true
   def handle_info({:tick, _tick_token}, %{tracker_polling: false} = state),
     do: {:noreply, state}
+
+  def handle_info(:core_maintenance, %{service_mode: :trackerless_core} = state) do
+    state = %{state | core_maintenance_timer_ref: nil}
+    state = reconcile_stalled_running_issues(state)
+    {:noreply, schedule_core_maintenance(state)}
+  end
+
+  def handle_info(:core_maintenance, state), do: {:noreply, state}
 
   def handle_info({:tick, tick_token}, %{tick_token: tick_token} = state)
       when is_reference(tick_token) do
@@ -4519,12 +4533,15 @@ defmodule Rondo.Orchestrator do
       []
   end
 
-  defp load_paused_interrupts do
+  defp load_paused_interrupts(service_mode) do
     [Config.workspace_root(), ".rondo_runs", "*", "*", "manifest.json"]
     |> Path.join()
     |> Path.wildcard()
     |> Enum.map(&load_paused_interrupt_manifest/1)
     |> Enum.reject(&is_nil/1)
+    |> Enum.filter(fn {_issue_id, entry} ->
+      service_mode != :trackerless_core or execution_request_entry?(entry)
+    end)
     |> Enum.sort_by(fn {_issue_id, entry} -> Map.get(entry, :paused_at) || "" end)
     |> Map.new()
   rescue
@@ -5032,6 +5049,20 @@ defmodule Rondo.Orchestrator do
 
   defp schedule_timeseries_sample do
     Process.send_after(self(), :timeseries_sample, @timeseries_sample_interval_ms)
+  end
+
+  defp maybe_schedule_core_maintenance(%State{service_mode: :trackerless_core} = state),
+    do: schedule_core_maintenance(state)
+
+  defp maybe_schedule_core_maintenance(%State{} = state), do: state
+
+  defp schedule_core_maintenance(%State{} = state) do
+    if is_reference(state.core_maintenance_timer_ref) do
+      Process.cancel_timer(state.core_maintenance_timer_ref)
+    end
+
+    timer_ref = Process.send_after(self(), :core_maintenance, state.core_maintenance_interval_ms)
+    %{state | core_maintenance_timer_ref: timer_ref}
   end
 
   defp schedule_tick(%State{} = state, delay_ms) when is_integer(delay_ms) and delay_ms >= 0 do

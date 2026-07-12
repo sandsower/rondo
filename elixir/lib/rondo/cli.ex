@@ -9,6 +9,8 @@ defmodule Rondo.CLI do
   @switches [logs_root: :string, port: :integer, debug: :boolean]
   @core_switches @switches ++ [ready_file: :string, workspace_root: :string]
   @run_once_switches @switches ++ [issue: :string, manifest: :string, unsafe_child_credential_bypass: :boolean]
+  @core_readiness_attempts 50
+  @core_readiness_retry_ms 20
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type evaluate_result :: :ok | :run_once_completed | {:error, String.t()}
@@ -119,7 +121,7 @@ defmodule Rondo.CLI do
          :ok <- maybe_set_debug(opts),
          :ok <- set_service_mode(deps, :trackerless_core),
          {:ok, _started_apps} <- deps.ensure_all_started.(),
-         {:ok, readiness} <- core_readiness(deps),
+         {:ok, readiness} <- await_core_readiness(deps, @core_readiness_attempts),
          :ok <- write_ready_file(deps, ready_file, readiness) do
       :ok
     else
@@ -272,6 +274,17 @@ defmodule Rondo.CLI do
 
   defp core_readiness(deps) do
     Map.get(deps, :core_readiness, &core_readiness/0).()
+  end
+
+  defp await_core_readiness(deps, attempts) when attempts > 0 do
+    case core_readiness(deps) do
+      {:error, :core_not_ready} when attempts > 1 ->
+        Process.sleep(@core_readiness_retry_ms)
+        await_core_readiness(deps, attempts - 1)
+
+      result ->
+        result
+    end
   end
 
   defp core_readiness do

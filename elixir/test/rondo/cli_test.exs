@@ -193,6 +193,32 @@ defmodule Rondo.CLITest do
              )
   end
 
+  test "core mode retries transient readiness gaps before publishing" do
+    Process.put(:core_readiness_attempt, 0)
+
+    deps = %{
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      set_workspace_root: fn _path -> :ok end,
+      set_service_mode: fn _mode -> :ok end,
+      ensure_all_started: fn -> {:ok, [:rondo]} end,
+      core_readiness: fn ->
+        attempt = Process.get(:core_readiness_attempt, 0) + 1
+        Process.put(:core_readiness_attempt, attempt)
+
+        if attempt < 3 do
+          {:error, :core_not_ready}
+        else
+          {:ok, %{"ready" => true}}
+        end
+      end,
+      write_ready_file: fn _path, %{"ready" => true} -> :ok end
+    }
+
+    assert :ok = CLI.evaluate(["core", "--ready-file", "tmp/core-ready.json"], deps)
+    assert Process.get(:core_readiness_attempt) == 3
+  end
+
   test "core mode requires one nonblank readiness path before startup" do
     deps = %{
       file_regular?: fn _path -> false end,

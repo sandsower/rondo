@@ -43,9 +43,8 @@ defmodule RondoWeb.CoreApiController do
   end
 
   defp do_health(conn) do
-    identity = core_identity().snapshot(orchestrator())
-
-    with true <- exact_required_echo?(identity, :surface, @surface),
+    with {:ok, identity} <- core_identity_snapshot(),
+         true <- exact_required_echo?(identity, :surface, @surface),
          {:ok, runtime_version} <- nonempty_response_string(identity, :runtime_version),
          {:ok, instance_id} <- nonempty_response_string(identity, :instance_id),
          true <- Regex.match?(@instance_id_pattern, instance_id),
@@ -66,6 +65,14 @@ defmodule RondoWeb.CoreApiController do
     else
       _invalid -> feed_error(conn, :unavailable)
     end
+  end
+
+  defp core_identity_snapshot do
+    {:ok, core_identity().snapshot(orchestrator())}
+  rescue
+    _error -> :unavailable
+  catch
+    _kind, _reason -> :unavailable
   end
 
   defp do_run_status(conn, run_id, params) do
