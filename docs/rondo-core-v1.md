@@ -137,7 +137,7 @@ The status cursor is the replay-from-start cursor for the paged event feed.
 ```
 
 The response requires exact `surface`, `repo_id`, and `run_id` echoes and carries any durable Plot identity on the page and each run-scoped event namespace.
-Each cursor is an opaque strict `rondo.core/v1:<decimal>` token, and malformed or foreign cursor syntax returns `invalid_request` instead of replaying from zero.
+Each cursor is an opaque strict `rondo.core/v1:<decimal>` token whose decimal component contains at most 20 digits, and malformed, oversized, or foreign cursor syntax returns `invalid_request` instead of replaying from zero.
 `next_event_cursor` advances by exactly the number of represented events in the page, and the caller continues with that cursor while `has_more` is `true`.
 Artifact events retain immutable ledger-recorded ordering timestamps, so an already delivered cursor prefix does not shift when a run finishes.
 An oversized individual event is replaced at the same sequence position by a bounded sanitized diagnostic, which preserves cursor progress.

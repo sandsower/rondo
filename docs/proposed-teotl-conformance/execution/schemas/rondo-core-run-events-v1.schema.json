@@ -21,8 +21,8 @@
   "$defs": {
     "cursor": {
       "type": "string",
-      "pattern": "^rondo\\.core/v1:\\d+$",
-      "description": "Opaque append-only cursor carrying the count already consumed."
+      "pattern": "^rondo\\.core/v1:\\d{1,20}$",
+      "description": "Opaque append-only cursor carrying the count already consumed as at most 20 decimal digits."
     },
     "timestamp": {
       "type": "string",

@@ -36,7 +36,7 @@ The first authoritative runner (per `contracts/execution.md`) should:
 2. Call `run.events` from the zero cursor and validate every event against
    `rondo-core-run-events-v1.schema.json`.
 3. Assert exactly one event of each of the three families is present, that
-   `next_event_cursor` matches `^rondo\.core/v1:\d+$`, `has_more` is boolean,
+   `next_event_cursor` matches `^rondo\.core/v1:\d{1,20}$`, `has_more` is boolean,
    and that resuming from a
    mid cursor returns the correct tail (matching `run-events-resume.json`'s
    shape) without relaunching the run.
