@@ -77,6 +77,7 @@ defmodule Rondo.Agent.ChildLaunchEnvelope do
     Map.new(values, fn {key, value} -> {to_string(key), stringify_value(value)} end)
   end
 
+  defp stringify_value(value) when is_boolean(value), do: value
   defp stringify_value(value) when is_atom(value), do: to_string(value)
   defp stringify_value(value), do: value
 

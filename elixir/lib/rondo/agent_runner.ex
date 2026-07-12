@@ -380,6 +380,9 @@ defmodule Rondo.AgentRunner do
           opts: Keyword.put(opts, :child_launch_envelope, envelope)
         })
       else
+        {:error, {:child_launch_evidence_write_failed, _reason} = tagged_reason} ->
+          {:error, tagged_reason}
+
         {:block, envelope} ->
           {:error, {:child_launch_blocked, ChildLaunchPolicy.sanitize(envelope)}}
 

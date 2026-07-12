@@ -1032,8 +1032,6 @@ defmodule Rondo.RunLedger do
 
   defp checkpoint_kind_for_event(:claude_starting), do: "workspace_ready"
   defp checkpoint_kind_for_event("claude_starting"), do: "workspace_ready"
-  defp checkpoint_kind_for_event(:child_launch_policy_resolved), do: "child_launch_policy_resolved"
-  defp checkpoint_kind_for_event("child_launch_policy_resolved"), do: "child_launch_policy_resolved"
   defp checkpoint_kind_for_event(:session_started), do: "turn_started"
   defp checkpoint_kind_for_event("session_started"), do: "turn_started"
   defp checkpoint_kind_for_event(:result), do: "turn_completed"

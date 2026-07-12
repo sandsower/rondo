@@ -16,7 +16,7 @@ defmodule Rondo.RunOnceTest do
              )
 
     assert_received {:agent_run, %Issue{id: "slice-bypass"}, agent_opts}
-    assert Keyword.fetch!(agent_opts, :unsafe_child_credential_bypass)
+    assert Keyword.fetch!(agent_opts, :unsafe_child_credential_bypass) === true
     assert Keyword.fetch!(agent_opts, :dispatch_origin) == :manifest
   end
 

@@ -149,7 +149,7 @@ defmodule Rondo.CLITest do
 
     assert_received {:run_once_with_opts, "123", opts}
     assert Keyword.get(opts[:agent_opts], :dispatch_origin) == :run_once
-    assert Keyword.get(opts[:agent_opts], :unsafe_child_credential_bypass)
+    assert Keyword.get(opts[:agent_opts], :unsafe_child_credential_bypass) === true
 
     deps =
       Map.put(deps, :run_manifest, fn manifest_path, opts ->
@@ -165,7 +165,7 @@ defmodule Rondo.CLITest do
 
     assert_received {:run_manifest_with_opts, _path, manifest_opts}
     assert Keyword.get(manifest_opts[:agent_opts], :dispatch_origin) == :manifest
-    assert Keyword.get(manifest_opts[:agent_opts], :unsafe_child_credential_bypass)
+    assert Keyword.get(manifest_opts[:agent_opts], :unsafe_child_credential_bypass) === true
   end
 
   test "run-once rejects both issue and manifest" do

@@ -200,22 +200,27 @@ defmodule Rondo.Agent.ChildLaunchPolicy do
   defp denied_action?(denied, candidates), do: Enum.any?(candidates, &(&1 in denied))
 
   defp provider_environment_names(adapter, model, opts) do
+    provider = provider_from_model(adapter, model)
+    expected_names = default_provider_env_names(adapter, provider)
+
     case Keyword.get(opts, :provider_auth_env_names) do
       names when is_list(names) ->
-        validate_provider_env_names(names, provider_from_model(adapter, model))
+        validate_provider_env_names(names, expected_names, provider)
 
       nil ->
-        provider = provider_from_model(adapter, model)
-        validate_provider_env_names(default_provider_env_names(adapter, provider), provider)
+        validate_provider_env_names(expected_names, expected_names, provider)
 
       _other ->
         {:error, :invalid_provider_auth_profile}
     end
   end
 
-  defp validate_provider_env_names(names, provider) do
-    if Enum.all?(names, &(is_binary(&1) and provider_auth_name?(&1))) do
-      {:ok, Enum.uniq(names), provider}
+  defp validate_provider_env_names(names, expected_names, provider) do
+    normalized_names = Enum.uniq(names)
+
+    if Enum.all?(normalized_names, &(is_binary(&1) and provider_auth_name?(&1))) and
+         MapSet.new(normalized_names) == MapSet.new(expected_names) do
+      {:ok, normalized_names, provider}
     else
       {:error, :invalid_provider_auth_profile}
     end
@@ -301,6 +306,7 @@ defmodule Rondo.Agent.ChildLaunchPolicy do
          unsafe_bypass: unsafe_bypass
        }) do
     {decision, reason, bypass} = launch_decision(run_mode, origin, isolation_baseline, unsafe_bypass)
+    bypass = Map.put(bypass, :attempted, unsafe_bypass != false)
 
     struct!(ChildLaunchEnvelope,
       decision: decision,
@@ -350,6 +356,8 @@ defmodule Rondo.Agent.ChildLaunchPolicy do
   defp resolution(%ChildLaunchEnvelope{} = envelope), do: {:ok, envelope}
 
   defp invalid_envelope(opts, run_mode, origin, adapter, model, isolation_baseline, run_dir, reason) do
+    unsafe_bypass = Keyword.get(opts, :unsafe_bypass, false)
+
     denied_actions = %{
       local_worktree_write: false,
       local_git_write: false,
@@ -370,7 +378,12 @@ defmodule Rondo.Agent.ChildLaunchPolicy do
       home_path: invalid_home_path(run_dir, adapter),
       environment: %{},
       effective_actions: denied_actions,
-      bypass: %{requested: Keyword.get(opts, :unsafe_bypass, false) === true, applied: false, reason: :invalid_request}
+      bypass: %{
+        requested: unsafe_bypass === true,
+        attempted: unsafe_bypass != false,
+        applied: false,
+        reason: :invalid_request
+      }
     )
   end
 

@@ -110,6 +110,29 @@ defmodule Rondo.ChildLaunchIntegrationTest do
     refute_received {:fake_pi_invoked, _, _}
   end
 
+  test "ledger evidence failures retain their classification" do
+    {issue, ledger} = setup_run("EVIDENCE-FAILURE", action_policy_run_mode: "unattended-auto")
+    broken_run_dir = Path.join(ledger.run_dir, "missing-ledger")
+    broken_ledger = %{ledger | run_dir: broken_run_dir, manifest_path: Path.join(broken_run_dir, "manifest.json")}
+
+    error =
+      assert_raise RuntimeError, fn ->
+        AgentRunner.run(issue, self(),
+          agent_adapter: FakePiAdapter,
+          run_ledger: broken_ledger,
+          run_dir: ledger.run_dir,
+          child_isolation_baseline: :os_credential_isolated,
+          gates: [],
+          test_pid: self(),
+          issue_state_fetcher: &AgentRunner.no_tracker_issue_state_fetcher/1
+        )
+      end
+
+    assert error.message =~ "child_launch_evidence_write_failed"
+    refute error.message =~ "child_home_prepare_failed"
+    refute_received {:fake_pi_invoked, _, _}
+  end
+
   test "run-once manifest rejection persists evidence and never invokes the adapter" do
     root = Path.join(System.tmp_dir!(), "rondo-run-once-manifest-bypass-#{System.unique_integer([:positive])}")
     workspace_root = Path.join(root, "workspaces")
@@ -161,11 +184,13 @@ defmodule Rondo.ChildLaunchIntegrationTest do
     assert evidence["decision"] == "block"
     assert evidence["dispatch_origin"] == "manifest"
     assert evidence["reason"] == "manifest_child_credential_bypass_forbidden"
+    assert Enum.count(manifest["checkpoints"], &(&1["kind"] == "child_launch_policy_resolved")) == 1
     refute_received {:fake_pi_invoked, _, _}
   end
 
   defp setup_run(suffix, workflow_opts) do
     root = Path.join(System.tmp_dir!(), "rondo-child-launch-integration-#{suffix}-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf(root) end)
     workspace_root = Path.join(root, "workspaces")
 
     write_workflow_file!(

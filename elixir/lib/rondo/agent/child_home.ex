@@ -23,8 +23,11 @@ defmodule Rondo.Agent.ChildHome do
   end
 
   defp make_private_directory(path) do
-    case File.mkdir_p(path) do
-      :ok -> File.chmod(path, 0o700)
+    with :ok <- File.mkdir_p(path),
+         {:ok, %File.Stat{type: :directory}} <- File.lstat(path) do
+      File.chmod(path, 0o700)
+    else
+      {:ok, %File.Stat{type: type}} -> {:error, {:unexpected_child_home_entry, path, type}}
       error -> error
     end
   end

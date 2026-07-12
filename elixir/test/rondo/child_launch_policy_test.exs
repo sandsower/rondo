@@ -20,6 +20,7 @@ defmodule Rondo.ChildLaunchPolicyTest do
     assert envelope.decision == :block
     assert envelope.reason == :insufficient_isolation
     assert envelope.required_isolation_baseline == :os_credential_isolated
+    assert envelope.environment == %{}
     refute inspect(ChildLaunchPolicy.sanitize(envelope)) =~ @secret
   end
 
@@ -37,7 +38,7 @@ defmodule Rondo.ChildLaunchPolicyTest do
              )
 
     assert envelope.decision == :supervised_bypass
-    assert envelope.bypass == %{requested: true, applied: true, reason: :explicit_supervised_run_once}
+    assert envelope.bypass == %{requested: true, attempted: true, applied: true, reason: :explicit_supervised_run_once}
     assert envelope.environment["OPENAI_API_KEY"] == @secret
     refute Map.has_key?(envelope.environment, "GH_TOKEN")
     refute inspect(ChildLaunchPolicy.sanitize(envelope)) =~ @secret
@@ -136,6 +137,23 @@ defmodule Rondo.ChildLaunchPolicyTest do
     assert envelope.reason == :invalid_allowed_actions
   end
 
+  test "provider credential overrides must match the selected provider" do
+    assert {:block, envelope} =
+             ChildLaunchPolicy.resolve(
+               run_mode: "unattended-auto",
+               dispatch_origin: :daemon,
+               adapter: "claude_code",
+               model: "claude-sonnet",
+               isolation_baseline: :os_credential_isolated,
+               run_dir: "/tmp/run-provider-mismatch",
+               provider_auth_env_names: ["OPENAI_API_KEY"],
+               inherited_env: %{"ANTHROPIC_API_KEY" => @secret, "OPENAI_API_KEY" => @secret}
+             )
+
+    assert envelope.reason == :invalid_provider_auth_profile
+    assert envelope.environment == %{}
+  end
+
   test "malformed launch paths fail closed instead of raising" do
     assert {:block, envelope} =
              ChildLaunchPolicy.resolve(
@@ -193,5 +211,12 @@ defmodule Rondo.ChildLaunchPolicyTest do
       assert evidence["decision"] == "block"
       refute inspect(evidence) =~ @secret
     end
+
+    assert {:block, malformed_bypass} =
+             ChildLaunchPolicy.resolve(Keyword.put(valid, :unsafe_bypass, "yes"))
+
+    evidence = ChildLaunchPolicy.sanitize(malformed_bypass)
+    assert evidence["bypass"]["requested"] == false
+    assert evidence["bypass"]["attempted"] == true
   end
 end
