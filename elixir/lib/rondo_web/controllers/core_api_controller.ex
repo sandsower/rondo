@@ -68,7 +68,10 @@ defmodule RondoWeb.CoreApiController do
   end
 
   defp core_identity_snapshot do
-    {:ok, core_identity().snapshot(orchestrator())}
+    case core_identity().snapshot(orchestrator()) do
+      identity when is_map(identity) -> {:ok, identity}
+      _other -> :unavailable
+    end
   rescue
     _error -> :unavailable
   catch

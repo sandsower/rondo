@@ -14,6 +14,11 @@ defmodule Rondo.Core.IdentityTest do
   end
 
   test "concurrent initialization keeps one stable process identity" do
+    instance_key = {Identity, :instance_id}
+    :persistent_term.erase(instance_key)
+
+    on_exit(fn -> Identity.initialize() end)
+
     snapshots =
       1..32
       |> Task.async_stream(fn _ -> Identity.snapshot(Rondo.Orchestrator) end,

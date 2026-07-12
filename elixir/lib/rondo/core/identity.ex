@@ -10,7 +10,7 @@ defmodule Rondo.Core.Identity do
 
   @spec initialize() :: :ok
   def initialize do
-    :global.trans({__MODULE__, :initialize}, fn ->
+    :global.trans({{__MODULE__, :initialize}, self()}, fn ->
       case :persistent_term.get(@instance_key, nil) do
         nil -> :persistent_term.put(@instance_key, generate_instance_id())
         _instance_id -> :ok

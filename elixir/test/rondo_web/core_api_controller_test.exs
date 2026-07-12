@@ -132,12 +132,14 @@ defmodule RondoWeb.CoreApiControllerTest do
   end
 
   test "GET health maps identity failures to the stable unavailable envelope" do
-    set_health_result({:raise, "identity unavailable"})
+    for failure <- [{:raise, "identity unavailable"}, nil, []] do
+      set_health_result(failure)
 
-    conn = request(:get, "/api/v1/health")
+      conn = request(:get, "/api/v1/health")
 
-    assert %{"error" => %{"code" => "core_unavailable"}} = decoded_response(conn, 503)
-    refute conn.resp_body =~ "identity unavailable"
+      assert %{"error" => %{"code" => "core_unavailable"}} = decoded_response(conn, 503)
+      refute conn.resp_body =~ "identity unavailable"
+    end
   end
 
   test "POST execution-requests submits a validated request and returns 202 for a new run" do
