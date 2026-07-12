@@ -11,6 +11,40 @@ The endpoint performs this loopback check before request-body parsing, controlle
 The surface is intended for trusted same-host operators and is not a remote execution API.
 Callers identify runs only through the returned opaque service, repository, run, cursor, and evidence values, and the API accepts no ledger-directory parameter.
 
+## Verify service identity and readiness
+
+`GET /api/v1/health` returns the exact identity of the current Rondo process before a lifecycle owner adopts it.
+The route is loopback-only and exposes no workflow, workspace, ledger, log, or filesystem path.
+
+```json
+{
+  "surface": "rondo.core/v1",
+  "runtime_version": "0.1.0",
+  "instance_id": "019b8941-4a0c-7ad5-b7ef-cb3c45e4a819",
+  "service_mode": "trackerless_core",
+  "ready": true,
+  "active_run_count": 0
+}
+```
+
+`instance_id` is an immutable random UUID generated once for the life of the BEAM process.
+Lifecycle owners must treat stored endpoint and process metadata only as hints until `surface`, `runtime_version`, `instance_id`, and `service_mode` match the live response.
+`ready` is true only while the coupled execution orchestrator can answer readiness queries.
+`active_run_count` is a point-in-time report of currently executing Rondo-owned runs.
+Lifecycle owners use it to refuse shutdown while observed work is active, but it is advisory because this version has no atomic drain fence preventing a new admission immediately after the health read.
+
+## Trackerless Core service mode
+
+`rondo core --port 0 --ready-file <path> --logs-root <path> --workspace-root <path>` starts the execution service without a tracker workflow or tracker polling loop.
+The command binds the normal HTTP service to literal loopback on a dynamically allocated port and atomically writes the private readiness document only after the endpoint and exact process identity are live.
+The readiness document adds `base_url` to the health fields so the lifecycle owner can perform an independent live handshake before publishing its own runtime descriptor.
+Trackerless Core mode retains the coupled task supervisor and durable startup recovery boundary.
+It does not start tracker-only workflow, dashboard, presenter, or status children and does not run tracker cleanup or reconciliation.
+Normal Rondo daemon startup remains `tracker_daemon` mode and preserves its existing tracker behavior.
+Trackerless admission validates Core execution settings such as the agent command and capacity, but it does not require tracker kind, tracker credentials, tracker project identity, or a tracker repository URL.
+When no workflow file exists, Core uses the built-in execution defaults; when a workflow file exists but is malformed or contains an invalid Core execution setting, admission fails closed.
+The normal daemon continues to require and validate its complete tracker configuration.
+
 ## Submit one approved manifest
 
 `POST /api/v1/execution-requests` accepts exactly one selected child manifest from an approved `approved-slice-plan-export-v0` bundle.

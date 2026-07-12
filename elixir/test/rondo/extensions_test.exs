@@ -562,6 +562,8 @@ defmodule Rondo.ExtensionsTest do
     unlink_endpoint()
     assert :ignore = HttpServer.start_link(port: nil)
     assert is_integer(HttpServer.bound_port())
+    assert {{127, 0, 0, 1}, port} = HttpServer.bound_address()
+    assert port == HttpServer.bound_port()
     assert {:ok, {127, 0, 0, 1}} = HttpServer.parse_host_for_test({127, 0, 0, 1})
     assert {:ok, {0, 0, 0, 0, 0, 0, 0, 1}} = HttpServer.parse_host_for_test({0, 0, 0, 0, 0, 0, 0, 1})
   end

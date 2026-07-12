@@ -63,6 +63,34 @@ defmodule Rondo.CoreTest do
     assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.kind"}]}} = Config.validate!()
   end
 
+  test "trackerless Core validation accepts safe defaults without tracker authority" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_repo: nil,
+      claude_command: "/usr/bin/claude"
+    )
+
+    assert {:error, {:invalid_workflow_config, _, [%{path: "tracker.repo"}]}} =
+             Config.validate!()
+
+    assert :ok = Config.validate_core!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_repo: nil,
+      claude_command: ""
+    )
+
+    assert {:error, {:invalid_workflow_config, _, [%{path: "claude.command"}]}} =
+             Config.validate_core!()
+  end
+
+  test "trackerless Core validation accepts built-in defaults without WORKFLOW.md" do
+    assert :ok = File.rm(Workflow.workflow_file_path())
+
+    assert :ok = Config.validate_core!()
+  end
+
   test "release_loop.closeout.merge.mode validates under the nested merge section" do
     write_workflow_file!(Workflow.workflow_file_path(), release_loop_merge_mode: "merge-plz")
 

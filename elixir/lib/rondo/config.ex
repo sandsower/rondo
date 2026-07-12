@@ -528,9 +528,20 @@ defmodule Rondo.Config do
 
   @spec workspace_root() :: Path.t()
   def workspace_root do
-    validated_workflow_options()
-    |> get_in([:workspace, :root])
-    |> resolve_path_value(@default_workspace_root)
+    case Application.get_env(:rondo, :workspace_root_override) do
+      path when is_binary(path) ->
+        Path.expand(path)
+
+      _other ->
+        validated_workflow_options()
+        |> get_in([:workspace, :root])
+        |> resolve_path_value(@default_workspace_root)
+    end
+  end
+
+  @spec set_workspace_root_override(Path.t()) :: :ok
+  def set_workspace_root_override(path) when is_binary(path) do
+    Application.put_env(:rondo, :workspace_root_override, Path.expand(path))
   end
 
   @spec worker_max_concurrent_agents_per_host() :: pos_integer()
@@ -887,6 +898,20 @@ defmodule Rondo.Config do
     Application.get_env(:rondo, :debug, @default_debug)
   end
 
+  @spec service_mode() :: :tracker_daemon | :trackerless_core | :invalid
+  def service_mode do
+    case Application.get_env(:rondo, :service_mode, :tracker_daemon) do
+      :trackerless_core -> :trackerless_core
+      :tracker_daemon -> :tracker_daemon
+      _other -> :invalid
+    end
+  end
+
+  @spec set_service_mode(:tracker_daemon | :trackerless_core) :: :ok
+  def set_service_mode(mode) when mode in [:tracker_daemon, :trackerless_core] do
+    Application.put_env(:rondo, :service_mode, mode)
+  end
+
   @spec set_debug(boolean()) :: :ok
   def set_debug(enabled) when is_boolean(enabled) do
     Application.put_env(:rondo, :debug, enabled)
@@ -932,6 +957,22 @@ defmodule Rondo.Config do
     end
   end
 
+  @spec validate_core!() :: :ok | {:error, term()}
+  def validate_core! do
+    path = Workflow.workflow_file_path()
+
+    case Workflow.load(path) do
+      {:ok, workflow} ->
+        validate_core_workflow(workflow, path)
+
+      {:error, {:missing_workflow_file, ^path, :enoent}} ->
+        validate_core_workflow(%{config: %{}}, path)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   @spec validate_workflow(workflow_payload(), Path.t()) :: :ok | {:error, term()}
   def validate_workflow(workflow, path \\ Workflow.workflow_file_path()) do
     with {:ok, options} <- validate_workflow_options(workflow, path),
@@ -939,6 +980,12 @@ defmodule Rondo.Config do
          :ok <- require_linear_token(options, path),
          :ok <- require_linear_project(options, path),
          :ok <- require_github_repo(options, path) do
+      require_agent_command(options, path)
+    end
+  end
+
+  defp validate_core_workflow(workflow, path) do
+    with {:ok, options} <- validate_workflow_options(workflow, path) do
       require_agent_command(options, path)
     end
   end

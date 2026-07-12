@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://crust.local/schemas/rondo-core-run-events-v1.schema.json",
+  "$id": "https://nopal.sh/schemas/rondo-core-run-events-v1.schema.json",
   "title": "Rondo Core run.events response and event families v1",
   "description": "Payload schema for the rondo.core/v1 run.events operation and the three event families a consumer receives.",
   "type": "object",

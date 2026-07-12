@@ -40,6 +40,7 @@ defmodule Rondo.Orchestrator do
   @event_log_max_entries 100
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @core_maintenance_interval_ms 5_000
   @missing_issue_terminate_threshold 3
   @empty_claude_totals %{
     input_tokens: 0,
@@ -60,6 +61,10 @@ defmodule Rondo.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :tracker_polling,
+      :service_mode,
+      :core_maintenance_interval_ms,
+      :core_maintenance_timer_ref,
       :execution_request_runner,
       :execution_request_task_starter,
       :execution_request_after_prepare,
@@ -88,18 +93,24 @@ defmodule Rondo.Orchestrator do
   def init(opts) do
     now_ms = System.monotonic_time(:millisecond)
     task_supervisor = Keyword.get(opts, :task_supervisor, Rondo.TaskSupervisor)
+    service_mode = Keyword.get(opts, :service_mode, :tracker_daemon)
+    tracker_polling = service_mode != :trackerless_core and Keyword.get(opts, :tracker_polling, true)
 
     case maybe_recover_runs(opts, task_supervisor) do
       :ok ->
-        paused_interrupts = load_paused_interrupts()
+        paused_interrupts = load_paused_interrupts(service_mode)
 
         state = %State{
           poll_interval_ms: Config.poll_interval_ms(),
           max_concurrent_agents: Config.max_concurrent_agents(),
-          next_poll_due_at_ms: now_ms,
+          next_poll_due_at_ms: if(tracker_polling, do: now_ms, else: nil),
           poll_check_in_progress: false,
           tick_timer_ref: nil,
           tick_token: nil,
+          tracker_polling: tracker_polling,
+          service_mode: service_mode,
+          core_maintenance_interval_ms: Keyword.get(opts, :core_maintenance_interval_ms, @core_maintenance_interval_ms),
+          core_maintenance_timer_ref: nil,
           execution_request_runner: Keyword.get(opts, :execution_request_runner, &AgentRunner.run/3),
           execution_request_task_starter:
             Keyword.get(
@@ -123,8 +134,9 @@ defmodule Rondo.Orchestrator do
         Process.flag(:trap_exit, true)
         Rondo.TimeSeries.init()
         schedule_timeseries_sample()
-        run_terminal_workspace_cleanup()
-        state = schedule_tick(state, 0)
+        if tracker_polling, do: run_terminal_workspace_cleanup()
+        state = if tracker_polling, do: schedule_tick(state, 0), else: state
+        state = maybe_schedule_core_maintenance(state)
 
         {:ok, state}
 
@@ -217,6 +229,17 @@ defmodule Rondo.Orchestrator do
   defp terminate_running_child(_running_entry), do: :ok
 
   @impl true
+  def handle_info({:tick, _tick_token}, %{tracker_polling: false} = state),
+    do: {:noreply, state}
+
+  def handle_info(:core_maintenance, %{service_mode: :trackerless_core} = state) do
+    state = %{state | core_maintenance_timer_ref: nil}
+    state = reconcile_stalled_running_issues(state)
+    {:noreply, schedule_core_maintenance(state)}
+  end
+
+  def handle_info(:core_maintenance, state), do: {:noreply, state}
+
   def handle_info({:tick, tick_token}, %{tick_token: tick_token} = state)
       when is_reference(tick_token) do
     state = refresh_runtime_config(state)
@@ -240,6 +263,9 @@ defmodule Rondo.Orchestrator do
     Logger.debug("Orchestrator ignored bare :tick (no token)")
     {:noreply, state}
   end
+
+  def handle_info(:run_poll_cycle, %{tracker_polling: false} = state),
+    do: {:noreply, state}
 
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
@@ -3112,6 +3138,21 @@ defmodule Rondo.Orchestrator do
   @spec snapshot() :: map() | :timeout | :unavailable
   def snapshot, do: snapshot(__MODULE__, 15_000)
 
+  @spec active_run_count(GenServer.server()) :: non_neg_integer() | :unavailable
+  def active_run_count(server \\ __MODULE__) do
+    case GenServer.whereis(server) do
+      pid when is_pid(pid) ->
+        try do
+          GenServer.call(pid, :active_run_count)
+        catch
+          :exit, _reason -> :unavailable
+        end
+
+      _other ->
+        :unavailable
+    end
+  end
+
   @spec snapshot(GenServer.server(), timeout()) :: map() | :timeout | :unavailable
   def snapshot(server, timeout) do
     case GenServer.whereis(server) do
@@ -3137,6 +3178,10 @@ defmodule Rondo.Orchestrator do
     end
 
     {:reply, reply, state}
+  end
+
+  def handle_call(:active_run_count, _from, state) do
+    {:reply, map_size(state.running), state}
   end
 
   def handle_call({:submit_guidance, issue_ref, guidance}, _from, state) do
@@ -3285,6 +3330,16 @@ defmodule Rondo.Orchestrator do
      }, state}
   end
 
+  def handle_call(:request_refresh, _from, %{tracker_polling: false} = state) do
+    {:reply,
+     %{
+       queued: false,
+       coalesced: false,
+       requested_at: DateTime.utc_now(),
+       operations: []
+     }, state}
+  end
+
   def handle_call(:request_refresh, _from, state) do
     now_ms = System.monotonic_time(:millisecond)
     already_due? = is_integer(state.next_poll_due_at_ms) and state.next_poll_due_at_ms <= now_ms
@@ -3301,7 +3356,7 @@ defmodule Rondo.Orchestrator do
   end
 
   defp admit_execution_request(%State{} = state, params) do
-    case Config.validate!() do
+    case validate_execution_request_config(state) do
       :ok ->
         prepare_and_admit_execution_request(state, params)
 
@@ -3313,6 +3368,11 @@ defmodule Rondo.Orchestrator do
       Logger.error("Execution request admission failed error=#{Exception.message(error)}")
       {{:error, :execution_request_admission_failed}, state}
   end
+
+  defp validate_execution_request_config(%State{service_mode: :trackerless_core}),
+    do: Config.validate_core!()
+
+  defp validate_execution_request_config(_state), do: Config.validate!()
 
   defp prepare_and_admit_execution_request(state, params) do
     case ExecutionRequest.prepare_core_submission(
@@ -4473,12 +4533,15 @@ defmodule Rondo.Orchestrator do
       []
   end
 
-  defp load_paused_interrupts do
+  defp load_paused_interrupts(service_mode) do
     [Config.workspace_root(), ".rondo_runs", "*", "*", "manifest.json"]
     |> Path.join()
     |> Path.wildcard()
     |> Enum.map(&load_paused_interrupt_manifest/1)
     |> Enum.reject(&is_nil/1)
+    |> Enum.filter(fn {_issue_id, entry} ->
+      service_mode != :trackerless_core or execution_request_entry?(entry)
+    end)
     |> Enum.sort_by(fn {_issue_id, entry} -> Map.get(entry, :paused_at) || "" end)
     |> Map.new()
   rescue
@@ -4986,6 +5049,20 @@ defmodule Rondo.Orchestrator do
 
   defp schedule_timeseries_sample do
     Process.send_after(self(), :timeseries_sample, @timeseries_sample_interval_ms)
+  end
+
+  defp maybe_schedule_core_maintenance(%State{service_mode: :trackerless_core} = state),
+    do: schedule_core_maintenance(state)
+
+  defp maybe_schedule_core_maintenance(%State{} = state), do: state
+
+  defp schedule_core_maintenance(%State{} = state) do
+    if is_reference(state.core_maintenance_timer_ref) do
+      Process.cancel_timer(state.core_maintenance_timer_ref)
+    end
+
+    timer_ref = Process.send_after(self(), :core_maintenance, state.core_maintenance_interval_ms)
+    %{state | core_maintenance_timer_ref: timer_ref}
   end
 
   defp schedule_tick(%State{} = state, delay_ms) when is_integer(delay_ms) and delay_ms >= 0 do

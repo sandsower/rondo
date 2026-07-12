@@ -19,6 +19,7 @@ defmodule Rondo.RunSupervisor do
   def init(opts) do
     task_supervisor = Keyword.get(opts, :task_supervisor, Rondo.TaskSupervisor)
     orchestrator = Keyword.get(opts, :orchestrator, Rondo.Orchestrator)
+    service_mode = Keyword.get(opts, :service_mode, :tracker_daemon)
 
     orchestrator_opts =
       opts
@@ -26,6 +27,8 @@ defmodule Rondo.RunSupervisor do
       |> Keyword.put(:name, orchestrator)
       |> Keyword.put(:task_supervisor, task_supervisor)
       |> Keyword.put(:run_recovery, true)
+      |> Keyword.put(:service_mode, service_mode)
+      |> Keyword.put(:tracker_polling, service_mode != :trackerless_core)
 
     children = [
       Supervisor.child_spec(

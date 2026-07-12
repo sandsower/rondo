@@ -3,10 +3,14 @@ defmodule Rondo.CLI do
   Escript entrypoint for running Rondo with an explicit WORKFLOW.md path.
   """
 
-  alias Rondo.{LogFile, RunOnce}
+  alias Rondo.Core.Identity
+  alias Rondo.{HttpServer, LogFile, RunOnce}
 
   @switches [logs_root: :string, port: :integer, debug: :boolean]
+  @core_switches @switches ++ [ready_file: :string, workspace_root: :string]
   @run_once_switches @switches ++ [issue: :string, manifest: :string, unsafe_child_credential_bypass: :boolean]
+  @core_readiness_attempts 50
+  @core_readiness_retry_ms 20
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type evaluate_result :: :ok | :run_once_completed | {:error, String.t()}
@@ -15,7 +19,11 @@ defmodule Rondo.CLI do
           required(:set_workflow_file_path) => (String.t() -> :ok | {:error, term()}),
           required(:set_logs_root) => (String.t() -> :ok | {:error, term()}),
           required(:set_server_port_override) => (non_neg_integer() | nil -> :ok | {:error, term()}),
+          optional(:set_workspace_root) => (String.t() -> :ok | {:error, term()}),
+          optional(:set_service_mode) => (:trackerless_core -> :ok | {:error, term()}),
           required(:ensure_all_started) => (-> ensure_started_result()),
+          optional(:core_readiness) => (-> {:ok, map()} | {:error, term()}),
+          optional(:write_ready_file) => (String.t(), map() -> :ok | {:error, term()}),
           optional(:ensure_run_once_dependencies_started) => (-> ensure_started_result()),
           required(:run_once) => (String.t(), keyword() -> :ok | {:error, term()}),
           required(:run_manifest) => (String.t(), keyword() -> :ok | {:error, term()})
@@ -39,6 +47,12 @@ defmodule Rondo.CLI do
   @spec evaluate([String.t()], deps()) :: evaluate_result()
   def evaluate(args, deps \\ runtime_deps()) do
     case parse_args(args) do
+      {:core, opts, []} ->
+        run_core(opts, deps)
+
+      {:core, _opts, _argv} ->
+        {:error, usage_message()}
+
       {:run_once, opts, [workflow_path]} ->
         with :ok <- require_run_once_target(opts),
              :ok <- maybe_set_logs_root(opts, deps),
@@ -70,7 +84,20 @@ defmodule Rondo.CLI do
   end
 
   @type parse_result ::
-          {keyword(), [String.t()], [{String.t(), String.t() | nil}]} | {:run_once, keyword(), [String.t()]}
+          {keyword(), [String.t()], [{String.t(), String.t() | nil}]}
+          | {:core, keyword(), [String.t()]}
+          | {:run_once, keyword(), [String.t()]}
+
+  defp parse_args(["core" | rest]) do
+    if Enum.count(rest, &target_flag?(&1, "--ready-file")) > 1 do
+      {[], [], [{"core", "duplicate ready file"}]}
+    else
+      case OptionParser.parse(rest, strict: @core_switches) do
+        {opts, argv, []} -> {:core, opts, argv}
+        {_opts, _argv, invalid} -> {[], [], invalid}
+      end
+    end
+  end
 
   @spec parse_args([String.t()]) :: parse_result()
   defp parse_args(["run-once" | rest]) do
@@ -85,6 +112,52 @@ defmodule Rondo.CLI do
   end
 
   defp parse_args(args), do: OptionParser.parse(args, strict: @switches)
+
+  defp run_core(opts, deps) do
+    with {:ok, ready_file} <- core_ready_file(opts),
+         :ok <- maybe_set_logs_root(opts, deps),
+         :ok <- maybe_set_server_port(opts, deps),
+         :ok <- maybe_set_workspace_root(opts, deps),
+         :ok <- maybe_set_debug(opts),
+         :ok <- set_service_mode(deps, :trackerless_core),
+         {:ok, _started_apps} <- deps.ensure_all_started.(),
+         {:ok, readiness} <- await_core_readiness(deps, @core_readiness_attempts),
+         :ok <- write_ready_file(deps, ready_file, readiness) do
+      :ok
+    else
+      {:error, message} when is_binary(message) -> {:error, message}
+      {:error, reason} -> {:error, "Failed to start Rondo Core: #{inspect(reason)}"}
+    end
+  end
+
+  defp core_ready_file(opts) do
+    case Keyword.get_values(opts, :ready_file) do
+      [path] when is_binary(path) ->
+        case String.trim(path) do
+          "" -> {:error, usage_message()}
+          value -> {:ok, Path.expand(value)}
+        end
+
+      _other ->
+        {:error, usage_message()}
+    end
+  end
+
+  defp maybe_set_workspace_root(opts, deps) do
+    case Keyword.get_values(opts, :workspace_root) do
+      [] ->
+        :ok
+
+      [path] when is_binary(path) ->
+        case String.trim(path) do
+          "" -> {:error, usage_message()}
+          value -> Map.get(deps, :set_workspace_root, &Rondo.Config.set_workspace_root_override/1).(value)
+        end
+
+      _other ->
+        {:error, usage_message()}
+    end
+  end
 
   defp duplicate_run_once_flags?(args) do
     Enum.count(args, &target_flag?(&1, "--issue")) > 1 or Enum.count(args, &target_flag?(&1, "--manifest")) > 1
@@ -174,7 +247,7 @@ defmodule Rondo.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: rondo [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]\n       rondo run-once [--logs-root <path>] [--unsafe-child-credential-bypass] <path-to-WORKFLOW.md> (--issue <id> | --manifest <path>)"
+    "Usage: rondo [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]\n       rondo core --ready-file <path> [--logs-root <path>] [--workspace-root <path>] [--port 0]\n       rondo run-once [--logs-root <path>] [--unsafe-child-credential-bypass] <path-to-WORKFLOW.md> (--issue <id> | --manifest <path>)"
   end
 
   @spec runtime_deps() :: deps()
@@ -184,11 +257,66 @@ defmodule Rondo.CLI do
       set_workflow_file_path: &Rondo.Workflow.set_workflow_file_path/1,
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
+      set_workspace_root: &Rondo.Config.set_workspace_root_override/1,
+      set_service_mode: &Rondo.Config.set_service_mode/1,
       ensure_all_started: fn -> Application.ensure_all_started(:rondo) end,
+      core_readiness: &core_readiness/0,
+      write_ready_file: &write_ready_file/2,
       ensure_run_once_dependencies_started: &ensure_run_once_dependency_applications_started/0,
       run_once: &RunOnce.run/2,
       run_manifest: &RunOnce.run_manifest/2
     }
+  end
+
+  defp set_service_mode(deps, mode) do
+    Map.get(deps, :set_service_mode, &Rondo.Config.set_service_mode/1).(mode)
+  end
+
+  defp core_readiness(deps) do
+    Map.get(deps, :core_readiness, &core_readiness/0).()
+  end
+
+  defp await_core_readiness(deps, attempts) when attempts > 0 do
+    case core_readiness(deps) do
+      {:error, :core_not_ready} when attempts > 1 ->
+        Process.sleep(@core_readiness_retry_ms)
+        await_core_readiness(deps, attempts - 1)
+
+      result ->
+        result
+    end
+  end
+
+  defp core_readiness do
+    with {{127, 0, 0, 1}, port} when is_integer(port) and port > 0 <- HttpServer.bound_address(),
+         %{"ready" => true, "service_mode" => "trackerless_core"} = identity <-
+           Identity.snapshot() do
+      {:ok, Map.put(identity, "base_url", "http://127.0.0.1:#{port}")}
+    else
+      {ip, _port} -> {:error, {:core_not_loopback, ip}}
+      _other -> {:error, :core_not_ready}
+    end
+  end
+
+  defp write_ready_file(deps, path, readiness) do
+    Map.get(deps, :write_ready_file, &write_ready_file/2).(path, readiness)
+  end
+
+  defp write_ready_file(path, readiness) do
+    parent = Path.dirname(path)
+    temporary = Path.join(parent, ".#{Path.basename(path)}.#{System.unique_integer([:positive, :monotonic])}.tmp")
+
+    with :ok <- File.mkdir_p(parent),
+         {:ok, json} <- Jason.encode(readiness),
+         :ok <- File.write(temporary, json <> "\n", [:exclusive]),
+         :ok <- File.chmod(temporary, 0o600),
+         :ok <- File.rename(temporary, path) do
+      :ok
+    else
+      error ->
+        File.rm(temporary)
+        error
+    end
   end
 
   defp maybe_set_logs_root(opts, deps) do
@@ -202,7 +330,7 @@ defmodule Rondo.CLI do
         if logs_root == "" do
           {:error, usage_message()}
         else
-          :ok = deps.set_logs_root.(Path.expand(logs_root))
+          deps.set_logs_root.(Path.expand(logs_root))
         end
     end
   end
@@ -283,7 +411,7 @@ defmodule Rondo.CLI do
         port = List.last(values)
 
         if is_integer(port) and port >= 0 do
-          :ok = deps.set_server_port_override.(port)
+          deps.set_server_port_override.(port)
         else
           {:error, usage_message()}
         end
