@@ -898,11 +898,12 @@ defmodule Rondo.Config do
     Application.get_env(:rondo, :debug, @default_debug)
   end
 
-  @spec service_mode() :: :tracker_daemon | :trackerless_core
+  @spec service_mode() :: :tracker_daemon | :trackerless_core | :invalid
   def service_mode do
     case Application.get_env(:rondo, :service_mode, :tracker_daemon) do
       :trackerless_core -> :trackerless_core
-      _other -> :tracker_daemon
+      :tracker_daemon -> :tracker_daemon
+      _other -> :invalid
     end
   end
 

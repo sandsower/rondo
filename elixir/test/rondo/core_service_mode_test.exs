@@ -16,6 +16,17 @@ defmodule Rondo.CoreServiceModeTest do
     assert state.tick_timer_ref == nil
     assert state.tick_token == nil
     assert Orchestrator.active_run_count(orchestrator) == 0
+
+    assert %{
+             queued: false,
+             coalesced: false,
+             operations: []
+           } = Orchestrator.request_refresh(orchestrator)
+
+    refreshed_state = :sys.get_state(orchestrator)
+    assert refreshed_state.next_poll_due_at_ms == nil
+    assert refreshed_state.tick_timer_ref == nil
+    assert refreshed_state.tick_token == nil
   end
 
   test "RunSupervisor propagates trackerless Core mode to the coupled orchestrator" do

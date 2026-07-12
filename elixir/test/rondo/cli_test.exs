@@ -165,6 +165,34 @@ defmodule Rondo.CLITest do
     assert readiness["service_mode"] == "trackerless_core"
   end
 
+  test "core mode reports runtime option setter failures without crashing" do
+    base_deps = %{
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      set_workspace_root: fn _path -> :ok end,
+      set_service_mode: fn _mode -> :ok end,
+      ensure_all_started: fn -> {:ok, [:rondo]} end,
+      core_readiness: fn -> {:error, :not_expected} end,
+      write_ready_file: fn _path, _readiness -> :ok end
+    }
+
+    logs_failure = Map.put(base_deps, :set_logs_root, fn _path -> {:error, :logs_failed} end)
+
+    assert {:error, "Failed to start Rondo Core: :logs_failed"} =
+             CLI.evaluate(
+               ["core", "--logs-root", "tmp/core-logs", "--ready-file", "tmp/core-ready.json"],
+               logs_failure
+             )
+
+    port_failure = Map.put(base_deps, :set_server_port_override, fn _port -> {:error, :port_failed} end)
+
+    assert {:error, "Failed to start Rondo Core: :port_failed"} =
+             CLI.evaluate(
+               ["core", "--port", "0", "--ready-file", "tmp/core-ready.json"],
+               port_failure
+             )
+  end
+
   test "core mode requires one nonblank readiness path before startup" do
     deps = %{
       file_regular?: fn _path -> false end,

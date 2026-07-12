@@ -122,7 +122,7 @@ defmodule RondoWeb.CoreApiControllerTest do
              "surface" => "rondo.core/v1"
            }
 
-    assert_receive {:health_snapshot, :orchestrator_test}
+    assert_receive {:health_snapshot, CoreOrchestratorStub}
     refute conn.resp_body =~ "internal_path"
     refute conn.resp_body =~ "/must/not/leak"
   end

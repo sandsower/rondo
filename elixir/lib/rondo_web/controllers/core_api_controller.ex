@@ -43,7 +43,7 @@ defmodule RondoWeb.CoreApiController do
   end
 
   defp do_health(conn) do
-    identity = core_identity().snapshot(orchestrator())
+    identity = core_identity().snapshot(core_orchestrator())
 
     with true <- exact_required_echo?(identity, :surface, @surface),
          {:ok, runtime_version} <- nonempty_response_string(identity, :runtime_version),

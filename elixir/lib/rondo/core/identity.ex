@@ -3,17 +3,19 @@ defmodule Rondo.Core.Identity do
   Process-scoped identity and readiness for the loopback Core service.
   """
 
-  alias Rondo.Orchestrator
+  alias Rondo.{Config, Orchestrator}
 
   @surface "rondo.core/v1"
   @instance_key {__MODULE__, :instance_id}
 
   @spec initialize() :: :ok
   def initialize do
-    case :persistent_term.get(@instance_key, nil) do
-      nil -> :persistent_term.put(@instance_key, generate_instance_id())
-      _instance_id -> :ok
-    end
+    :global.trans({__MODULE__, :initialize}, fn ->
+      case :persistent_term.get(@instance_key, nil) do
+        nil -> :persistent_term.put(@instance_key, generate_instance_id())
+        _instance_id -> :ok
+      end
+    end)
   end
 
   @spec snapshot(GenServer.server()) :: map()
@@ -45,9 +47,10 @@ defmodule Rondo.Core.Identity do
   end
 
   defp service_mode do
-    case Application.get_env(:rondo, :service_mode, :tracker_daemon) do
+    case Config.service_mode() do
       :trackerless_core -> "trackerless_core"
-      _other -> "tracker_daemon"
+      :tracker_daemon -> "tracker_daemon"
+      :invalid -> raise "invalid Rondo service mode"
     end
   end
 

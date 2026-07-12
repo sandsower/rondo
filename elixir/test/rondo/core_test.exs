@@ -85,6 +85,12 @@ defmodule Rondo.CoreTest do
              Config.validate_core!()
   end
 
+  test "trackerless Core validation accepts built-in defaults without WORKFLOW.md" do
+    assert :ok = File.rm(Workflow.workflow_file_path())
+
+    assert :ok = Config.validate_core!()
+  end
+
   test "release_loop.closeout.merge.mode validates under the nested merge section" do
     write_workflow_file!(Workflow.workflow_file_path(), release_loop_merge_mode: "merge-plz")
 

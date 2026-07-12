@@ -30,7 +30,8 @@ The route is loopback-only and exposes no workflow, workspace, ledger, log, or f
 `instance_id` is an immutable random UUID generated once for the life of the BEAM process.
 Lifecycle owners must treat stored endpoint and process metadata only as hints until `surface`, `runtime_version`, `instance_id`, and `service_mode` match the live response.
 `ready` is true only while the coupled execution orchestrator can answer readiness queries.
-`active_run_count` reports the number of currently executing Rondo-owned runs and is the authoritative shutdown-protection input for later lifecycle operations.
+`active_run_count` is a point-in-time report of currently executing Rondo-owned runs.
+Lifecycle owners use it to refuse shutdown while observed work is active, but it is advisory because this version has no atomic drain fence preventing a new admission immediately after the health read.
 
 ## Trackerless Core service mode
 

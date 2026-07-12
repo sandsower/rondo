@@ -3316,6 +3316,16 @@ defmodule Rondo.Orchestrator do
      }, state}
   end
 
+  def handle_call(:request_refresh, _from, %{tracker_polling: false} = state) do
+    {:reply,
+     %{
+       queued: false,
+       coalesced: false,
+       requested_at: DateTime.utc_now(),
+       operations: []
+     }, state}
+  end
+
   def handle_call(:request_refresh, _from, state) do
     now_ms = System.monotonic_time(:millisecond)
     already_due? = is_integer(state.next_poll_due_at_ms) and state.next_poll_due_at_ms <= now_ms

@@ -275,11 +275,12 @@ defmodule Rondo.CLI do
   end
 
   defp core_readiness do
-    with port when is_integer(port) and port > 0 <- HttpServer.bound_port(),
+    with {{127, 0, 0, 1}, port} when is_integer(port) and port > 0 <- HttpServer.bound_address(),
          %{"ready" => true, "service_mode" => "trackerless_core"} = identity <-
            Identity.snapshot() do
       {:ok, Map.put(identity, "base_url", "http://127.0.0.1:#{port}")}
     else
+      {ip, _port} -> {:error, {:core_not_loopback, ip}}
       _other -> {:error, :core_not_ready}
     end
   end
@@ -316,7 +317,7 @@ defmodule Rondo.CLI do
         if logs_root == "" do
           {:error, usage_message()}
         else
-          :ok = deps.set_logs_root.(Path.expand(logs_root))
+          deps.set_logs_root.(Path.expand(logs_root))
         end
     end
   end
@@ -397,7 +398,7 @@ defmodule Rondo.CLI do
         port = List.last(values)
 
         if is_integer(port) and port >= 0 do
-          :ok = deps.set_server_port_override.(port)
+          deps.set_server_port_override.(port)
         else
           {:error, usage_message()}
         end

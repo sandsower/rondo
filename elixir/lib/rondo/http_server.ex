@@ -49,9 +49,17 @@ defmodule Rondo.HttpServer do
   end
 
   @spec bound_port(term()) :: non_neg_integer() | nil
-  def bound_port(_server \\ __MODULE__) do
+  def bound_port(server \\ __MODULE__) do
+    case bound_address(server) do
+      {_ip, port} -> port
+      nil -> nil
+    end
+  end
+
+  @spec bound_address(term()) :: {:inet.ip_address(), non_neg_integer()} | nil
+  def bound_address(_server \\ __MODULE__) do
     case Bandit.PhoenixAdapter.server_info(Endpoint, :http) do
-      {:ok, {_ip, port}} when is_integer(port) -> port
+      {:ok, {ip, port}} when is_tuple(ip) and is_integer(port) -> {ip, port}
       _ -> nil
     end
   rescue
