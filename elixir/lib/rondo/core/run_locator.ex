@@ -11,6 +11,7 @@ defmodule Rondo.Core.RunLocator do
 
   @max_repo_id_bytes 512
   @max_run_id_bytes 512
+  @max_plot_id_bytes 512
   @control_character_pattern ~r/[\x00-\x1F\x7F-\x9F]/u
   @sha256_pattern ~r/\A[0-9a-f]{64}\z/
 
@@ -30,17 +31,20 @@ defmodule Rondo.Core.RunLocator do
     end
   end
 
-  @doc "Finds an accepted execution request for a repository and source-contract SHA-256."
+  @doc "Finds an accepted execution request in an exact repository, digest, and optional Plot namespace."
   @spec find_accepted_by_source_sha256(term(), term(), keyword()) ::
           {:ok, located_run() | nil} | {:error, term()}
   def find_accepted_by_source_sha256(repo_id, sha256, opts \\ []) do
+    plot_id = Keyword.get(opts, :plot_id)
+
     with :ok <- validate_identifier(repo_id, :repo_id),
+         :ok <- validate_optional_identifier(plot_id, :plot_id),
          :ok <- validate_sha256(sha256),
          {:ok, runs} <- durable_runs(Keyword.put(opts, :strict, true)) do
       {:ok,
        Enum.find(
          runs,
-         &accepted_source_contract?(&1.manifest, repo_id, sha256)
+         &accepted_source_contract?(&1.manifest, repo_id, sha256, plot_id)
        )}
     end
   end
@@ -155,11 +159,12 @@ defmodule Rondo.Core.RunLocator do
     Map.get(manifest, "run_id") == run_id and stored_repo_id(manifest) == repo_id
   end
 
-  defp accepted_source_contract?(manifest, repo_id, sha256) do
+  defp accepted_source_contract?(manifest, repo_id, sha256, plot_id) do
     Map.get(manifest, "source") == "execution_request" and
       get_in(manifest, ["admission", "phase"]) == "accepted" and
       stored_repo_id(manifest) == repo_id and
       get_in(manifest, ["admission", "repo_id"]) == repo_id and
+      get_in(manifest, ["admission", "plot_id"]) == plot_id and
       get_in(manifest, ["admission", "manifest_sha256"]) == sha256 and
       get_in(manifest, ["source_contract", "sha256"]) == sha256
   end
@@ -180,6 +185,9 @@ defmodule Rondo.Core.RunLocator do
 
   defp validate_identifier(_value, field), do: {:error, invalid_error(field)}
 
+  defp validate_optional_identifier(nil, _field), do: :ok
+  defp validate_optional_identifier(value, field), do: validate_identifier(value, field)
+
   defp validate_sha256(nil), do: {:error, :missing_source_contract_sha256}
 
   defp validate_sha256(value) when is_binary(value) do
@@ -192,8 +200,11 @@ defmodule Rondo.Core.RunLocator do
 
   defp missing_error(:repo_id), do: :missing_repo_id
   defp missing_error(:run_id), do: :missing_run_id
+  defp missing_error(:plot_id), do: :missing_plot_id
   defp invalid_error(:repo_id), do: :invalid_repo_id
   defp invalid_error(:run_id), do: :invalid_run_id
+  defp invalid_error(:plot_id), do: :invalid_plot_id
   defp identifier_limit(:repo_id), do: @max_repo_id_bytes
   defp identifier_limit(:run_id), do: @max_run_id_bytes
+  defp identifier_limit(:plot_id), do: @max_plot_id_bytes
 end

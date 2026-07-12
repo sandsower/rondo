@@ -507,7 +507,7 @@ seam) plus the run-ledger manifest into three contract event families
 (`rondo.service.status_changed`, `rondo.run.status_changed`,
 `rondo.run.evidence_recorded`) and prints the `run.events` / `run.status` JSON
 response. It is read-only and speaks only contract concepts (`service_id`,
-`repo_id`, `run_id`, opaque `event_cursor`); a consumer tails an active run by
+`repo_id`, optional durable `plot_id`, `run_id`, opaque `event_cursor`); a consumer tails an active run by
 re-invoking with the previous `next_event_cursor` and replays an archived run
 from an empty cursor, without relaunching completed work. The CLI is the
 transport over the `Rondo.Core.EventFeed` BEAM API; see

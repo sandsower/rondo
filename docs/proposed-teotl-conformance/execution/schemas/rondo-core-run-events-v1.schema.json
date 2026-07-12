@@ -9,6 +9,7 @@
   "properties": {
     "surface": { "const": "rondo.core/v1" },
     "repo_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "plot_id": { "type": "string", "minLength": 1, "maxLength": 512 },
     "run_id": { "type": "string", "minLength": 1, "maxLength": 512 },
     "events": {
       "type": "array",
@@ -20,8 +21,8 @@
   "$defs": {
     "cursor": {
       "type": "string",
-      "pattern": "^rondo\\.core/v1:\\d+$",
-      "description": "Opaque append-only cursor carrying the count already consumed."
+      "pattern": "^rondo\\.core/v1:\\d{1,20}$",
+      "description": "Opaque append-only cursor carrying the count already consumed as at most 20 decimal digits."
     },
     "timestamp": {
       "type": "string",
@@ -34,6 +35,7 @@
       "properties": {
         "service_id": { "type": "string", "minLength": 1 },
         "repo_id": { "type": "string", "minLength": 1 },
+        "plot_id": { "type": "string", "minLength": 1, "maxLength": 512 },
         "run_id": { "type": "string", "minLength": 1 }
       }
     },
@@ -68,6 +70,7 @@
         "timestamp": { "$ref": "#/$defs/timestamp" },
         "namespace": { "$ref": "#/$defs/namespace" },
         "repo_id": { "type": "string", "minLength": 1 },
+        "plot_id": { "type": "string", "minLength": 1, "maxLength": 512 },
         "run_id": { "type": "string", "minLength": 1 },
         "status": { "type": "string", "enum": ["running", "paused", "completed", "failed", "terminated"] }
       }
@@ -82,6 +85,7 @@
         "timestamp": { "$ref": "#/$defs/timestamp" },
         "namespace": { "$ref": "#/$defs/namespace" },
         "repo_id": { "type": "string", "minLength": 1 },
+        "plot_id": { "type": "string", "minLength": 1, "maxLength": 512 },
         "run_id": { "type": "string", "minLength": 1 },
         "artifact_kind": { "type": "string", "minLength": 1 },
         "uri": {

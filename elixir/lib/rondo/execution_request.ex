@@ -8,6 +8,7 @@ defmodule Rondo.ExecutionRequest do
 
   @schemas ["approved-slice-v1", "rondo-execution-request-v1"]
   @max_repo_id_bytes 512
+  @max_plot_id_bytes 512
   @control_character_pattern ~r/[\x00-\x1F\x7F-\x9F]/u
   @sha256_pattern ~r/\A[0-9a-f]{64}\z/
   @metadata_keys ~w(source_ticket parent_contract repo boundaries dependencies proof_requirements allowed_actions process_provider memory_provider output_expectations runner_extensions model_routing model_routing_hints)
@@ -21,6 +22,7 @@ defmodule Rondo.ExecutionRequest do
           issue: Issue.t(),
           source_contract: map(),
           repo_id: String.t(),
+          plot_id: String.t() | nil,
           policy_file: Path.t() | nil,
           manifest_evidence: evidence(),
           approval_evidence: approval_evidence()
@@ -64,8 +66,15 @@ defmodule Rondo.ExecutionRequest do
   @spec prepare_core_submission(Path.t(), String.t(), String.t()) ::
           {:ok, prepared_submission()} | {:error, term()}
   def prepare_core_submission(path, expected_sha256, repo_id) do
+    prepare_core_submission(path, expected_sha256, repo_id, nil)
+  end
+
+  @spec prepare_core_submission(Path.t(), String.t(), String.t(), String.t() | nil) ::
+          {:ok, prepared_submission()} | {:error, term()}
+  def prepare_core_submission(path, expected_sha256, repo_id, plot_id) do
     with :ok <- validate_expected_sha256(expected_sha256),
          :ok <- validate_repo_id(repo_id),
+         :ok <- validate_plot_id(plot_id),
          {:ok, export} <- validate_export(path),
          digest = export.manifest.sha256,
          :ok <- verify_sha256(expected_sha256, digest),
@@ -77,7 +86,7 @@ defmodule Rondo.ExecutionRequest do
              export.manifest.bytes
            ),
          {:ok, policy_file} <- resolve_manifest_policy_file(request.source_contract) do
-      identity = execution_identity(repo_id, digest)
+      identity = execution_identity(repo_id, digest, plot_id)
 
       issue = %{
         request.issue
@@ -90,6 +99,7 @@ defmodule Rondo.ExecutionRequest do
          issue: issue,
          source_contract: request.source_contract,
          repo_id: repo_id,
+         plot_id: plot_id,
          policy_file: policy_file,
          manifest_evidence: %{
            source_path: export.manifest.source_path,
@@ -143,6 +153,20 @@ defmodule Rondo.ExecutionRequest do
 
   defp validate_repo_id(_repo_id), do: {:error, :core_intake_invalid_repo_id}
 
+  defp validate_plot_id(nil), do: :ok
+
+  defp validate_plot_id(plot_id) when is_binary(plot_id) do
+    if plot_id == "" or String.trim(plot_id) != plot_id or
+         byte_size(plot_id) > @max_plot_id_bytes or
+         Regex.match?(@control_character_pattern, plot_id) do
+      {:error, :core_intake_invalid_plot_id}
+    else
+      :ok
+    end
+  end
+
+  defp validate_plot_id(_plot_id), do: {:error, :core_intake_invalid_plot_id}
+
   defp validate_export(path) when is_binary(path),
     do: ExportValidator.validate(path)
 
@@ -156,7 +180,10 @@ defmodule Rondo.ExecutionRequest do
     end
   end
 
-  defp execution_identity(repo_id, digest), do: sha256(repo_id <> <<0>> <> digest)
+  defp execution_identity(repo_id, digest, nil), do: sha256(repo_id <> <<0>> <> digest)
+
+  defp execution_identity(repo_id, digest, plot_id),
+    do: sha256(repo_id <> <<0>> <> digest <> <<0>> <> plot_id)
 
   defp decode_validated_manifest(%{bytes: bytes}) do
     case Jason.decode(bytes) do

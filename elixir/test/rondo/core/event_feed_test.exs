@@ -13,17 +13,53 @@ defmodule Rondo.Core.EventFeedTest do
   @t_result ~U[2026-05-10 15:30:30Z]
   @t_done ~U[2026-05-10 15:30:40Z]
 
-  defp build_run(root, repo_id \\ "repo") do
+  defp build_run(root, repo_id \\ "repo", opts \\ []) do
     issue = %{id: "issue-1", identifier: "RON-999", title: "Feed run", state: "In Progress"}
 
+    ledger_opts = [
+      workspace_root: root,
+      repo_id: repo_id,
+      now: @started,
+      random_suffix: "feedcafe",
+      started_at: DateTime.to_iso8601(@started)
+    ]
+
+    ledger_opts =
+      case Keyword.get(opts, :plot_id) do
+        plot_id when is_binary(plot_id) ->
+          ledger_opts ++
+            [
+              run_source: "execution_request",
+              source_contract: %{sha256: String.duplicate("a", 64)},
+              execution_request_admission: %{
+                repo_id: repo_id,
+                manifest_sha256: String.duplicate("a", 64),
+                plot_id: plot_id
+              }
+            ]
+
+        _other ->
+          ledger_opts
+      end
+
     {:ok, ledger} =
-      RunLedger.create_run(issue,
-        workspace_root: root,
-        repo_id: repo_id,
-        now: @started,
-        random_suffix: "feedcafe",
-        started_at: DateTime.to_iso8601(@started)
-      )
+      RunLedger.create_run(issue, ledger_opts)
+
+    ledger =
+      case Keyword.get(opts, :plot_id) do
+        plot_id when is_binary(plot_id) ->
+          {:ok, accepted} =
+            RunLedger.accept_execution_request(ledger, %{
+              repo_id: repo_id,
+              manifest_sha256: String.duplicate("a", 64),
+              plot_id: plot_id
+            })
+
+          accepted
+
+        _other ->
+          ledger
+      end
 
     {:ok, ledger} = RunLedger.write_checkpoint(ledger, :dispatch, %{attempt: 1}, timestamp: @t_dispatch)
     :ok = RunLedger.append_agent_event(ledger, %{event: :session_started}, timestamp: @t_session)
@@ -93,6 +129,36 @@ defmodule Rondo.Core.EventFeedTest do
     # Deterministic chronological ordering.
     timestamps = Enum.map(events, & &1["timestamp"])
     assert timestamps == Enum.sort(timestamps)
+  end
+
+  test "status and events derive Plot identity from the durable run manifest" do
+    root = tmp_dir("event-feed-plot")
+    ledger = build_run(root, "repo-plot", plot_id: "OLI-52")
+    request = %{service_id: "svc", repo_id: "repo-plot", run_id: ledger.run_id}
+
+    assert {:ok, status} = EventFeed.run_status(request, workspace_root: root)
+    assert status["plot_id"] == "OLI-52"
+
+    assert {:ok, response} = EventFeed.run_events(request, workspace_root: root)
+    assert response["plot_id"] == "OLI-52"
+
+    for event <- response["events"] do
+      case event["type"] do
+        "rondo.service.status_changed" ->
+          assert event["namespace"] == %{"service_id" => "svc"}
+
+        _run_scoped ->
+          assert event["plot_id"] == "OLI-52"
+
+          assert event["namespace"] == %{
+                   "repo_id" => "repo-plot",
+                   "run_id" => ledger.run_id,
+                   "plot_id" => "OLI-52"
+                 }
+      end
+    end
+
+    refute Map.has_key?(request, :plot_id)
   end
 
   test "cursor semantics replay and tail without relaunching completed work" do

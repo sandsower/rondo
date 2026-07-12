@@ -191,6 +191,70 @@ defmodule RondoWeb.CoreApiControllerTest do
     assert %{"deduplicated" => true, "run_id" => "run-existing"} = decoded_response(conn, 200)
   end
 
+  test "POST execution-requests validates and exactly echoes an optional Plot namespace" do
+    set_submit_result(
+      {:ok,
+       %{
+         surface: "rondo.core/v1",
+         service_id: "service-test",
+         repo_id: "repo-test",
+         plot_id: "OLI-52",
+         run_id: "run-plot",
+         status: "running",
+         event_cursor: "rondo.core/v1:0",
+         deduplicated: false
+       }}
+    )
+
+    conn =
+      request(
+        :post,
+        "/api/v1/execution-requests",
+        Map.put(valid_submit_params(), "plot_id", "OLI-52")
+      )
+
+    assert %{"plot_id" => "OLI-52", "run_id" => "run-plot"} = decoded_response(conn, 202)
+
+    assert_receive {:submit_execution_request, :orchestrator_test, %{repo_id: "repo-test", plot_id: "OLI-52"}}
+
+    for plot_id <- ["", " OLI-52", "OLI-52 ", "OLI-52\nsecret", String.duplicate("p", 513)] do
+      invalid =
+        request(
+          :post,
+          "/api/v1/execution-requests",
+          Map.put(valid_submit_params(), "plot_id", plot_id)
+        )
+
+      assert %{"error" => %{"code" => "invalid_request"}} = decoded_response(invalid, 400)
+    end
+  end
+
+  test "POST Plot-scoped execution requests fail closed on missing or mismatched internal echoes" do
+    base = %{
+      surface: "rondo.core/v1",
+      service_id: "service-test",
+      repo_id: "repo-test",
+      run_id: "run-test",
+      status: "running",
+      event_cursor: "rondo.core/v1:0",
+      deduplicated: false
+    }
+
+    for run <- [base, Map.put(base, :plot_id, "OLI-foreign")] do
+      set_submit_result({:ok, run})
+
+      conn =
+        request(
+          :post,
+          "/api/v1/execution-requests",
+          Map.put(valid_submit_params(), "plot_id", "OLI-52")
+        )
+
+      assert %{"error" => %{"code" => "orchestrator_unavailable"}} =
+               decoded_response(conn, 503)
+    end
+  end
+
   test "POST execution-requests rejects missing or blank request fields before submission" do
     for params <- [
           %{},
@@ -335,6 +399,41 @@ defmodule RondoWeb.CoreApiControllerTest do
                       run_id: "run-test",
                       service_id: "service-test"
                     }}
+  end
+
+  test "GET status and events project an optional durable Plot namespace" do
+    set_status_result(
+      {:ok,
+       %{
+         "surface" => "rondo.core/v1",
+         "repo_id" => "repo-test",
+         "plot_id" => "OLI-52",
+         "run_id" => "run-test",
+         "status" => "running",
+         "last_event" => nil,
+         "evidence_pointers" => [],
+         "event_cursor" => "rondo.core/v1:0"
+       }}
+    )
+
+    status = request(:get, "/api/v1/runs/run-test?repo_id=repo-test")
+    assert %{"plot_id" => "OLI-52"} = decoded_response(status, 200)
+
+    set_events_result(
+      {:ok,
+       %{
+         "surface" => "rondo.core/v1",
+         "repo_id" => "repo-test",
+         "plot_id" => "OLI-52",
+         "run_id" => "run-test",
+         "events" => [],
+         "next_event_cursor" => "rondo.core/v1:0",
+         "has_more" => false
+       }}
+    )
+
+    events = request(:get, "/api/v1/runs/run-test/events?repo_id=repo-test")
+    assert %{"plot_id" => "OLI-52"} = decoded_response(events, 200)
   end
 
   test "GET run status rejects a mismatched EventFeed run identity" do
