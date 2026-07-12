@@ -156,6 +156,51 @@ defmodule Rondo.OrchestratorExecutionRequestTest do
     assert manifest["status"] == "completed"
   end
 
+  test "trackerless Core admits an approved request without tracker configuration" do
+    parent = self()
+    workspace_root = tmp_dir("core-trackerless-admission")
+    export = approved_export(workspace_root, "slice-trackerless-admission")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_repo: nil,
+      workspace_root: workspace_root,
+      max_concurrent_agents: 1,
+      poll_interval_ms: 60_000
+    )
+
+    {:ok, core_pid} =
+      Orchestrator.start_link(
+        name: unique_name(:TrackerlessAdmission),
+        tracker_polling: false,
+        execution_request_runner: blocking_runner(parent)
+      )
+
+    {:ok, daemon_pid} =
+      Orchestrator.start_link(
+        name: unique_name(:TrackerDaemonAdmission),
+        tracker_polling: true,
+        execution_request_runner: blocking_runner(parent)
+      )
+
+    on_exit(fn ->
+      stop_orchestrator(core_pid)
+      stop_orchestrator(daemon_pid)
+      File.rm_rf(workspace_root)
+    end)
+
+    core_request = request(export, "repo-trackerless-admission")
+    assert {:ok, submitted} = Orchestrator.submit_execution_request(core_pid, core_request)
+    assert submitted.status == "running"
+    assert_receive {:execution_runner_started, runner_pid, _issue, _opts}, 1_000
+
+    assert {:error, {:configuration_invalid, {:invalid_workflow_config, _, errors}}} =
+             Orchestrator.submit_execution_request(daemon_pid, core_request)
+
+    assert Enum.any?(errors, &(&1.path == "tracker.repo"))
+    send(runner_pid, :complete)
+  end
+
   test "archives a failed execution request without tracker retry and deduplicates the terminal run" do
     parent = self()
     workspace_root = tmp_dir("core-failure")

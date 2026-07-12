@@ -956,6 +956,22 @@ defmodule Rondo.Config do
     end
   end
 
+  @spec validate_core!() :: :ok | {:error, term()}
+  def validate_core! do
+    path = Workflow.workflow_file_path()
+
+    case Workflow.load(path) do
+      {:ok, workflow} ->
+        validate_core_workflow(workflow, path)
+
+      {:error, {:missing_workflow_file, ^path, :enoent}} ->
+        validate_core_workflow(%{config: %{}}, path)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   @spec validate_workflow(workflow_payload(), Path.t()) :: :ok | {:error, term()}
   def validate_workflow(workflow, path \\ Workflow.workflow_file_path()) do
     with {:ok, options} <- validate_workflow_options(workflow, path),
@@ -963,6 +979,12 @@ defmodule Rondo.Config do
          :ok <- require_linear_token(options, path),
          :ok <- require_linear_project(options, path),
          :ok <- require_github_repo(options, path) do
+      require_agent_command(options, path)
+    end
+  end
+
+  defp validate_core_workflow(workflow, path) do
+    with {:ok, options} <- validate_workflow_options(workflow, path) do
       require_agent_command(options, path)
     end
   end

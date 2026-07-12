@@ -40,6 +40,9 @@ The readiness document adds `base_url` to the health fields so the lifecycle own
 Trackerless Core mode retains the coupled task supervisor and durable startup recovery boundary.
 It does not start tracker-only workflow, dashboard, presenter, or status children and does not run tracker cleanup or reconciliation.
 Normal Rondo daemon startup remains `tracker_daemon` mode and preserves its existing tracker behavior.
+Trackerless admission validates Core execution settings such as the agent command and capacity, but it does not require tracker kind, tracker credentials, tracker project identity, or a tracker repository URL.
+When no workflow file exists, Core uses the built-in execution defaults; when a workflow file exists but is malformed or contains an invalid Core execution setting, admission fails closed.
+The normal daemon continues to require and validate its complete tracker configuration.
 
 ## Submit one approved manifest
 

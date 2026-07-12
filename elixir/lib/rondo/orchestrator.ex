@@ -3329,7 +3329,7 @@ defmodule Rondo.Orchestrator do
   end
 
   defp admit_execution_request(%State{} = state, params) do
-    case Config.validate!() do
+    case validate_execution_request_config(state) do
       :ok ->
         prepare_and_admit_execution_request(state, params)
 
@@ -3341,6 +3341,11 @@ defmodule Rondo.Orchestrator do
       Logger.error("Execution request admission failed error=#{Exception.message(error)}")
       {{:error, :execution_request_admission_failed}, state}
   end
+
+  defp validate_execution_request_config(%State{tracker_polling: false}),
+    do: Config.validate_core!()
+
+  defp validate_execution_request_config(_state), do: Config.validate!()
 
   defp prepare_and_admit_execution_request(state, params) do
     case ExecutionRequest.prepare_core_submission(
