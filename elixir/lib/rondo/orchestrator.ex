@@ -60,6 +60,7 @@ defmodule Rondo.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :tracker_polling,
       :execution_request_runner,
       :execution_request_task_starter,
       :execution_request_after_prepare,
@@ -88,6 +89,7 @@ defmodule Rondo.Orchestrator do
   def init(opts) do
     now_ms = System.monotonic_time(:millisecond)
     task_supervisor = Keyword.get(opts, :task_supervisor, Rondo.TaskSupervisor)
+    tracker_polling = Keyword.get(opts, :tracker_polling, true)
 
     case maybe_recover_runs(opts, task_supervisor) do
       :ok ->
@@ -96,10 +98,11 @@ defmodule Rondo.Orchestrator do
         state = %State{
           poll_interval_ms: Config.poll_interval_ms(),
           max_concurrent_agents: Config.max_concurrent_agents(),
-          next_poll_due_at_ms: now_ms,
+          next_poll_due_at_ms: if(tracker_polling, do: now_ms, else: nil),
           poll_check_in_progress: false,
           tick_timer_ref: nil,
           tick_token: nil,
+          tracker_polling: tracker_polling,
           execution_request_runner: Keyword.get(opts, :execution_request_runner, &AgentRunner.run/3),
           execution_request_task_starter:
             Keyword.get(
@@ -123,8 +126,8 @@ defmodule Rondo.Orchestrator do
         Process.flag(:trap_exit, true)
         Rondo.TimeSeries.init()
         schedule_timeseries_sample()
-        run_terminal_workspace_cleanup()
-        state = schedule_tick(state, 0)
+        if tracker_polling, do: run_terminal_workspace_cleanup()
+        state = if tracker_polling, do: schedule_tick(state, 0), else: state
 
         {:ok, state}
 
@@ -217,6 +220,9 @@ defmodule Rondo.Orchestrator do
   defp terminate_running_child(_running_entry), do: :ok
 
   @impl true
+  def handle_info({:tick, _tick_token}, %{tracker_polling: false} = state),
+    do: {:noreply, state}
+
   def handle_info({:tick, tick_token}, %{tick_token: tick_token} = state)
       when is_reference(tick_token) do
     state = refresh_runtime_config(state)
@@ -240,6 +246,9 @@ defmodule Rondo.Orchestrator do
     Logger.debug("Orchestrator ignored bare :tick (no token)")
     {:noreply, state}
   end
+
+  def handle_info(:run_poll_cycle, %{tracker_polling: false} = state),
+    do: {:noreply, state}
 
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
@@ -3112,6 +3121,21 @@ defmodule Rondo.Orchestrator do
   @spec snapshot() :: map() | :timeout | :unavailable
   def snapshot, do: snapshot(__MODULE__, 15_000)
 
+  @spec active_run_count(GenServer.server()) :: non_neg_integer() | :unavailable
+  def active_run_count(server \\ __MODULE__) do
+    case GenServer.whereis(server) do
+      pid when is_pid(pid) ->
+        try do
+          GenServer.call(pid, :active_run_count)
+        catch
+          :exit, _reason -> :unavailable
+        end
+
+      _other ->
+        :unavailable
+    end
+  end
+
   @spec snapshot(GenServer.server(), timeout()) :: map() | :timeout | :unavailable
   def snapshot(server, timeout) do
     case GenServer.whereis(server) do
@@ -3137,6 +3161,10 @@ defmodule Rondo.Orchestrator do
     end
 
     {:reply, reply, state}
+  end
+
+  def handle_call(:active_run_count, _from, state) do
+    {:reply, map_size(state.running), state}
   end
 
   def handle_call({:submit_guidance, issue_ref, guidance}, _from, state) do

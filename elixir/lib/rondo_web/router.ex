@@ -24,6 +24,7 @@ defmodule RondoWeb.Router do
   scope "/api/v1", RondoWeb do
     pipe_through(:api)
 
+    get("/health", CoreApiController, :health)
     post("/execution-requests", CoreApiController, :submit_execution_request)
     get("/runs/:run_id/events", CoreApiController, :run_events)
     get("/runs/:run_id", CoreApiController, :run_status)

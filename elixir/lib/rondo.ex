@@ -19,18 +19,16 @@ defmodule Rondo.Application do
 
   use Application
 
+  alias Rondo.Config
+  alias Rondo.Core.Identity
+  alias Rondo.StatusDashboard
+
   @impl true
   def start(_type, _args) do
     :ok = Rondo.LogFile.configure()
+    :ok = Identity.initialize()
 
-    children = [
-      {Phoenix.PubSub, name: Rondo.PubSub},
-      RondoWeb.PresenterCache,
-      Rondo.WorkflowStore,
-      Rondo.RunSupervisor,
-      Rondo.HttpServer,
-      Rondo.StatusDashboard
-    ]
+    children = children(Config.service_mode())
 
     Supervisor.start_link(
       children,
@@ -39,9 +37,31 @@ defmodule Rondo.Application do
     )
   end
 
+  defp children(:trackerless_core) do
+    [
+      {Phoenix.PubSub, name: Rondo.PubSub},
+      {Rondo.RunSupervisor, service_mode: :trackerless_core},
+      Rondo.HttpServer
+    ]
+  end
+
+  defp children(:tracker_daemon) do
+    [
+      {Phoenix.PubSub, name: Rondo.PubSub},
+      RondoWeb.PresenterCache,
+      Rondo.WorkflowStore,
+      {Rondo.RunSupervisor, service_mode: :tracker_daemon},
+      Rondo.HttpServer,
+      Rondo.StatusDashboard
+    ]
+  end
+
   @impl true
   def stop(_state) do
-    Rondo.StatusDashboard.render_offline_status()
+    if Config.service_mode() == :tracker_daemon do
+      StatusDashboard.render_offline_status()
+    end
+
     :ok
   end
 end

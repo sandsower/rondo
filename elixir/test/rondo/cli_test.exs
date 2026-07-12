@@ -97,6 +97,89 @@ defmodule Rondo.CLITest do
     assert :ok = CLI.evaluate(["WORKFLOW.md"], deps)
   end
 
+  test "core mode starts trackerless on a dynamic port and publishes exact readiness" do
+    parent = self()
+    ready_file = Path.expand("tmp/core-ready.json")
+
+    deps = %{
+      file_regular?: fn _path -> flunk("core mode must not require a tracker workflow") end,
+      set_workflow_file_path: fn _path -> flunk("core mode must not set a tracker workflow") end,
+      set_logs_root: fn path ->
+        send(parent, {:logs_root, path})
+        :ok
+      end,
+      set_server_port_override: fn port ->
+        send(parent, {:port, port})
+        :ok
+      end,
+      set_service_mode: fn mode ->
+        send(parent, {:service_mode, mode})
+        :ok
+      end,
+      set_workspace_root: fn path ->
+        send(parent, {:workspace_root, path})
+        :ok
+      end,
+      ensure_all_started: fn -> {:ok, [:rondo]} end,
+      core_readiness: fn ->
+        {:ok,
+         %{
+           "surface" => "rondo.core/v1",
+           "base_url" => "http://127.0.0.1:43123",
+           "runtime_version" => "0.1.0",
+           "instance_id" => "019b8941-4a0c-7ad5-b7ef-cb3c45e4a819",
+           "service_mode" => "trackerless_core",
+           "ready" => true,
+           "active_run_count" => 0
+         }}
+      end,
+      write_ready_file: fn path, readiness ->
+        send(parent, {:ready_file, path, readiness})
+        :ok
+      end
+    }
+
+    assert :ok =
+             CLI.evaluate(
+               [
+                 "core",
+                 "--logs-root",
+                 "tmp/core-logs",
+                 "--workspace-root",
+                 "tmp/core-workspaces",
+                 "--port",
+                 "0",
+                 "--ready-file",
+                 ready_file
+               ],
+               deps
+             )
+
+    assert_received {:logs_root, logs_root}
+    assert logs_root == Path.expand("tmp/core-logs")
+    assert_received {:port, 0}
+    assert_received {:service_mode, :trackerless_core}
+    assert_received {:workspace_root, "tmp/core-workspaces"}
+    assert_received {:ready_file, ^ready_file, readiness}
+    assert readiness["base_url"] == "http://127.0.0.1:43123"
+    assert readiness["service_mode"] == "trackerless_core"
+  end
+
+  test "core mode requires one nonblank readiness path before startup" do
+    deps = %{
+      file_regular?: fn _path -> false end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> flunk("invalid core invocation must not start Rondo") end
+    }
+
+    for args <- [["core"], ["core", "--ready-file", ""], ["core", "--ready-file", "a", "--ready-file", "b"]] do
+      assert {:error, message} = CLI.evaluate(args, deps)
+      assert message =~ "rondo core"
+    end
+  end
+
   test "run-once starts dependency applications and runs selected issue without starting daemon" do
     parent = self()
     workflow_path = "tmp/run-once/WORKFLOW.md"

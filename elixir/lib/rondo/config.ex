@@ -528,9 +528,20 @@ defmodule Rondo.Config do
 
   @spec workspace_root() :: Path.t()
   def workspace_root do
-    validated_workflow_options()
-    |> get_in([:workspace, :root])
-    |> resolve_path_value(@default_workspace_root)
+    case Application.get_env(:rondo, :workspace_root_override) do
+      path when is_binary(path) ->
+        Path.expand(path)
+
+      _other ->
+        validated_workflow_options()
+        |> get_in([:workspace, :root])
+        |> resolve_path_value(@default_workspace_root)
+    end
+  end
+
+  @spec set_workspace_root_override(Path.t()) :: :ok
+  def set_workspace_root_override(path) when is_binary(path) do
+    Application.put_env(:rondo, :workspace_root_override, Path.expand(path))
   end
 
   @spec worker_max_concurrent_agents_per_host() :: pos_integer()
@@ -885,6 +896,19 @@ defmodule Rondo.Config do
   @spec debug?() :: boolean()
   def debug? do
     Application.get_env(:rondo, :debug, @default_debug)
+  end
+
+  @spec service_mode() :: :tracker_daemon | :trackerless_core
+  def service_mode do
+    case Application.get_env(:rondo, :service_mode, :tracker_daemon) do
+      :trackerless_core -> :trackerless_core
+      _other -> :tracker_daemon
+    end
+  end
+
+  @spec set_service_mode(:tracker_daemon | :trackerless_core) :: :ok
+  def set_service_mode(mode) when mode in [:tracker_daemon, :trackerless_core] do
+    Application.put_env(:rondo, :service_mode, mode)
   end
 
   @spec set_debug(boolean()) :: :ok
