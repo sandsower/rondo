@@ -53,23 +53,28 @@ The normal daemon continues to require and validate its complete tracker configu
 {
   "manifest_path": "/canonical/repository/.beislid/exports/bundle/slices/slice.json",
   "manifest_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-  "repo_id": "opaque-caller-repository-id"
+  "repo_id": "opaque-caller-repository-id",
+  "plot_id": "opaque-caller-plot-id"
 }
 ```
 
 `manifest_path` must resolve to the canonical regular non-symlink `approved-slice-v1` child whose filename matches its slice identifier and whose sibling bundle validates as approved.
 `manifest_sha256` must be exactly 64 lowercase hexadecimal characters and must match the exact selected-manifest bytes.
 `repo_id` must be a nonempty exact identifier without surrounding whitespace, and Rondo preserves it without normalization.
+`plot_id` is optional for standalone callers and uses the same bounded opaque-identifier rules.
+When supplied, Rondo persists and echoes it without inferring meaning from the manifest, ticket, branch, or path.
 Rondo validates the complete bundle and selected child relationship even though this surface admits only one child for execution.
 
 A newly accepted run returns HTTP 202 with `deduplicated` set to `false`.
-An idempotent replay of an already accepted repository and manifest-digest pair returns HTTP 200 with `deduplicated` set to `true` and never starts a second run.
+An idempotent replay of an already accepted repository, manifest-digest, and Plot tuple returns HTTP 200 with `deduplicated` set to `true` and never starts a second run.
+The same repository and digest under another Plot creates an independent run.
 
 ```json
 {
   "surface": "rondo.core/v1",
   "service_id": "rondo-core",
   "repo_id": "opaque-caller-repository-id",
+  "plot_id": "opaque-caller-plot-id",
   "run_id": "opaque-rondo-run-id",
   "status": "running",
   "event_cursor": "rondo.core/v1:0",
@@ -77,7 +82,7 @@ An idempotent replay of an already accepted repository and manifest-digest pair 
 }
 ```
 
-The response always echoes the exact accepted `repo_id`, and every other identifier remains opaque to the caller.
+The response always echoes the exact accepted `repo_id` and any supplied `plot_id`, and every identifier remains opaque to the caller.
 The `status` field reports the current durable state, so a deduplicated terminal run can return `completed`, `failed`, `terminated`, or `paused` instead of `running`.
 
 ## Durable admission and acknowledgment
@@ -97,6 +102,7 @@ An accepted run remains the idempotent result after it reaches a terminal state.
 {
   "surface": "rondo.core/v1",
   "repo_id": "opaque-caller-repository-id",
+  "plot_id": "opaque-caller-plot-id",
   "run_id": "opaque-rondo-run-id",
   "status": "running",
   "last_event": null,
@@ -110,7 +116,7 @@ An accepted run remains the idempotent result after it reaches a terminal state.
 }
 ```
 
-The response requires exact `surface`, `repo_id`, and `run_id` echoes and exposes only a bounded evidence summary.
+The response requires exact `surface`, `repo_id`, and `run_id` echoes, projects any Plot identity from durable admission state, and exposes only a bounded evidence summary.
 Evidence pointers are opaque Rondo-owned URIs that never reveal absolute ledger or workspace paths, and callers must not parse them to infer storage layout.
 The status cursor is the replay-from-start cursor for the paged event feed.
 
@@ -122,6 +128,7 @@ The status cursor is the replay-from-start cursor for the paged event feed.
 {
   "surface": "rondo.core/v1",
   "repo_id": "opaque-caller-repository-id",
+  "plot_id": "opaque-caller-plot-id",
   "run_id": "opaque-rondo-run-id",
   "events": [],
   "next_event_cursor": "rondo.core/v1:0",
@@ -129,7 +136,7 @@ The status cursor is the replay-from-start cursor for the paged event feed.
 }
 ```
 
-The response requires exact `surface`, `repo_id`, and `run_id` echoes.
+The response requires exact `surface`, `repo_id`, and `run_id` echoes and carries any durable Plot identity on the page and each run-scoped event namespace.
 Each cursor is an opaque strict `rondo.core/v1:<decimal>` token, and malformed or foreign cursor syntax returns `invalid_request` instead of replaying from zero.
 `next_event_cursor` advances by exactly the number of represented events in the page, and the caller continues with that cursor while `has_more` is `true`.
 Artifact events retain immutable ledger-recorded ordering timestamps, so an already delivered cursor prefix does not shift when a run finishes.

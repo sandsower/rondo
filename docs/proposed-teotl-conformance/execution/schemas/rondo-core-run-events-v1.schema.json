@@ -9,6 +9,7 @@
   "properties": {
     "surface": { "const": "rondo.core/v1" },
     "repo_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "plot_id": { "type": "string", "minLength": 1, "maxLength": 512 },
     "run_id": { "type": "string", "minLength": 1, "maxLength": 512 },
     "events": {
       "type": "array",
@@ -34,6 +35,7 @@
       "properties": {
         "service_id": { "type": "string", "minLength": 1 },
         "repo_id": { "type": "string", "minLength": 1 },
+        "plot_id": { "type": "string", "minLength": 1, "maxLength": 512 },
         "run_id": { "type": "string", "minLength": 1 }
       }
     },
@@ -68,6 +70,7 @@
         "timestamp": { "$ref": "#/$defs/timestamp" },
         "namespace": { "$ref": "#/$defs/namespace" },
         "repo_id": { "type": "string", "minLength": 1 },
+        "plot_id": { "type": "string", "minLength": 1, "maxLength": 512 },
         "run_id": { "type": "string", "minLength": 1 },
         "status": { "type": "string", "enum": ["running", "paused", "completed", "failed", "terminated"] }
       }
@@ -82,6 +85,7 @@
         "timestamp": { "$ref": "#/$defs/timestamp" },
         "namespace": { "$ref": "#/$defs/namespace" },
         "repo_id": { "type": "string", "minLength": 1 },
+        "plot_id": { "type": "string", "minLength": 1, "maxLength": 512 },
         "run_id": { "type": "string", "minLength": 1 },
         "artifact_kind": { "type": "string", "minLength": 1 },
         "uri": {

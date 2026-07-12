@@ -1,6 +1,7 @@
 {
   "surface": "rondo.core/v1",
   "repo_id": "sample-repo",
+  "plot_id": "plot-sample-0001",
   "run_id": "RUN-sample-0001",
   "events": [
     {
@@ -15,39 +16,43 @@
       "type": "rondo.run.status_changed",
       "sequence": 2,
       "repo_id": "sample-repo",
+      "plot_id": "plot-sample-0001",
       "run_id": "RUN-sample-0001",
       "status": "running",
       "timestamp": "2026-05-10T15:30:00Z",
-      "namespace": { "repo_id": "sample-repo", "run_id": "RUN-sample-0001" }
+      "namespace": { "repo_id": "sample-repo", "plot_id": "plot-sample-0001", "run_id": "RUN-sample-0001" }
     },
     {
       "type": "rondo.run.status_changed",
       "sequence": 3,
       "repo_id": "sample-repo",
+      "plot_id": "plot-sample-0001",
       "run_id": "RUN-sample-0001",
       "status": "completed",
       "timestamp": "2026-05-10T15:30:40Z",
-      "namespace": { "repo_id": "sample-repo", "run_id": "RUN-sample-0001" }
+      "namespace": { "repo_id": "sample-repo", "plot_id": "plot-sample-0001", "run_id": "RUN-sample-0001" }
     },
     {
       "type": "rondo.run.evidence_recorded",
       "sequence": 4,
       "repo_id": "sample-repo",
+      "plot_id": "plot-sample-0001",
       "run_id": "RUN-sample-0001",
       "artifact_kind": "agent_events",
       "uri": "rondo-run://RUN-sample-0001/artifacts/agent-events.ndjson",
       "timestamp": "2026-05-10T15:30:40Z",
-      "namespace": { "repo_id": "sample-repo", "run_id": "RUN-sample-0001" }
+      "namespace": { "repo_id": "sample-repo", "plot_id": "plot-sample-0001", "run_id": "RUN-sample-0001" }
     },
     {
       "type": "rondo.run.evidence_recorded",
       "sequence": 5,
       "repo_id": "sample-repo",
+      "plot_id": "plot-sample-0001",
       "run_id": "RUN-sample-0001",
       "artifact_kind": "delivery_artifact",
       "uri": "rondo-run://RUN-sample-0001/artifacts/delivery-artifact.json",
       "timestamp": "2026-05-10T15:30:40Z",
-      "namespace": { "repo_id": "sample-repo", "run_id": "RUN-sample-0001" }
+      "namespace": { "repo_id": "sample-repo", "plot_id": "plot-sample-0001", "run_id": "RUN-sample-0001" }
     }
   ],
   "next_event_cursor": "rondo.core/v1:5",

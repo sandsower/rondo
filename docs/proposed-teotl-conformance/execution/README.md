@@ -26,6 +26,7 @@ The fixtures were produced by the reference implementation (`mix rondo.run_event
 over `Rondo.Core.EventFeed`) and then given a canonical `run_id`
 (`RUN-sample-0001`) and `repo_id` (`sample-repo`) so they are stable conformance
 inputs.
+Run-scoped fixture events also carry `plot_id` (`plot-sample-0001`) in their page and namespace projections.
 
 ## Suggested conformance check
 
