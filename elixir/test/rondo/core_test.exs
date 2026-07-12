@@ -888,18 +888,16 @@ defmodule Rondo.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
-    assert prompt =~ "You are working on a Linear ticket `MT-616`"
-    assert prompt =~ "Issue context:"
+    assert prompt =~ "You are working on ticket `MT-616` in a Rondo-owned workspace."
+    assert prompt =~ "## Ticket context"
     assert prompt =~ "Identifier: MT-616"
     assert prompt =~ "Title: Use rich templates for WORKFLOW.md"
     assert prompt =~ "Current status: In Progress"
-    assert prompt =~ "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd"
-    assert prompt =~ "This is an unattended orchestration session."
-    assert prompt =~ "Only stop early for a true blocker"
-    assert prompt =~ "Do not include \"next steps for user\""
-    assert prompt =~ "run the `land` skill"
-    assert prompt =~ "Do not call `gh pr merge` directly"
-    assert prompt =~ "Continuation context:"
+    assert prompt =~ "Rondo owns all tracker reads, state transitions, comments"
+    assert prompt =~ "The child process receives no Linear, GitHub, SSH, or MCP credentials."
+    assert prompt =~ "Do not push, create or modify pull requests"
+    assert prompt =~ "Return only a valid `rondo.final_report/v0` JSON object"
+    assert prompt =~ "The final report is the only child-to-Rondo handoff"
     assert prompt =~ "retry attempt #2"
   end
 

@@ -19,9 +19,9 @@ app based on [`SPEC.md`](../SPEC.md) at the repository root.
 4. Sends a workflow prompt to Claude Code
 5. Keeps Claude Code working on the issue until the work is done
 
-During Claude Code sessions, the agent environment can also expose a client-side `linear_graphql`
-tool through the repo-local project-scoped `.mcp.json` so that repo skills can make raw Linear
-GraphQL calls.
+Rondo owns tracker and publication operations. Child agents receive a sanitized launch envelope,
+a synthetic home, and only provider authentication needed for the selected model. They report
+progress and requested external actions back to Rondo instead of receiving tracker or MCP access.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Rondo stops the active agent for that issue and cleans up matching workspaces.
@@ -32,10 +32,8 @@ Rondo stops the active agent for that issue and cleans up matching workspaces.
 2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
    set it as the `LINEAR_API_KEY` environment variable.
 3. Copy this directory's `WORKFLOW.md` to your repo.
-4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
-   - The `linear` skill expects the agent environment to provide a `linear_graphql` tool for raw
-     Linear GraphQL operations such as comment editing or upload flows; in this repo, that tool is
-     exposed through the project-scoped `.mcp.json` and `./elixir/bin/linear_graphql_mcp`.
+4. Optionally copy local implementation and verification skills to your repo. Skills used by child
+   agents must not require direct tracker, publication, SSH, or MCP credentials.
 5. Customize the copied `WORKFLOW.md` file for your project.
    - To get your project's slug, right-click the project and copy its URL. The slug is part of the
      URL.
@@ -226,8 +224,9 @@ Notes:
 - `claude.permission_mode` controls Claude Code's permission system. Supported values: `default`,
   `plan`, `acceptEdits`, `bypassPermissions`. Default: `bypassPermissions`.
 - `claude.dangerously_skip_permissions` when `true`, passes `--dangerously-skip-permissions` to
-  Claude Code, bypassing all permission checks. Recommended for unattended operation when combined
-  with `claude.allowed_tools` for tightening. Default: `true`.
+  Claude Code, bypassing all permission checks. This flag is not a child-process security boundary.
+  Default: `true` for compatibility, but the child-launch interlock still blocks unattended launch
+  without an OS-enforced credential-isolation baseline.
 - `claude.max_turns` caps how many back-to-back turns Claude Code will run per invocation.
   Default: `50`.
 - `claude.output_format` controls output parsing. Must be `stream-json` for Rondo to parse
@@ -269,6 +268,23 @@ Notes:
   deterministic suggested responses, and only auto-resumes operations with safe descriptors. V1 exact
   resume is limited to orchestrator-owned tracker transitions; shell hooks, cleanup, and destructive
   operations require manual/guidance handling unless later modeled with replay-safe descriptors.
+- Before every ledgered Claude, Codex, or Pi invocation, Rondo resolves a
+  `rondo.child_launch/v1` capability envelope. The host run mode and hard security floor are
+  authoritative; manifest `allowed_actions` may narrow local write capabilities but cannot grant
+  publication, tracker, MCP, GitHub, or SSH authority. The sanitized envelope is persisted before
+  child spawn. Secret values and original credential paths are never included in that evidence.
+- Child invocations receive a run-scoped synthetic `HOME` and a replacement environment containing
+  minimal operational variables plus the selected model provider's authentication. This reduces
+  accidental credential inheritance but is not same-user isolation: absolute paths, OS credential
+  stores, and keychains remain reachable without a real host sandbox.
+- Unattended launch therefore requires the `os_credential_isolated` host baseline and otherwise
+  fails before `Port.open`. Until the OS-containment phase supplies that baseline, normal unattended
+  execution is intentionally unavailable. An explicit `--unsafe-child-credential-bypass` exists
+  only for supervised `run-once --issue` development. It is rejected for manifests and is never
+  available to daemon or HTTP dispatch; every attempted or applied bypass is ledgered.
+- Rondo owns tracker reads, transitions, comments, progress publication, pushes, PR operations,
+  review replies, and merges. Child prompts report requested external actions through normalized
+  events and `rondo.final_report/v0` instead of receiving Linear, GitHub, SSH, or MCP credentials.
 - `process_provider.kind` selects the process/work-contract provider. Default: `native`. Supported
   values are `native` and fixture-backed `beislid`. The native provider preserves standalone
   `WORKFLOW.md` behavior for flat gates, prompts, action-policy evaluation, model hints, and run

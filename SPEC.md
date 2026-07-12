@@ -587,6 +587,39 @@ orchestrator-owned tracker transitions. Non-resume-safe hooks, cleanup, shell, a
 operations may capture guidance or abort/manual-resolve, but MUST NOT be replayed automatically from
 operator input alone.
 
+#### 5.3.11 Child Launch Credential Boundary
+
+Before every ledgered child invocation, including provider fallback, continuation, and resume,
+Rondo MUST resolve an effective `rondo.child_launch/v1` envelope.
+The trusted host run mode and Rondo security floor are authoritative.
+Execution-request `allowed_actions` MAY narrow the envelope but MUST NOT grant credentials, change
+the effective run mode, enable a development bypass, or restore publication, tracker, or MCP
+authority.
+
+The envelope MUST describe the selected adapter/provider, dispatch origin, actual and required
+isolation baselines, synthetic-home mode, environment variable names, credential classes, effective
+local-write capabilities, denied external capabilities, and bypass status.
+Rondo MUST persist a sanitized envelope before child spawn.
+The persisted representation MUST NOT contain credential values, auth file contents, or original
+credential paths.
+
+Child launch MUST use a run-scoped synthetic `HOME` and replace the inherited environment with a
+minimal operational set plus selected model-provider authentication.
+Linear, GitHub, SSH, MCP, unrelated cloud, CI, and ambient secret variables MUST NOT be passed.
+The same run-scoped home and policy MUST be reused and revalidated on resume.
+
+Environment and synthetic-home scoping MUST NOT be reported as same-user credential isolation.
+Unattended mode requires an `os_credential_isolated` host baseline and MUST fail before `Port.open`
+when that baseline is absent.
+An unsafe development bypass MAY exist only for explicit `run-once --issue` execution under
+`supervised-auto`.
+It MUST be rejected for manifests and unavailable to daemon and HTTP dispatch.
+Every requested, rejected, or applied bypass MUST be represented in child-launch evidence.
+
+Rondo owns tracker and publication operations.
+Child prompts MUST NOT require direct Linear, GitHub, SSH, or MCP access and MUST report requested
+external follow-up through normalized events or the final report.
+
 ### 5.4 Prompt Template Contract
 
 The Markdown body of `WORKFLOW.md` is the per-issue prompt template.
@@ -1257,52 +1290,14 @@ User input handling:
 - In unattended mode (`--dangerously-skip-permissions`), this should not occur.
 - If the subprocess stalls, the stall timeout (`claude.stall_timeout_ms`) will terminate it.
 
-Optional tool extensions:
+Child tool boundary:
 
-- Claude Code can access external services via MCP (Model Context Protocol) servers configured in
-  its environment.
-- For Linear access, an MCP server can be configured to provide `linear_graphql` or equivalent
-  tooling directly to Claude Code, rather than requiring Rondo to proxy tool calls.
-- Claude Code's `--allowedTools` flag can restrict which tools are available to the agent.
-- In this repository, the recommended path is a project-scoped `.mcp.json` entry that launches
-  `./elixir/bin/linear_graphql_mcp` and exposes the `linear_graphql` tool through Claude Code's
-  MCP tool naming scheme.
-
-`linear_graphql` extension contract:
-
-- Purpose: execute a raw GraphQL query or mutation against Linear using Rondo's configured
-  tracker auth for the current session.
-- Availability: only meaningful when `tracker.kind == "linear"` and valid Linear auth is configured.
-- This can be provided via an MCP server configured in Claude Code's environment, or via any other
-  tool mechanism available to the agent; in this repo, the local `.mcp.json` + Elixir server path is
-  the canonical implementation.
-- Preferred input shape:
-
-  ```json
-  {
-    "query": "single GraphQL query or mutation document",
-    "variables": {
-      "optional": "graphql variables object"
-    }
-  }
-  ```
-
-- `query` must be a non-empty string.
-- `query` must contain exactly one GraphQL operation.
-- `variables` is optional and, when present, must be a JSON object.
-- Implementations may additionally accept a raw GraphQL query string as shorthand input.
-- Execute one GraphQL operation per tool call.
-- If the provided document contains multiple operations, reject the tool call as invalid input.
-- `operationName` selection is intentionally out of scope for this extension.
-- Reuse the configured Linear endpoint and auth from the active Rondo workflow/runtime config; do
-  not require the coding agent to read raw tokens from disk.
-- Tool result semantics:
-  - transport success + no top-level GraphQL `errors` -> `success=true`
-  - top-level GraphQL `errors` present -> `success=false`, but preserve the GraphQL response body
-    for debugging
-  - invalid input, missing auth, or transport failure -> `success=false` with an error payload
-- Return the GraphQL response or error payload as structured tool output that the model can inspect
-  in-session.
+- Rondo owns tracker, publication, SSH, and MCP capabilities.
+- Child agents receive only the local capabilities allowed by the effective launch envelope and the
+  provider authentication required for the selected model.
+- Workflow prompts and skills must return structured handoff data when an external operation is
+  needed instead of requiring direct external-service tools.
+- Tool allowlists may narrow the effective child capability envelope but cannot expand it.
 
 ### 10.6 Timeouts and Error Mapping
 
@@ -1408,18 +1403,14 @@ Orchestrator behavior on tracker errors:
 
 ### 11.5 Tracker Writes (Important Boundary)
 
-Rondo does not require first-class tracker write APIs in the orchestrator.
+Rondo owns tracker writes and publication boundaries.
 
-- Ticket mutations (state transitions, comments, PR metadata) are typically handled by the coding
-  agent using tools defined by the workflow prompt.
-- When a workflow explicitly configures PR review/babysit states, the orchestrator may own the
-  review/merge/Done handoff and should keep those tickets on the PR lifecycle path until the merge
-  succeeds.
-- The service remains a scheduler/runner and tracker reader.
-- Workflow-specific success often means "reached the next handoff state" (for example
-  `Human Review`) rather than tracker terminal state `Done`.
-- If the optional `linear_graphql` client-side tool extension is implemented, it is still part of
-  the agent toolchain rather than orchestrator business logic.
+- Ticket mutations, comments, PR metadata, review replies, and lifecycle transitions are performed
+  by Rondo from trusted normalized results.
+- Child agents receive tracker and review snapshots as untrusted read-only input and return
+  structured handoff data for any proposed external action.
+- Workflow-specific success may recommend the next handoff state, but only Rondo evaluates and
+  applies that transition.
 
 ## 12. Prompt Construction and Context Assembly
 
@@ -1892,9 +1883,9 @@ sensitive data or externally-controlled content can be dangerous. A permissive d
 to data leaks, destructive mutations, or full machine compromise if the agent is induced to execute
 harmful commands or use overly-powerful integrations.
 
-Implementations should explicitly evaluate their own risk profile and harden the execution harness
-where appropriate. This specification intentionally does not mandate a single hardening posture, but
-ports should not assume that tracker data, repository contents, prompt inputs, or tool arguments are
+Implementations should explicitly evaluate their own risk profile and harden the execution harness.
+The child-launch credential boundary in Section 5.3.11 is mandatory for this implementation.
+Ports should not assume that tracker data, repository contents, prompt inputs, or tool arguments are
 fully trustworthy just because they originate inside a normal workflow.
 
 Possible hardening measures include:
@@ -1905,11 +1896,10 @@ Possible hardening measures include:
   separate credentials beyond Claude Code's built-in permission controls.
 - Filtering which Linear issues, projects, teams, labels, or other tracker sources are eligible for
   dispatch so untrusted or out-of-scope tasks do not automatically reach the agent.
-- Narrowing the optional `linear_graphql` tool so it can only read or mutate data inside the
-  intended project scope, rather than exposing general workspace-wide tracker access.
-- Using `--allowedTools` to restrict which tools Claude Code can use, and limiting MCP server
-  configurations, credentials, filesystem paths, and network destinations available to the agent
-  to the minimum needed for the workflow.
+- Scoping Rondo-owned tracker adapters to the intended project rather than granting broad
+  workspace-wide tracker access.
+- Using `--allowedTools` to restrict child tools to the effective local capability envelope and
+  excluding MCP credentials, unrelated filesystem paths, and unnecessary network destinations.
 
 The correct controls are deployment-specific, but implementations should document them clearly and
 treat harness hardening as part of the core safety model rather than an optional afterthought.
@@ -2255,10 +2245,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Non-JSON stderr lines are logged but do not crash parsing
 - Session ID is extracted from `stream-json` output and used for `--resume`
 - Usage and rate-limit data are extracted from `stream-json` events
-- If the optional `linear_graphql` tool extension is provided via MCP or other mechanism:
-  - valid `query` / `variables` inputs execute against configured Linear auth
-  - top-level GraphQL `errors` produce `success=false` while preserving the GraphQL body
-  - invalid arguments, missing auth, and transport failures return structured failure payloads
+- Tracker and publication credentials are never included in the child process environment.
+- Child requests for external actions are represented in normalized events or the final report.
 
 ### 17.6 Observability
 
@@ -2331,14 +2319,13 @@ Use the same validation profiles as Section 17:
 
 - Optional HTTP server honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
-- Optional `linear_graphql` tool extension exposes raw Linear GraphQL access through the
-  Claude Code session using configured Rondo auth (via MCP server or other mechanism);
-  this repository ships a project-scoped local MCP server for that path.
+- Trusted Rondo tracker adapters own external issue reads and writes; child sessions receive only
+  the normalized snapshot needed for local execution.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
-- TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
-  of only via agent tools.
+- TODO: Complete first-class tracker write APIs for every normalized child handoff supported by the
+  workflow lifecycle.
 - TODO: Add pluggable issue tracker adapters beyond Linear.
 
 ### 18.3 Operational Validation Before Production (Recommended)

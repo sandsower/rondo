@@ -130,6 +130,44 @@ defmodule Rondo.CLITest do
     refute_received :started
   end
 
+  test "run-once forwards explicit bypass intent for authoritative issue and manifest policy" do
+    parent = self()
+    workflow_path = "tmp/run-once/WORKFLOW.md"
+    deps = run_once_deps(parent, Path.expand(workflow_path))
+
+    deps =
+      Map.put(deps, :run_once, fn issue_id, opts ->
+        send(parent, {:run_once_with_opts, issue_id, opts})
+        :ok
+      end)
+
+    assert :run_once_completed =
+             CLI.evaluate(
+               ["run-once", workflow_path, "--issue", "123", "--unsafe-child-credential-bypass"],
+               deps
+             )
+
+    assert_received {:run_once_with_opts, "123", opts}
+    assert Keyword.get(opts[:agent_opts], :dispatch_origin) == :run_once
+    assert Keyword.get(opts[:agent_opts], :unsafe_child_credential_bypass) === true
+
+    deps =
+      Map.put(deps, :run_manifest, fn manifest_path, opts ->
+        send(parent, {:run_manifest_with_opts, manifest_path, opts})
+        :ok
+      end)
+
+    assert :run_once_completed =
+             CLI.evaluate(
+               ["run-once", workflow_path, "--manifest", "request.json", "--unsafe-child-credential-bypass"],
+               deps
+             )
+
+    assert_received {:run_manifest_with_opts, _path, manifest_opts}
+    assert Keyword.get(manifest_opts[:agent_opts], :dispatch_origin) == :manifest
+    assert Keyword.get(manifest_opts[:agent_opts], :unsafe_child_credential_bypass) === true
+  end
+
   test "run-once rejects both issue and manifest" do
     deps = run_once_deps(self(), Path.expand("WORKFLOW.md"))
 
@@ -197,8 +235,8 @@ defmodule Rondo.CLITest do
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:ok, [:rondo]} end,
       ensure_run_once_dependencies_started: fn -> {:ok, [:req]} end,
-      run_once: fn _issue_id -> :ok end,
-      run_manifest: fn _manifest_path -> :ok end
+      run_once: fn _issue_id, _opts -> :ok end,
+      run_manifest: fn _manifest_path, _opts -> :ok end
     }
 
     assert {:error, message} = CLI.evaluate(["run-once", "WORKFLOW.md", "--issue", "123"], deps)
@@ -213,8 +251,8 @@ defmodule Rondo.CLITest do
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:ok, [:rondo]} end,
       ensure_run_once_dependencies_started: fn -> {:error, {:req, :boom}} end,
-      run_once: fn _issue_id -> flunk("run-once should not dispatch when dependencies fail") end,
-      run_manifest: fn _manifest_path -> flunk("run-once should not dispatch when dependencies fail") end
+      run_once: fn _issue_id, _opts -> flunk("run-once should not dispatch when dependencies fail") end,
+      run_manifest: fn _manifest_path, _opts -> flunk("run-once should not dispatch when dependencies fail") end
     }
 
     assert {:error, message} = CLI.evaluate(["run-once", "WORKFLOW.md", "--issue", "123"], deps)
@@ -230,12 +268,27 @@ defmodule Rondo.CLITest do
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:ok, [:rondo]} end,
-      run_once: fn "123" -> {:error, :boom} end,
-      run_manifest: fn _manifest_path -> :ok end
+      run_once: fn "123", _opts -> {:error, :boom} end,
+      run_manifest: fn _manifest_path, _opts -> :ok end
     }
 
     assert {:error, message} = CLI.evaluate(["run-once", "WORKFLOW.md", "--issue", "123"], deps)
     assert message =~ "run-once failed for issue 123: :boom"
+  end
+
+  test "run-once rejects runners that cannot receive security provenance options" do
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:rondo]} end,
+      run_once: fn _issue_id -> :ok end,
+      run_manifest: fn _manifest_path, _opts -> :ok end
+    }
+
+    assert {:error, message} = CLI.evaluate(["run-once", "WORKFLOW.md", "--issue", "123"], deps)
+    assert message =~ "invalid_runner_contract"
   end
 
   defp run_once_deps(parent, expected_workflow_path) do
@@ -258,11 +311,11 @@ defmodule Rondo.CLITest do
         send(parent, :run_once_dependencies_started)
         {:ok, [:req]}
       end,
-      run_once: fn issue_id ->
+      run_once: fn issue_id, _opts ->
         send(parent, {:run_once, issue_id})
         :ok
       end,
-      run_manifest: fn manifest_path ->
+      run_manifest: fn manifest_path, _opts ->
         send(parent, {:run_manifest, manifest_path})
         :ok
       end

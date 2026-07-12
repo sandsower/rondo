@@ -4,6 +4,7 @@ defmodule Rondo.Pi.CLI do
   """
 
   require Logger
+  alias Rondo.Agent.ChildHome
   alias Rondo.{Config, PathSafety}
   alias Rondo.Pi.StreamParser
 
@@ -43,18 +44,16 @@ defmodule Rondo.Pi.CLI do
       command = Config.pi_command()
 
       with {:ok, spawn_target, spawn_args} <- spawn_invocation(command, args) do
-        port =
-          Port.open(
-            {:spawn_executable, spawn_target},
-            [
-              :binary,
-              :exit_status,
-              :stderr_to_stdout,
-              {:line, @port_line_bytes},
-              {:cd, Path.expand(workspace)},
-              {:args, spawn_args}
-            ]
-          )
+        port_options = [
+          :binary,
+          :exit_status,
+          :stderr_to_stdout,
+          {:line, @port_line_bytes},
+          {:cd, Path.expand(workspace)},
+          {:args, spawn_args}
+        ]
+
+        port = Port.open({:spawn_executable, spawn_target}, maybe_add_child_environment(port_options, opts))
 
         now = System.monotonic_time(:millisecond)
         deadline = now + turn_timeout_ms
@@ -125,6 +124,13 @@ defmodule Rondo.Pi.CLI do
               {:error, :stall_timeout}
             end
         end
+    end
+  end
+
+  defp maybe_add_child_environment(port_options, opts) do
+    case Keyword.get(opts, :child_launch_envelope) do
+      nil -> port_options
+      envelope -> port_options ++ [{:env, ChildHome.port_environment(envelope)}]
     end
   end
 

@@ -5,6 +5,8 @@ defmodule Rondo.AgentRunner do
 
   require Logger
   alias Rondo.Agent.Adapter
+  alias Rondo.Agent.ChildHome
+  alias Rondo.Agent.ChildLaunchPolicy
   alias Rondo.Agent.ClaudeCodeAdapter
   alias Rondo.Agent.CodexAdapter
   alias Rondo.Agent.PiAdapter
@@ -257,13 +259,14 @@ defmodule Rondo.AgentRunner do
     Process.put(completion_ref, false)
 
     result =
-      turn_context.adapter.invoke(%{
-        prompt: prompt,
-        workspace: turn_context.workspace,
-        previous_run_ref: run_state.run_ref,
-        on_event: claude_event_handler(turn_context.claude_update_recipient, issue, completion_ref),
-        opts: turn_context.opts
-      })
+      invoke_adapter_with_child_policy(
+        turn_context.adapter,
+        prompt,
+        turn_context.workspace,
+        run_state.run_ref,
+        claude_event_handler(turn_context.claude_update_recipient, issue, completion_ref),
+        turn_context.opts
+      )
 
     completion_observed? = Process.get(completion_ref, false)
     Process.delete(completion_ref)
@@ -324,13 +327,14 @@ defmodule Rondo.AgentRunner do
     Process.put(failure_hint_ref, nil)
 
     result =
-      attempt_adapter.invoke(%{
-        prompt: prompt,
-        workspace: attempt_context.workspace,
-        previous_run_ref: compatible_previous_run_ref(run_state.run_ref, attempt_adapter),
-        on_event: claude_event_handler(turn_context.claude_update_recipient, issue, completion_ref, failure_hint_ref),
-        opts: attempt_opts
-      })
+      invoke_adapter_with_child_policy(
+        attempt_adapter,
+        prompt,
+        attempt_context.workspace,
+        compatible_previous_run_ref(run_state.run_ref, attempt_adapter),
+        claude_event_handler(turn_context.claude_update_recipient, issue, completion_ref, failure_hint_ref),
+        attempt_opts
+      )
 
     attempt_state = %{
       attempt_number: attempt_number,
@@ -362,6 +366,111 @@ defmodule Rondo.AgentRunner do
     else
       {:ok, attempt_opts, attempt_routing}
     end
+  end
+
+  defp invoke_adapter_with_child_policy(adapter, prompt, workspace, previous_run_ref, on_event, opts) do
+    if child_launch_policy_required?(adapter, opts) do
+      with {:ok, envelope} <- resolve_child_launch_policy(adapter, opts, on_event),
+           :ok <- ChildHome.prepare(envelope) do
+        adapter.invoke(%{
+          prompt: prompt,
+          workspace: workspace,
+          previous_run_ref: previous_run_ref,
+          on_event: on_event,
+          opts: Keyword.put(opts, :child_launch_envelope, envelope)
+        })
+      else
+        {:error, {:child_launch_evidence_write_failed, _reason} = tagged_reason} ->
+          {:error, tagged_reason}
+
+        {:block, envelope} ->
+          {:error, {:child_launch_blocked, ChildLaunchPolicy.sanitize(envelope)}}
+
+        {:error, reason} ->
+          {:error, {:child_home_prepare_failed, reason}}
+      end
+    else
+      adapter.invoke(%{
+        prompt: prompt,
+        workspace: workspace,
+        previous_run_ref: previous_run_ref,
+        on_event: on_event,
+        opts: opts
+      })
+    end
+  end
+
+  defp child_launch_policy_required?(adapter, opts) do
+    adapter.id() in ["claude_code", "codex", "pi"] and
+      (match?(%RunLedger{}, Keyword.get(opts, :run_ledger)) or
+         Keyword.get(opts, :enforce_child_launch_policy, false))
+  end
+
+  defp resolve_child_launch_policy(adapter, opts, on_event) do
+    run_dir =
+      Keyword.get(opts, :run_dir) ||
+        case Keyword.get(opts, :run_ledger) do
+          %RunLedger{run_dir: run_dir} -> run_dir
+          _other -> nil
+        end
+
+    result =
+      ChildLaunchPolicy.resolve(
+        run_mode: Config.action_policy_run_mode(),
+        dispatch_origin: Keyword.get(opts, :dispatch_origin, :daemon),
+        unsafe_bypass: Keyword.get(opts, :unsafe_child_credential_bypass, false),
+        adapter: adapter.id(),
+        model: Keyword.get(opts, :model),
+        isolation_baseline:
+          Keyword.get(
+            opts,
+            :child_isolation_baseline,
+            Application.get_env(:rondo, :child_isolation_baseline, :env_home_scoped)
+          ),
+        run_dir: run_dir,
+        source_contract: Keyword.get(opts, :source_contract, %{}),
+        provider_auth_env_names: Keyword.get(opts, :provider_auth_env_names)
+      )
+
+    envelope = elem(result, 1)
+
+    case persist_child_launch_policy(opts, envelope) do
+      :ok ->
+        emit_child_launch_policy(on_event, envelope)
+        result
+
+      {:error, reason} ->
+        {:error, {:child_launch_evidence_write_failed, reason}}
+    end
+  end
+
+  defp persist_child_launch_policy(opts, envelope) do
+    evidence = ChildLaunchPolicy.sanitize(envelope)
+
+    case Keyword.get(opts, :run_ledger) do
+      %RunLedger{} = ledger ->
+        case RunLedger.record_child_launch_policy(ledger, evidence) do
+          {:ok, _ledger} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+
+      _other ->
+        {:error, :missing_run_ledger}
+    end
+  end
+
+  defp emit_child_launch_policy(on_event, envelope) when is_function(on_event, 1) do
+    evidence = ChildLaunchPolicy.sanitize(envelope)
+
+    on_event.(%{
+      event_type: :child_launch_policy_resolved,
+      adapter: envelope.adapter,
+      capabilities: %{child_launch: evidence},
+      evidence: evidence,
+      raw: %{event_type: :child_launch_policy_resolved, evidence: evidence}
+    })
+
+    :ok
   end
 
   defp handle_model_routing_result(
