@@ -176,6 +176,61 @@ defmodule Rondo.ExecutionRequestTest do
       assert changed_manifest.issue.title == prepared.issue.title
     end
 
+    test "namespaces Plot-scoped submissions without changing legacy identities" do
+      export = approved_export("slice-plot-namespace")
+
+      assert {:ok, legacy} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo:plot"
+               )
+
+      assert {:ok, first_plot} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo:plot",
+                 "OLI-52"
+               )
+
+      assert {:ok, second_plot} =
+               ExecutionRequest.prepare_core_submission(
+                 export.manifest_path,
+                 export.digest,
+                 "repo:plot",
+                 "OLI-foreign"
+               )
+
+      assert legacy.plot_id == nil
+      assert first_plot.plot_id == "OLI-52"
+      assert second_plot.plot_id == "OLI-foreign"
+      assert legacy.issue.id == "execution-request:#{execution_identity("repo:plot", export.digest)}"
+      refute first_plot.issue.id == legacy.issue.id
+      refute second_plot.issue.id == first_plot.issue.id
+    end
+
+    test "requires an exact bounded Plot id when supplied" do
+      export = approved_export("slice-plot-validation")
+
+      for plot_id <- [
+            "",
+            " padded",
+            "padded ",
+            "control\ncharacter",
+            "control\0character",
+            String.duplicate("p", 513)
+          ] do
+        assert {:error, :core_intake_invalid_plot_id} =
+                 ExecutionRequest.prepare_core_submission(
+                   export.manifest_path,
+                   export.digest,
+                   "repo-plot",
+                   plot_id
+                 )
+      end
+    end
+
     test "rejects path-like slice ids before they become internal path components" do
       export = approved_export("..")
 

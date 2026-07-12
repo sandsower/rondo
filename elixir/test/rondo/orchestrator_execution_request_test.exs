@@ -156,6 +156,73 @@ defmodule Rondo.OrchestratorExecutionRequestTest do
     assert manifest["status"] == "completed"
   end
 
+  test "deduplicates within one Plot while admitting the same work in another Plot" do
+    parent = self()
+    workspace_root = tmp_dir("core-plot-dedupe")
+    export = approved_export(workspace_root, "slice-plot-dedupe")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      max_concurrent_agents: 2,
+      poll_interval_ms: 60_000
+    )
+
+    {:ok, pid} =
+      Orchestrator.start_link(
+        name: unique_name(:CorePlotDedupe),
+        execution_request_runner: blocking_runner(parent)
+      )
+
+    on_exit(fn ->
+      stop_orchestrator(pid)
+      File.rm_rf(workspace_root)
+    end)
+
+    plot_a_request = request(export, "repo-plot-dedupe", "OLI-52")
+    plot_b_request = request(export, "repo-plot-dedupe", "OLI-foreign")
+
+    assert {:ok, plot_a} = Orchestrator.submit_execution_request(pid, plot_a_request)
+    assert plot_a.plot_id == "OLI-52"
+    refute plot_a.deduplicated
+    assert_receive {:execution_runner_started, plot_a_pid, _issue, _opts}, 1_000
+
+    assert {:ok, plot_a_duplicate} =
+             Orchestrator.submit_execution_request(pid, plot_a_request)
+
+    assert plot_a_duplicate.run_id == plot_a.run_id
+    assert plot_a_duplicate.plot_id == "OLI-52"
+    assert plot_a_duplicate.deduplicated
+    refute_receive {:execution_runner_started, _pid, _issue, _opts}, 100
+
+    assert {:ok, plot_b} = Orchestrator.submit_execution_request(pid, plot_b_request)
+    assert plot_b.plot_id == "OLI-foreign"
+    refute plot_b.deduplicated
+    refute plot_b.run_id == plot_a.run_id
+    assert_receive {:execution_runner_started, plot_b_pid, _issue, _opts}, 1_000
+
+    assert {:ok, plot_a_run} =
+             RunLocator.locate(
+               "repo-plot-dedupe",
+               plot_a.run_id,
+               workspace_root: workspace_root
+             )
+
+    assert plot_a_run.manifest["admission"]["plot_id"] == "OLI-52"
+
+    assert {:ok, plot_b_run} =
+             RunLocator.locate(
+               "repo-plot-dedupe",
+               plot_b.run_id,
+               workspace_root: workspace_root
+             )
+
+    assert plot_b_run.manifest["admission"]["plot_id"] == "OLI-foreign"
+
+    send(plot_a_pid, :complete)
+    send(plot_b_pid, :complete)
+  end
+
   test "archives a failed execution request without tracker retry and deduplicates the terminal run" do
     parent = self()
     workspace_root = tmp_dir("core-failure")
@@ -466,8 +533,9 @@ defmodule Rondo.OrchestratorExecutionRequestTest do
         execution_request_runner: blocking_runner(parent)
       )
 
-    request = request(export, "repo-pause")
+    request = request(export, "repo-pause", "OLI-52")
     assert {:ok, submitted} = Orchestrator.submit_execution_request(pid, request)
+    assert submitted.plot_id == "OLI-52"
     assert_receive {:execution_runner_started, runner_pid, issue, _opts}, 1_000
 
     interrupt = %{
@@ -487,6 +555,7 @@ defmodule Rondo.OrchestratorExecutionRequestTest do
     assert paused.issue_id == issue.id
     assert paused.source == :execution_request
     assert paused.repo_id == "repo-pause"
+    assert paused.plot_id == "OLI-52"
     assert paused.manifest_sha256 == export.digest
     assert paused.tracker_visibility == "not_applicable"
     assert paused.blocks_dispatch
@@ -520,12 +589,14 @@ defmodule Rondo.OrchestratorExecutionRequestTest do
 
     assert restarted_paused.source == :execution_request
     assert restarted_paused.repo_id == "repo-pause"
+    assert restarted_paused.plot_id == "OLI-52"
     assert restarted_paused.manifest_sha256 == export.digest
     assert restarted_paused.tracker_visibility == "not_applicable"
 
     assert {:ok, duplicate} = Orchestrator.submit_execution_request(restarted_pid, request)
     assert duplicate.run_id == submitted.run_id
     assert duplicate.status == "paused"
+    assert duplicate.plot_id == "OLI-52"
     assert duplicate.deduplicated
   end
 
@@ -871,12 +942,14 @@ defmodule Rondo.OrchestratorExecutionRequestTest do
     }
   end
 
-  defp request(export, repo_id) do
-    %{
+  defp request(export, repo_id, plot_id \\ nil) do
+    request = %{
       manifest_path: export.manifest_path,
       manifest_sha256: export.digest,
       repo_id: repo_id
     }
+
+    if is_binary(plot_id), do: Map.put(request, :plot_id, plot_id), else: request
   end
 
   defp sha256(contents) do

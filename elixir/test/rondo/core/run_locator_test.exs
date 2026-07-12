@@ -114,6 +114,62 @@ defmodule Rondo.Core.RunLocatorTest do
              RunLocator.find_accepted_by_source_sha256("repo-c", @source_sha, workspace_root: root)
   end
 
+  test "finds accepted execution requests only in the exact Plot namespace" do
+    root = tmp_dir("run-locator-plot-source")
+    legacy = build_run(root, "repo-a", source_sha: @source_sha, admission: :accepted)
+
+    plot_a =
+      build_run(root, "repo-a",
+        source_sha: @source_sha,
+        admission: :accepted,
+        plot_id: "OLI-52"
+      )
+
+    plot_b =
+      build_run(root, "repo-a",
+        source_sha: @source_sha,
+        admission: :accepted,
+        plot_id: "OLI-foreign"
+      )
+
+    assert {:ok, legacy_match} =
+             RunLocator.find_accepted_by_source_sha256(
+               "repo-a",
+               @source_sha,
+               workspace_root: root
+             )
+
+    assert canonical_path(legacy_match.run_dir) == canonical_path(legacy.run_dir)
+
+    assert {:ok, plot_a_match} =
+             RunLocator.find_accepted_by_source_sha256(
+               "repo-a",
+               @source_sha,
+               workspace_root: root,
+               plot_id: "OLI-52"
+             )
+
+    assert canonical_path(plot_a_match.run_dir) == canonical_path(plot_a.run_dir)
+
+    assert {:ok, plot_b_match} =
+             RunLocator.find_accepted_by_source_sha256(
+               "repo-a",
+               @source_sha,
+               workspace_root: root,
+               plot_id: "OLI-foreign"
+             )
+
+    assert canonical_path(plot_b_match.run_dir) == canonical_path(plot_b.run_dir)
+
+    assert {:ok, nil} =
+             RunLocator.find_accepted_by_source_sha256(
+               "repo-a",
+               @source_sha,
+               workspace_root: root,
+               plot_id: "OLI-missing"
+             )
+  end
+
   test "accepted-source dedupe fails closed on a corrupt durable ledger" do
     root = tmp_dir("run-locator-corrupt-dedupe")
     accepted = build_run(root, "repo-a", source_sha: @source_sha, admission: :accepted)
@@ -176,7 +232,8 @@ defmodule Rondo.Core.RunLocatorTest do
               run_source: "execution_request",
               execution_request_admission: %{
                 repo_id: repo_id,
-                manifest_sha256: Keyword.fetch!(opts, :source_sha)
+                manifest_sha256: Keyword.fetch!(opts, :source_sha),
+                plot_id: Keyword.get(opts, :plot_id)
               }
             ]
 
@@ -192,7 +249,8 @@ defmodule Rondo.Core.RunLocatorTest do
           {:ok, accepted} =
             RunLedger.accept_execution_request(ledger, %{
               repo_id: repo_id,
-              manifest_sha256: Keyword.fetch!(opts, :source_sha)
+              manifest_sha256: Keyword.fetch!(opts, :source_sha),
+              plot_id: Keyword.get(opts, :plot_id)
             })
 
           accepted

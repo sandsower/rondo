@@ -2457,6 +2457,7 @@ defmodule Rondo.Orchestrator do
       tracker_visibility: if(execution_request_entry?(running_entry), do: "not_applicable", else: "known"),
       source: Map.get(running_entry, :source, :tracker),
       repo_id: Map.get(running_entry, :repo_id),
+      plot_id: Map.get(running_entry, :plot_id),
       manifest_sha256: Map.get(running_entry, :manifest_sha256),
       ledger: ledger
     }
@@ -3167,6 +3168,7 @@ defmodule Rondo.Orchestrator do
           identifier: metadata.identifier,
           source: Map.get(metadata, :source, :tracker),
           repo_id: Map.get(metadata, :repo_id),
+          plot_id: Map.get(metadata, :plot_id),
           manifest_sha256: Map.get(metadata, :manifest_sha256),
           state: metadata.issue.state,
           session_id: metadata.session_id,
@@ -3236,6 +3238,7 @@ defmodule Rondo.Orchestrator do
           identifier: Map.get(metadata, :identifier),
           source: Map.get(metadata, :source, :tracker),
           repo_id: Map.get(metadata, :repo_id),
+          plot_id: Map.get(metadata, :plot_id),
           manifest_sha256: Map.get(metadata, :manifest_sha256),
           state: Map.get(metadata, :state),
           paused_state: Map.get(metadata, :paused_state),
@@ -3318,7 +3321,8 @@ defmodule Rondo.Orchestrator do
     case ExecutionRequest.prepare_core_submission(
            request_value(params, :manifest_path),
            request_value(params, :manifest_sha256),
-           request_value(params, :repo_id)
+           request_value(params, :repo_id),
+           request_value(params, :plot_id)
          ) do
       {:ok, prepared} ->
         case state.execution_request_after_prepare.(prepared) do
@@ -3335,6 +3339,7 @@ defmodule Rondo.Orchestrator do
        when reason in [
               :core_intake_invalid_expected_sha256,
               :core_intake_invalid_repo_id,
+              :core_intake_invalid_plot_id,
               :core_intake_invalid_manifest_path
             ],
        do: :invalid_request
@@ -3362,7 +3367,8 @@ defmodule Rondo.Orchestrator do
 
     case RunLocator.find_accepted_by_source_sha256(
            prepared.repo_id,
-           source_sha256
+           source_sha256,
+           plot_id: prepared.plot_id
          ) do
       {:ok, %{manifest: manifest}} ->
         {{:ok, execution_submission(manifest, prepared.repo_id, true)}, state}
@@ -3441,10 +3447,7 @@ defmodule Rondo.Orchestrator do
       repo_id: prepared.repo_id,
       run_source: "execution_request",
       source_contract: prepared.source_contract,
-      execution_request_admission: %{
-        repo_id: prepared.repo_id,
-        manifest_sha256: Map.fetch!(prepared.source_contract, :sha256)
-      }
+      execution_request_admission: execution_request_identity(prepared)
     ]
 
     opts =
@@ -3500,14 +3503,15 @@ defmodule Rondo.Orchestrator do
   defp execution_request_freeze_error(_reason), do: :execution_request_freeze_failed
 
   defp write_execution_request_dispatch_checkpoint(ledger, prepared) do
-    payload = %{
-      issue_id: prepared.issue.id,
-      issue_identifier: prepared.issue.identifier,
-      source: "execution_request",
-      repo_id: prepared.repo_id,
-      manifest_sha256: Map.fetch!(prepared.source_contract, :sha256),
-      attempt: 0
-    }
+    payload =
+      prepared
+      |> execution_request_identity()
+      |> Map.merge(%{
+        issue_id: prepared.issue.id,
+        issue_identifier: prepared.issue.identifier,
+        source: "execution_request",
+        attempt: 0
+      })
 
     case RunLedger.write_checkpoint(ledger, :dispatch, payload, source: %{surface: EventFeed.surface()}) do
       {:ok, ledger} ->
@@ -3543,14 +3547,15 @@ defmodule Rondo.Orchestrator do
         agent_opts
       end
 
-    metadata = %{
-      source: :execution_request,
-      repo_id: prepared.repo_id,
-      manifest_sha256: Map.fetch!(prepared.source_contract, :sha256),
-      start_gate: make_ref(),
-      strict_ledger: true,
-      task_starter: state.execution_request_task_starter
-    }
+    metadata =
+      prepared
+      |> execution_request_identity()
+      |> Map.merge(%{
+        source: :execution_request,
+        start_gate: make_ref(),
+        strict_ledger: true,
+        task_starter: state.execution_request_task_starter
+      })
 
     case spawn_agent_for_issue(
            state,
@@ -3579,10 +3584,7 @@ defmodule Rondo.Orchestrator do
   end
 
   defp accept_execution_request_agent(state, prepared, running_entry) do
-    identity = %{
-      repo_id: prepared.repo_id,
-      manifest_sha256: Map.fetch!(prepared.source_contract, :sha256)
-    }
+    identity = execution_request_identity(prepared)
 
     case RunLedger.accept_execution_request(running_entry.ledger, identity) do
       {:ok, accepted_ledger} ->
@@ -3701,7 +3703,7 @@ defmodule Rondo.Orchestrator do
   end
 
   defp execution_submission(manifest, repo_id, deduplicated) do
-    %{
+    submission = %{
       surface: EventFeed.surface(),
       service_id: "rondo-core",
       repo_id: repo_id,
@@ -3710,7 +3712,20 @@ defmodule Rondo.Orchestrator do
       event_cursor: EventFeed.initial_cursor(),
       deduplicated: deduplicated
     }
+
+    maybe_put_plot_id(submission, get_in(manifest, ["admission", "plot_id"]))
   end
+
+  defp execution_request_identity(prepared) do
+    %{
+      repo_id: prepared.repo_id,
+      manifest_sha256: Map.fetch!(prepared.source_contract, :sha256)
+    }
+    |> maybe_put_plot_id(prepared.plot_id)
+  end
+
+  defp maybe_put_plot_id(map, nil), do: map
+  defp maybe_put_plot_id(map, plot_id), do: Map.put(map, :plot_id, plot_id)
 
   defp request_value(params, key) do
     Map.get(params, key) || Map.get(params, Atom.to_string(key))
@@ -4199,6 +4214,7 @@ defmodule Rondo.Orchestrator do
         repo: ownership.repo,
         source: ownership.source,
         repo_id: ownership.repo_id,
+        plot_id: Map.get(running_entry, :plot_id),
         manifest_sha256: Map.get(running_entry, :manifest_sha256),
         workspace: Map.get(running_entry, :workspace),
         run_id: Map.get(running_entry, :run_id),
@@ -4526,6 +4542,7 @@ defmodule Rondo.Orchestrator do
       tracker_visibility: if(execution_request_manifest?(manifest), do: "not_applicable", else: "unknown"),
       source: if(execution_request_manifest?(manifest), do: :execution_request, else: :tracker),
       repo_id: get_in(manifest, ["repo", "repo_id"]),
+      plot_id: get_in(manifest, ["admission", "plot_id"]),
       manifest_sha256: get_in(manifest, ["source_contract", "sha256"]),
       ledger: ledger
     }
@@ -4619,7 +4636,7 @@ defmodule Rondo.Orchestrator do
     end
   end
 
-  @archive_keys ~w(issue_id identifier issue_title issue_url project repo source repo_id manifest_sha256 workspace pr_url run_id run_dir session_id state started_at finished_at exit_reason non_active_state turn_count tokens cost latest_gate event_log model_routing adapter final_report)
+  @archive_keys ~w(issue_id identifier issue_title issue_url project repo source repo_id plot_id manifest_sha256 workspace pr_url run_id run_dir session_id state started_at finished_at exit_reason non_active_state turn_count tokens cost latest_gate event_log model_routing adapter final_report)
   @token_keys ~w(input_tokens output_tokens total_tokens)
   @event_keys ~w(at event message tokens)
 
