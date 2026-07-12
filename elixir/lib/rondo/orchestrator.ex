@@ -61,6 +61,7 @@ defmodule Rondo.Orchestrator do
       :tick_timer_ref,
       :tick_token,
       :tracker_polling,
+      :service_mode,
       :execution_request_runner,
       :execution_request_task_starter,
       :execution_request_after_prepare,
@@ -90,6 +91,7 @@ defmodule Rondo.Orchestrator do
     now_ms = System.monotonic_time(:millisecond)
     task_supervisor = Keyword.get(opts, :task_supervisor, Rondo.TaskSupervisor)
     tracker_polling = Keyword.get(opts, :tracker_polling, true)
+    service_mode = Keyword.get(opts, :service_mode, :tracker_daemon)
 
     case maybe_recover_runs(opts, task_supervisor) do
       :ok ->
@@ -103,6 +105,7 @@ defmodule Rondo.Orchestrator do
           tick_timer_ref: nil,
           tick_token: nil,
           tracker_polling: tracker_polling,
+          service_mode: service_mode,
           execution_request_runner: Keyword.get(opts, :execution_request_runner, &AgentRunner.run/3),
           execution_request_task_starter:
             Keyword.get(
@@ -3342,7 +3345,7 @@ defmodule Rondo.Orchestrator do
       {{:error, :execution_request_admission_failed}, state}
   end
 
-  defp validate_execution_request_config(%State{tracker_polling: false}),
+  defp validate_execution_request_config(%State{service_mode: :trackerless_core}),
     do: Config.validate_core!()
 
   defp validate_execution_request_config(_state), do: Config.validate!()

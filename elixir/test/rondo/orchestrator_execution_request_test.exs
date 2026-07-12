@@ -172,6 +172,7 @@ defmodule Rondo.OrchestratorExecutionRequestTest do
     {:ok, core_pid} =
       Orchestrator.start_link(
         name: unique_name(:TrackerlessAdmission),
+        service_mode: :trackerless_core,
         tracker_polling: false,
         execution_request_runner: blocking_runner(parent)
       )
@@ -179,7 +180,7 @@ defmodule Rondo.OrchestratorExecutionRequestTest do
     {:ok, daemon_pid} =
       Orchestrator.start_link(
         name: unique_name(:TrackerDaemonAdmission),
-        tracker_polling: true,
+        tracker_polling: false,
         execution_request_runner: blocking_runner(parent)
       )
 
