@@ -235,8 +235,8 @@ defmodule Rondo.CLITest do
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:ok, [:rondo]} end,
       ensure_run_once_dependencies_started: fn -> {:ok, [:req]} end,
-      run_once: fn _issue_id -> :ok end,
-      run_manifest: fn _manifest_path -> :ok end
+      run_once: fn _issue_id, _opts -> :ok end,
+      run_manifest: fn _manifest_path, _opts -> :ok end
     }
 
     assert {:error, message} = CLI.evaluate(["run-once", "WORKFLOW.md", "--issue", "123"], deps)
@@ -251,8 +251,8 @@ defmodule Rondo.CLITest do
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:ok, [:rondo]} end,
       ensure_run_once_dependencies_started: fn -> {:error, {:req, :boom}} end,
-      run_once: fn _issue_id -> flunk("run-once should not dispatch when dependencies fail") end,
-      run_manifest: fn _manifest_path -> flunk("run-once should not dispatch when dependencies fail") end
+      run_once: fn _issue_id, _opts -> flunk("run-once should not dispatch when dependencies fail") end,
+      run_manifest: fn _manifest_path, _opts -> flunk("run-once should not dispatch when dependencies fail") end
     }
 
     assert {:error, message} = CLI.evaluate(["run-once", "WORKFLOW.md", "--issue", "123"], deps)
@@ -268,12 +268,27 @@ defmodule Rondo.CLITest do
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:ok, [:rondo]} end,
-      run_once: fn "123" -> {:error, :boom} end,
-      run_manifest: fn _manifest_path -> :ok end
+      run_once: fn "123", _opts -> {:error, :boom} end,
+      run_manifest: fn _manifest_path, _opts -> :ok end
     }
 
     assert {:error, message} = CLI.evaluate(["run-once", "WORKFLOW.md", "--issue", "123"], deps)
     assert message =~ "run-once failed for issue 123: :boom"
+  end
+
+  test "run-once rejects runners that cannot receive security provenance options" do
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:rondo]} end,
+      run_once: fn _issue_id -> :ok end,
+      run_manifest: fn _manifest_path, _opts -> :ok end
+    }
+
+    assert {:error, message} = CLI.evaluate(["run-once", "WORKFLOW.md", "--issue", "123"], deps)
+    assert message =~ "invalid_runner_contract"
   end
 
   defp run_once_deps(parent, expected_workflow_path) do
@@ -296,11 +311,11 @@ defmodule Rondo.CLITest do
         send(parent, :run_once_dependencies_started)
         {:ok, [:req]}
       end,
-      run_once: fn issue_id ->
+      run_once: fn issue_id, _opts ->
         send(parent, {:run_once, issue_id})
         :ok
       end,
-      run_manifest: fn manifest_path ->
+      run_manifest: fn manifest_path, _opts ->
         send(parent, {:run_manifest, manifest_path})
         :ok
       end

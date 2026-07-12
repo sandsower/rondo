@@ -80,6 +80,7 @@ defmodule Rondo.ChildLaunchPolicyTest do
                dispatch_origin: :run_once,
                unsafe_bypass: true,
                adapter: "pi",
+               model: "openrouter/deepseek/deepseek-chat",
                isolation_baseline: :os_credential_isolated,
                run_dir: "/tmp/run-manifest-origin",
                source_contract: source_contract,
@@ -154,6 +155,30 @@ defmodule Rondo.ChildLaunchPolicyTest do
     assert envelope.environment == %{}
   end
 
+  test "unsupported adapter provider profiles fail closed" do
+    examples = [
+      [adapter: "pi"],
+      [adapter: "unknown", model: "openrouter/example"],
+      [adapter: "claude_code", model: "openai/example"]
+    ]
+
+    for adapter_opts <- examples do
+      assert {:block, envelope} =
+               ChildLaunchPolicy.resolve(
+                 [
+                   run_mode: "unattended-auto",
+                   dispatch_origin: :daemon,
+                   isolation_baseline: :os_credential_isolated,
+                   run_dir: "/tmp/run-provider-unsupported",
+                   inherited_env: %{}
+                 ] ++ adapter_opts
+               )
+
+      assert envelope.reason == :invalid_provider_auth_profile
+      assert envelope.environment == %{}
+    end
+  end
+
   test "malformed launch paths fail closed instead of raising" do
     assert {:block, envelope} =
              ChildLaunchPolicy.resolve(
@@ -177,6 +202,7 @@ defmodule Rondo.ChildLaunchPolicyTest do
                run_mode: "unattended-auto",
                dispatch_origin: :manifest,
                adapter: "pi",
+               model: "openrouter/deepseek/deepseek-chat",
                isolation_baseline: :os_credential_isolated,
                run_dir: "/tmp/run-sanitized",
                source_contract: source_contract,

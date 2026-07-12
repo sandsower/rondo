@@ -1,7 +1,8 @@
 System.put_env("LINEAR_API_KEY", System.get_env("LINEAR_API_KEY") || "test-linear-api-key")
 
 # Existing dispatch tests exercise behavior above the host containment boundary.
-# Tests for the fail-closed baseline pass :env_home_scoped explicitly.
+# :os_credential_isolated is the fail-closed default for all tests.
+# Tests exercising the weaker :env_home_scoped baseline opt into it explicitly.
 Application.put_env(:rondo, :child_isolation_baseline, :os_credential_isolated)
 
 # Live E2E tests (tagged :live_e2e) are opt-in only: run them via `make e2e`

@@ -17,8 +17,8 @@ defmodule Rondo.CLI do
           required(:set_server_port_override) => (non_neg_integer() | nil -> :ok | {:error, term()}),
           required(:ensure_all_started) => (-> ensure_started_result()),
           optional(:ensure_run_once_dependencies_started) => (-> ensure_started_result()),
-          required(:run_once) => function(),
-          required(:run_manifest) => function()
+          required(:run_once) => (String.t(), keyword() -> :ok | {:error, term()}),
+          required(:run_manifest) => (String.t(), keyword() -> :ok | {:error, term()})
         }
 
   @spec main([String.t()]) :: no_return()
@@ -170,7 +170,7 @@ defmodule Rondo.CLI do
   end
 
   defp invoke_runner(runner, target, opts) when is_function(runner, 2), do: runner.(target, opts)
-  defp invoke_runner(runner, target, _opts) when is_function(runner, 1), do: runner.(target)
+  defp invoke_runner(_runner, _target, _opts), do: {:error, :invalid_runner_contract}
 
   @spec usage_message() :: String.t()
   defp usage_message do

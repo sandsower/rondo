@@ -201,17 +201,18 @@ defmodule Rondo.Agent.ChildLaunchPolicy do
 
   defp provider_environment_names(adapter, model, opts) do
     provider = provider_from_model(adapter, model)
-    expected_names = default_provider_env_names(adapter, provider)
 
-    case Keyword.get(opts, :provider_auth_env_names) do
-      names when is_list(names) ->
-        validate_provider_env_names(names, expected_names, provider)
+    with {:ok, expected_names} <- default_provider_env_names(adapter, provider) do
+      case Keyword.get(opts, :provider_auth_env_names) do
+        names when is_list(names) ->
+          validate_provider_env_names(names, expected_names, provider)
 
-      nil ->
-        validate_provider_env_names(expected_names, expected_names, provider)
+        nil ->
+          validate_provider_env_names(expected_names, expected_names, provider)
 
-      _other ->
-        {:error, :invalid_provider_auth_profile}
+        _other ->
+          {:error, :invalid_provider_auth_profile}
+      end
     end
   end
 
@@ -230,12 +231,16 @@ defmodule Rondo.Agent.ChildLaunchPolicy do
     name in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"]
   end
 
-  defp default_provider_env_names("claude_code", _provider), do: ["ANTHROPIC_API_KEY"]
-  defp default_provider_env_names("codex", _provider), do: ["OPENAI_API_KEY"]
-  defp default_provider_env_names("pi", "openrouter"), do: ["OPENROUTER_API_KEY"]
-  defp default_provider_env_names("pi", provider) when provider in ["openai", "openai-codex"], do: ["OPENAI_API_KEY"]
-  defp default_provider_env_names("pi", "anthropic"), do: ["ANTHROPIC_API_KEY"]
-  defp default_provider_env_names(_adapter, _provider), do: []
+  defp default_provider_env_names("claude_code", provider) when provider in ["native", "claude_code", "anthropic"],
+    do: {:ok, ["ANTHROPIC_API_KEY"]}
+
+  defp default_provider_env_names("codex", provider) when provider in ["native", "codex", "openai", "openai-codex"],
+    do: {:ok, ["OPENAI_API_KEY"]}
+
+  defp default_provider_env_names("pi", "openrouter"), do: {:ok, ["OPENROUTER_API_KEY"]}
+  defp default_provider_env_names("pi", provider) when provider in ["openai", "openai-codex"], do: {:ok, ["OPENAI_API_KEY"]}
+  defp default_provider_env_names("pi", "anthropic"), do: {:ok, ["ANTHROPIC_API_KEY"]}
+  defp default_provider_env_names(_adapter, _provider), do: {:error, :invalid_provider_auth_profile}
 
   defp provider_from_model(_adapter, model) when is_binary(model) do
     case String.split(model, "/", parts: 2) do

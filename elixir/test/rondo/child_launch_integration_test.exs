@@ -53,6 +53,28 @@ defmodule Rondo.ChildLaunchIntegrationTest do
     refute_received {:fake_pi_invoked, _, _}
   end
 
+  test "real dispatch path rejects an implicit Pi provider before adapter invocation" do
+    {issue, ledger} = setup_run("IMPLICIT-PROVIDER", action_policy_run_mode: "unattended-auto", model_routing: %{})
+
+    assert_raise RuntimeError, ~r/invalid_provider_auth_profile/, fn ->
+      AgentRunner.run(issue, self(),
+        agent_adapter: FakePiAdapter,
+        run_ledger: ledger,
+        run_dir: ledger.run_dir,
+        child_isolation_baseline: :os_credential_isolated,
+        gates: [],
+        test_pid: self(),
+        issue_state_fetcher: &AgentRunner.no_tracker_issue_state_fetcher/1
+      )
+    end
+
+    manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+    evidence = get_in(manifest, ["agent", "child_launch"])
+    assert evidence["decision"] == "block"
+    assert evidence["reason"] == "invalid_provider_auth_profile"
+    refute_received {:fake_pi_invoked, _, _}
+  end
+
   test "supervised run-once bypass is recorded before invoking and carries the same envelope" do
     {issue, ledger} = setup_run("BYPASS", action_policy_run_mode: "supervised-auto")
 
@@ -153,6 +175,7 @@ defmodule Rondo.ChildLaunchIntegrationTest do
       workspace_root: workspace_root,
       hook_after_create: "git init -q",
       action_policy_run_mode: "supervised-auto",
+      model_routing: provider_model_routing(),
       max_turns: 1
     )
 
@@ -196,7 +219,7 @@ defmodule Rondo.ChildLaunchIntegrationTest do
     write_workflow_file!(
       Workflow.workflow_file_path(),
       Keyword.merge(
-        [workspace_root: workspace_root, hook_after_create: "git init -q", max_turns: 1],
+        [workspace_root: workspace_root, hook_after_create: "git init -q", max_turns: 1, model_routing: provider_model_routing()],
         workflow_opts
       )
     )
@@ -212,5 +235,12 @@ defmodule Rondo.ChildLaunchIntegrationTest do
 
     assert {:ok, ledger} = RunLedger.create_run(issue, workspace_root: workspace_root)
     {issue, ledger}
+  end
+
+  defp provider_model_routing do
+    %{
+      defaults: %{tier: "standard", mode: "prefer"},
+      tiers: %{standard: [%{model: "openrouter/deepseek/deepseek-chat"}]}
+    }
   end
 end
