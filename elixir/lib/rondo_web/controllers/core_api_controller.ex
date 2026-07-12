@@ -74,22 +74,31 @@ defmodule RondoWeb.CoreApiController do
   defp execution_request(params) do
     with {:ok, manifest_path} <- required_string(params, "manifest_path"),
          {:ok, manifest_sha256} <- required_digest(params, "manifest_sha256"),
-         {:ok, repo_id} <- required_repo_id(params, "repo_id") do
+         {:ok, repo_id} <- required_repo_id(params, "repo_id"),
+         {:ok, plot_id} <- optional_identifier(params, "plot_id") do
       {:ok,
        %{
          manifest_path: manifest_path,
          manifest_sha256: manifest_sha256,
-         repo_id: repo_id
+         repo_id: repo_id,
+         plot_id: plot_id
        }}
     end
   end
 
   defp submit_request(conn, request) do
     case core_orchestrator().submit_execution_request(orchestrator(), request) do
-      {:ok, run} when is_map(run) -> submit_success(conn, run, request.repo_id)
-      {:error, reason} -> submit_error(conn, reason)
-      :unavailable -> submit_error(conn, :unavailable)
-      _other -> submit_error(conn, :unavailable)
+      {:ok, run} when is_map(run) ->
+        submit_success(conn, run, request.repo_id, request.plot_id)
+
+      {:error, reason} ->
+        submit_error(conn, reason)
+
+      :unavailable ->
+        submit_error(conn, :unavailable)
+
+      _other ->
+        submit_error(conn, :unavailable)
     end
   end
 
@@ -163,6 +172,13 @@ defmodule RondoWeb.CoreApiController do
     end
   end
 
+  defp optional_identifier(params, key) do
+    case Map.get(params, key) do
+      nil -> {:ok, nil}
+      value -> required_identifier(value)
+    end
+  end
+
   defp optional_cursor(params, key) do
     with {:ok, cursor} <- optional_string(params, key),
          {:ok, _offset} <- EventFeed.parse_cursor(cursor) do
@@ -172,24 +188,27 @@ defmodule RondoWeb.CoreApiController do
     end
   end
 
-  defp submit_success(conn, run, repo_id) do
+  defp submit_success(conn, run, repo_id, plot_id) do
     with true <- exact_required_echo?(run, :surface, @surface),
          true <- exact_required_echo?(run, :repo_id, repo_id),
+         true <- exact_optional_echo?(run, :plot_id, plot_id),
          {:ok, service_id} <- nonempty_response_string(run, :service_id),
          {:ok, run_id} <- nonempty_response_string(run, :run_id),
          {:ok, status_value} <- nonempty_response_string(run, :status),
          {:ok, event_cursor} <- response_cursor(run, :event_cursor),
          {:ok, deduplicated} <- fetch_value(run, :deduplicated),
          true <- is_boolean(deduplicated) do
-      response = %{
-        "surface" => @surface,
-        "service_id" => service_id,
-        "repo_id" => repo_id,
-        "run_id" => run_id,
-        "status" => status_value,
-        "event_cursor" => event_cursor,
-        "deduplicated" => deduplicated
-      }
+      response =
+        %{
+          "surface" => @surface,
+          "service_id" => service_id,
+          "repo_id" => repo_id,
+          "run_id" => run_id,
+          "status" => status_value,
+          "event_cursor" => event_cursor,
+          "deduplicated" => deduplicated
+        }
+        |> maybe_put_plot_id(plot_id)
 
       http_status = if deduplicated, do: 200, else: 202
 
@@ -210,16 +229,21 @@ defmodule RondoWeb.CoreApiController do
          true <- is_nil(last_event) or is_map(last_event),
          {:ok, evidence_pointers} <- fetch_value(response, :evidence_pointers),
          true <- is_list(evidence_pointers),
-         {:ok, event_cursor} <- response_cursor(response, :event_cursor) do
-      json(conn, %{
-        "surface" => @surface,
-        "repo_id" => request.repo_id,
-        "run_id" => request.run_id,
-        "status" => status,
-        "last_event" => last_event,
-        "evidence_pointers" => evidence_pointers,
-        "event_cursor" => event_cursor
-      })
+         {:ok, event_cursor} <- response_cursor(response, :event_cursor),
+         {:ok, plot_id} <- optional_response_identifier(response, :plot_id) do
+      body =
+        %{
+          "surface" => @surface,
+          "repo_id" => request.repo_id,
+          "run_id" => request.run_id,
+          "status" => status,
+          "last_event" => last_event,
+          "evidence_pointers" => evidence_pointers,
+          "event_cursor" => event_cursor
+        }
+        |> maybe_put_plot_id(plot_id)
+
+      json(conn, body)
     else
       _invalid -> feed_error(conn, :unavailable)
     end
@@ -233,15 +257,20 @@ defmodule RondoWeb.CoreApiController do
          true <- is_list(events),
          {:ok, next_event_cursor} <- response_cursor(response, :next_event_cursor),
          {:ok, has_more} <- fetch_value(response, :has_more),
-         true <- is_boolean(has_more) do
-      json(conn, %{
-        "surface" => @surface,
-        "repo_id" => request.repo_id,
-        "run_id" => request.run_id,
-        "events" => events,
-        "next_event_cursor" => next_event_cursor,
-        "has_more" => has_more
-      })
+         true <- is_boolean(has_more),
+         {:ok, plot_id} <- optional_response_identifier(response, :plot_id) do
+      body =
+        %{
+          "surface" => @surface,
+          "repo_id" => request.repo_id,
+          "run_id" => request.run_id,
+          "events" => events,
+          "next_event_cursor" => next_event_cursor,
+          "has_more" => has_more
+        }
+        |> maybe_put_plot_id(plot_id)
+
+      json(conn, body)
     else
       _invalid -> feed_error(conn, :unavailable)
     end
@@ -249,13 +278,31 @@ defmodule RondoWeb.CoreApiController do
 
   defp submit_error(conn, reason) do
     case error_kind(reason) do
-      :invalid_request -> error_response(conn, 400, "invalid_request", "manifest_path, manifest_sha256, and repo_id are required")
-      :digest_conflict -> error_response(conn, 409, "digest_conflict", "Manifest digest conflicts with an existing submission")
-      :invalid_manifest -> error_response(conn, 422, "invalid_manifest", "Execution request manifest is invalid")
-      :unapproved_manifest -> error_response(conn, 422, "unapproved_manifest", "Execution request manifest is not approved")
-      :capacity_exhausted -> error_response(conn, 429, "capacity_exhausted", "Rondo Core has no available execution capacity")
-      :unavailable -> error_response(conn, 503, "orchestrator_unavailable", "Rondo Core orchestrator is unavailable")
-      _unsupported -> error_response(conn, 503, "orchestrator_unavailable", "Rondo Core orchestrator is unavailable")
+      :invalid_request ->
+        error_response(
+          conn,
+          400,
+          "invalid_request",
+          "manifest_path, manifest_sha256, repo_id, and optional plot_id must be valid"
+        )
+
+      :digest_conflict ->
+        error_response(conn, 409, "digest_conflict", "Manifest digest conflicts with an existing submission")
+
+      :invalid_manifest ->
+        error_response(conn, 422, "invalid_manifest", "Execution request manifest is invalid")
+
+      :unapproved_manifest ->
+        error_response(conn, 422, "unapproved_manifest", "Execution request manifest is not approved")
+
+      :capacity_exhausted ->
+        error_response(conn, 429, "capacity_exhausted", "Rondo Core has no available execution capacity")
+
+      :unavailable ->
+        error_response(conn, 503, "orchestrator_unavailable", "Rondo Core orchestrator is unavailable")
+
+      _unsupported ->
+        error_response(conn, 503, "orchestrator_unavailable", "Rondo Core orchestrator is unavailable")
     end
   end
 
@@ -324,6 +371,28 @@ defmodule RondoWeb.CoreApiController do
       _invalid -> :error
     end
   end
+
+  defp optional_response_identifier(map, key) do
+    case fetch_optional_value(map, key) do
+      nil -> {:ok, nil}
+      value -> required_identifier(value)
+    end
+  end
+
+  defp fetch_optional_value(map, key) do
+    case fetch_value(map, key) do
+      {:ok, value} -> value
+      :error -> nil
+    end
+  end
+
+  defp exact_optional_echo?(_map, _key, nil), do: true
+
+  defp exact_optional_echo?(map, key, expected),
+    do: fetch_value(map, key) == {:ok, expected}
+
+  defp maybe_put_plot_id(response, nil), do: response
+  defp maybe_put_plot_id(response, plot_id), do: Map.put(response, "plot_id", plot_id)
 
   defp exact_required_echo?(map, key, expected), do: fetch_value(map, key) == {:ok, expected}
 
