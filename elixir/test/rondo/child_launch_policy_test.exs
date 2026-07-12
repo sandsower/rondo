@@ -65,6 +65,32 @@ defmodule Rondo.ChildLaunchPolicyTest do
     end
   end
 
+  test "manifest source provenance overrides a claimed run-once origin and rejects bypass" do
+    source_contract = %{
+      schema: "rondo-execution-request-v1",
+      slice_id: "slice-review",
+      path: "/tmp/review-manifest.json",
+      sha256: String.duplicate("a", 64)
+    }
+
+    assert {:block, envelope} =
+             ChildLaunchPolicy.resolve(
+               run_mode: "supervised-auto",
+               dispatch_origin: :run_once,
+               unsafe_bypass: true,
+               adapter: "pi",
+               isolation_baseline: :os_credential_isolated,
+               run_dir: "/tmp/run-manifest-origin",
+               source_contract: source_contract,
+               inherited_env: %{}
+             )
+
+    assert envelope.dispatch_origin == :manifest
+    assert envelope.reason == :manifest_child_credential_bypass_forbidden
+    refute envelope.bypass.applied
+    assert envelope.environment == %{}
+  end
+
   test "manifest actions can narrow but cannot grant publication, tracker, or MCP authority" do
     source_contract = %{
       allowed_actions: %{
@@ -142,5 +168,30 @@ defmodule Rondo.ChildLaunchPolicyTest do
     evidence = ChildLaunchPolicy.sanitize(envelope)
     refute inspect(evidence) =~ @secret
     assert evidence["requested_action_summary"] == %{"allow" => 1}
+  end
+
+  test "resolve is total and returns sanitized blocked evidence for malformed inputs" do
+    valid = [adapter: "pi", run_dir: "/tmp/run-total", inherited_env: %{}]
+
+    examples = [
+      {[], :invalid_adapter},
+      {[run_dir: "/tmp/run-total"], :invalid_adapter},
+      {[adapter: "pi"], :invalid_run_dir},
+      {[:malformed], :invalid_options},
+      {%{adapter: "pi"}, :invalid_options},
+      {Keyword.put(valid, :unsafe_bypass, "yes"), :invalid_unsafe_bypass},
+      {Keyword.put(valid, :inherited_env, [{"PATH", "/bin"}]), :invalid_inherited_environment},
+      {Keyword.put(valid, :source_contract, "manifest"), :invalid_source_contract},
+      {Keyword.put(valid, :provider_auth_env_names, %{}), :invalid_provider_auth_profile}
+    ]
+
+    for {input, reason} <- examples do
+      assert {:block, envelope} = ChildLaunchPolicy.resolve(input)
+      assert envelope.reason == reason
+      assert envelope.environment == %{}
+      evidence = ChildLaunchPolicy.sanitize(envelope)
+      assert evidence["decision"] == "block"
+      refute inspect(evidence) =~ @secret
+    end
   end
 end

@@ -154,16 +154,18 @@ defmodule Rondo.CLI do
   end
 
   defp run_once_manifest(manifest_path, opts, deps) do
-    if Keyword.get(opts, :unsafe_child_credential_bypass, false) do
-      {:error, "The unsafe child credential bypass is not available for manifest execution."}
-    else
-      expanded_manifest_path = Path.expand(manifest_path)
-      run_opts = [agent_opts: [dispatch_origin: :run_once]]
+    expanded_manifest_path = Path.expand(manifest_path)
 
-      case invoke_runner(Map.get(deps, :run_manifest, &RunOnce.run_manifest/2), expanded_manifest_path, run_opts) do
-        :ok -> :ok
-        {:error, reason} -> {:error, "run-once failed for manifest #{expanded_manifest_path}: #{inspect(reason)}"}
-      end
+    run_opts = [
+      agent_opts: [
+        dispatch_origin: :manifest,
+        unsafe_child_credential_bypass: Keyword.get(opts, :unsafe_child_credential_bypass, false)
+      ]
+    ]
+
+    case invoke_runner(Map.get(deps, :run_manifest, &RunOnce.run_manifest/2), expanded_manifest_path, run_opts) do
+      :ok -> :ok
+      {:error, reason} -> {:error, "run-once failed for manifest #{expanded_manifest_path}: #{inspect(reason)}"}
     end
   end
 

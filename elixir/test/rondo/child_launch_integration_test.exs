@@ -2,7 +2,7 @@ defmodule Rondo.ChildLaunchIntegrationTest do
   use Rondo.TestSupport
 
   alias Rondo.Agent.Adapter
-  alias Rondo.RunLedger
+  alias Rondo.{RunLedger, RunOnce}
 
   defmodule FakePiAdapter do
     @behaviour Rondo.Agent.Adapter
@@ -74,6 +74,94 @@ defmodule Rondo.ChildLaunchIntegrationTest do
     assert evidence["bypass"]["applied"]
     assert_receive {:fake_pi_invoked, envelope, true}
     assert envelope.decision == :supervised_bypass
+  end
+
+  test "manifest-shaped bypass is durably rejected before adapter invocation" do
+    {issue, ledger} = setup_run("MANIFEST-BYPASS", action_policy_run_mode: "supervised-auto")
+
+    source_contract = %{
+      schema: "rondo-execution-request-v1",
+      slice_id: "slice-manifest-bypass",
+      path: "/tmp/manifest-bypass.json",
+      sha256: String.duplicate("b", 64)
+    }
+
+    assert_raise RuntimeError, ~r/manifest_child_credential_bypass_forbidden/, fn ->
+      AgentRunner.run(issue, self(),
+        agent_adapter: FakePiAdapter,
+        run_ledger: ledger,
+        run_dir: ledger.run_dir,
+        dispatch_origin: :run_once,
+        unsafe_child_credential_bypass: true,
+        child_isolation_baseline: :os_credential_isolated,
+        source_contract: source_contract,
+        gates: [],
+        test_pid: self(),
+        issue_state_fetcher: &AgentRunner.no_tracker_issue_state_fetcher/1
+      )
+    end
+
+    manifest = ledger.manifest_path |> File.read!() |> Jason.decode!()
+    evidence = get_in(manifest, ["agent", "child_launch"])
+    assert evidence["decision"] == "block"
+    assert evidence["dispatch_origin"] == "manifest"
+    assert evidence["reason"] == "manifest_child_credential_bypass_forbidden"
+    assert Enum.any?(manifest["checkpoints"], &(&1["kind"] == "child_launch_policy_resolved"))
+    refute_received {:fake_pi_invoked, _, _}
+  end
+
+  test "run-once manifest rejection persists evidence and never invokes the adapter" do
+    root = Path.join(System.tmp_dir!(), "rondo-run-once-manifest-bypass-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(root, "workspaces")
+    manifest_path = Path.join(root, "request.json")
+    on_exit(fn -> File.rm_rf(root) end)
+    File.mkdir_p!(root)
+
+    File.write!(
+      manifest_path,
+      Jason.encode!(%{
+        schema: "rondo-execution-request-v1",
+        slice_id: "slice-run-once-bypass",
+        prompt: "This adapter must not run."
+      })
+    )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      hook_after_create: "git init -q",
+      action_policy_run_mode: "supervised-auto",
+      max_turns: 1
+    )
+
+    deps = %{
+      fetch_issue_states_by_ids: fn _ids -> flunk("manifest execution must not fetch tracker state") end,
+      update_issue_state: fn _id, _state -> flunk("manifest execution must not update tracker state") end,
+      action_policy_evaluator: fn _action, _classes, _opts -> {:ok, %{decision: "allow"}} end,
+      agent_runner: fn issue, opts -> AgentRunner.run(issue, self(), opts) end,
+      clean_eval_runner: fn ledger -> {:ok, ledger, %{status: :skipped}} end
+    }
+
+    assert {:error, {:agent_run_failed, message}} =
+             RunOnce.run_manifest(manifest_path,
+               deps: deps,
+               agent_opts: [
+                 agent_adapter: FakePiAdapter,
+                 unsafe_child_credential_bypass: true,
+                 child_isolation_baseline: :os_credential_isolated,
+                 gates: [],
+                 test_pid: self()
+               ]
+             )
+
+    assert message =~ "manifest_child_credential_bypass_forbidden"
+
+    [run_manifest_path] = Path.wildcard(Path.join([workspace_root, ".rondo_runs", "slice-run-once-bypass", "*", "manifest.json"]))
+    manifest = run_manifest_path |> File.read!() |> Jason.decode!()
+    evidence = get_in(manifest, ["agent", "child_launch"])
+    assert evidence["decision"] == "block"
+    assert evidence["dispatch_origin"] == "manifest"
+    assert evidence["reason"] == "manifest_child_credential_bypass_forbidden"
+    refute_received {:fake_pi_invoked, _, _}
   end
 
   defp setup_run(suffix, workflow_opts) do

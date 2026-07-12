@@ -44,18 +44,18 @@ defmodule Rondo.Agent.ChildLaunchEnvelope do
   def sanitized(%__MODULE__{} = envelope) do
     %{
       "schema" => envelope.schema,
-      "decision" => to_string(envelope.decision),
-      "reason" => to_string(envelope.reason),
-      "run_mode" => envelope.run_mode,
-      "dispatch_origin" => to_string(envelope.dispatch_origin),
-      "adapter" => envelope.adapter,
-      "model_provider" => envelope.model_provider,
+      "decision" => safe_string(envelope.decision),
+      "reason" => safe_string(envelope.reason),
+      "run_mode" => safe_string(envelope.run_mode),
+      "dispatch_origin" => safe_string(envelope.dispatch_origin),
+      "adapter" => safe_string(envelope.adapter),
+      "model_provider" => safe_string(envelope.model_provider),
       "source_contract_digest" => envelope.source_contract_digest,
       "requested_action_summary" => summarize_requested_actions(envelope.requested_actions),
       "effective_actions" => stringify_action_values(envelope.effective_actions),
-      "isolation_baseline" => to_string(envelope.isolation_baseline),
-      "required_isolation_baseline" => to_string(envelope.required_isolation_baseline),
-      "home_mode" => to_string(envelope.home_mode),
+      "isolation_baseline" => safe_string(envelope.isolation_baseline),
+      "required_isolation_baseline" => safe_string(envelope.required_isolation_baseline),
+      "home_mode" => safe_string(envelope.home_mode),
       "environment_names" => envelope.environment |> Map.keys() |> Enum.sort(),
       "credential_classes" => Enum.map(envelope.credential_classes, &to_string/1),
       "bypass" => stringify_action_values(envelope.bypass)
@@ -64,12 +64,14 @@ defmodule Rondo.Agent.ChildLaunchEnvelope do
     |> Map.new()
   end
 
-  defp summarize_requested_actions(actions) do
+  defp summarize_requested_actions(actions) when is_map(actions) do
     Map.new(actions, fn
       {key, values} when is_list(values) -> {to_string(key), length(values)}
       {key, _value} -> {to_string(key), true}
     end)
   end
+
+  defp summarize_requested_actions(_actions), do: %{}
 
   defp stringify_action_values(values) when is_map(values) do
     Map.new(values, fn {key, value} -> {to_string(key), stringify_value(value)} end)
@@ -77,4 +79,9 @@ defmodule Rondo.Agent.ChildLaunchEnvelope do
 
   defp stringify_value(value) when is_atom(value), do: to_string(value)
   defp stringify_value(value), do: value
+
+  defp safe_string(nil), do: nil
+  defp safe_string(value) when is_binary(value), do: value
+  defp safe_string(value) when is_atom(value), do: to_string(value)
+  defp safe_string(_value), do: "invalid"
 end

@@ -5,11 +5,19 @@ defmodule Rondo.RunOnceTest do
 
   alias Rondo.RunOnce
 
-  test "manifest execution rejects the supervised child credential bypass before loading input" do
-    assert {:error, :manifest_child_credential_bypass_forbidden} =
-             RunOnce.run_manifest("does-not-matter.json",
-               agent_opts: [unsafe_child_credential_bypass: true]
+  test "manifest execution preserves bypass intent but forces manifest provenance for policy evidence" do
+    parent = self()
+    manifest_path = write_manifest!(%{schema: "rondo-execution-request-v1", slice_id: "slice-bypass", prompt: "Do not launch."})
+
+    assert :ok =
+             RunOnce.run_manifest(manifest_path,
+               deps: deps([], parent),
+               agent_opts: [unsafe_child_credential_bypass: true, dispatch_origin: :run_once]
              )
+
+    assert_received {:agent_run, %Issue{id: "slice-bypass"}, agent_opts}
+    assert Keyword.fetch!(agent_opts, :unsafe_child_credential_bypass)
+    assert Keyword.fetch!(agent_opts, :dispatch_origin) == :manifest
   end
 
   test "runs exactly one visible active issue" do

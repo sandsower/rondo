@@ -30,19 +30,41 @@ defmodule Rondo.Agent.ChildLaunchPolicy do
 
   @type resolution :: {:ok, ChildLaunchEnvelope.t()} | {:block, ChildLaunchEnvelope.t()}
 
-  @spec resolve(keyword()) :: resolution()
+  @manifest_schemas ["approved-slice-v1", "rondo-execution-request-v1"]
+
+  @spec resolve(term()) :: resolution()
   def resolve(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      do_resolve(opts)
+    else
+      invalid_resolution(:invalid_options)
+    end
+  end
+
+  def resolve(_opts), do: invalid_resolution(:invalid_options)
+
+  defp do_resolve(opts) do
     inherited_env = Keyword.get(opts, :inherited_env, System.get_env())
     run_mode = Keyword.get(opts, :run_mode, "unattended-auto")
-    origin = Keyword.get(opts, :dispatch_origin, :daemon)
-    adapter = Keyword.fetch!(opts, :adapter)
+    source_contract = Keyword.get(opts, :source_contract, %{})
+    origin = authoritative_origin(Keyword.get(opts, :dispatch_origin, :daemon), source_contract)
+    adapter = Keyword.get(opts, :adapter)
     model = Keyword.get(opts, :model)
-    source_contract = Keyword.get(opts, :source_contract, %{}) || %{}
     isolation_baseline = Keyword.get(opts, :isolation_baseline, :env_home_scoped)
     unsafe_bypass = Keyword.get(opts, :unsafe_bypass, false)
-    run_dir = Keyword.fetch!(opts, :run_dir)
+    run_dir = Keyword.get(opts, :run_dir)
 
-    with :ok <- validate_host_inputs(run_mode, origin, isolation_baseline, adapter, run_dir, inherited_env),
+    with :ok <-
+           validate_host_inputs(
+             run_mode,
+             origin,
+             isolation_baseline,
+             adapter,
+             model,
+             run_dir,
+             inherited_env,
+             unsafe_bypass
+           ),
          {:ok, requested_actions} <- requested_actions(source_contract),
          {:ok, provider_env_names, model_provider} <- provider_environment_names(adapter, model, opts) do
       effective_actions = effective_actions(requested_actions)
@@ -75,12 +97,14 @@ defmodule Rondo.Agent.ChildLaunchPolicy do
   @spec sanitize(ChildLaunchEnvelope.t()) :: map()
   def sanitize(envelope), do: ChildLaunchEnvelope.sanitized(envelope)
 
-  defp validate_host_inputs(run_mode, origin, isolation_baseline, adapter, run_dir, inherited_env) do
+  defp validate_host_inputs(run_mode, origin, isolation_baseline, adapter, model, run_dir, inherited_env, unsafe_bypass) do
     with :ok <- validate_member(run_mode, @valid_run_modes, :invalid_run_mode),
          :ok <- validate_member(origin, @valid_origins, :invalid_dispatch_origin),
          :ok <- validate_isolation_baseline(isolation_baseline),
          :ok <- validate_nonempty_string(adapter, :invalid_adapter),
-         :ok <- validate_nonempty_string(run_dir, :invalid_run_dir) do
+         :ok <- validate_optional_string(model, :invalid_model),
+         :ok <- validate_nonempty_string(run_dir, :invalid_run_dir),
+         :ok <- validate_boolean(unsafe_bypass, :invalid_unsafe_bypass) do
       validate_environment(inherited_env)
     end
   end
@@ -99,6 +123,12 @@ defmodule Rondo.Agent.ChildLaunchPolicy do
 
   defp validate_nonempty_string(_value, reason), do: {:error, reason}
 
+  defp validate_optional_string(nil, _reason), do: :ok
+  defp validate_optional_string(value, reason), do: validate_nonempty_string(value, reason)
+
+  defp validate_boolean(value, _reason) when is_boolean(value), do: :ok
+  defp validate_boolean(_value, reason), do: {:error, reason}
+
   defp validate_environment(environment) when is_map(environment) do
     if Enum.all?(environment, fn {name, value} -> is_binary(name) and is_binary(value) end) do
       :ok
@@ -110,7 +140,7 @@ defmodule Rondo.Agent.ChildLaunchPolicy do
   defp validate_environment(_environment), do: {:error, :invalid_inherited_environment}
 
   defp requested_actions(source_contract) when is_map(source_contract) do
-    case Map.get(source_contract, :allowed_actions) || Map.get(source_contract, "allowed_actions") do
+    case source_contract_value(source_contract, :allowed_actions, "allowed_actions") do
       nil -> {:ok, %{}}
       value when is_map(value) -> validate_requested_actions(value)
       _other -> {:error, :invalid_allowed_actions}
@@ -120,22 +150,33 @@ defmodule Rondo.Agent.ChildLaunchPolicy do
   defp requested_actions(_source_contract), do: {:error, :invalid_source_contract}
 
   defp validate_requested_actions(actions) do
-    normalized = Map.new(actions, fn {key, value} -> {to_string(key), value} end)
-    unknown_keys = Map.keys(normalized) -- @action_keys
+    with {:ok, normalized} <- normalize_requested_actions(actions) do
+      unknown_keys = Map.keys(normalized) -- @action_keys
 
-    cond do
-      unknown_keys != [] ->
-        {:error, :invalid_allowed_actions}
+      cond do
+        unknown_keys != [] ->
+          {:error, :invalid_allowed_actions}
 
-      not valid_optional_string?(Map.get(normalized, "run_mode")) ->
-        {:error, :invalid_allowed_actions}
+        not valid_optional_string?(Map.get(normalized, "run_mode")) ->
+          {:error, :invalid_allowed_actions}
 
-      Enum.any?(~w(allow ask deny), &(not valid_action_list?(Map.get(normalized, &1)))) ->
-        {:error, :invalid_allowed_actions}
+        Enum.any?(~w(allow ask deny), &(not valid_action_list?(Map.get(normalized, &1)))) ->
+          {:error, :invalid_allowed_actions}
 
-      true ->
-        {:ok, normalized}
+        true ->
+          {:ok, normalized}
+      end
     end
+  end
+
+  defp normalize_requested_actions(actions) do
+    Enum.reduce_while(actions, {:ok, %{}}, fn
+      {key, value}, {:ok, normalized} when is_atom(key) or is_binary(key) ->
+        {:cont, {:ok, Map.put(normalized, to_string(key), value)}}
+
+      _entry, _acc ->
+        {:halt, {:error, :invalid_allowed_actions}}
+    end)
   end
 
   defp valid_optional_string?(nil), do: true
@@ -199,6 +240,24 @@ defmodule Rondo.Agent.ChildLaunchPolicy do
   end
 
   defp provider_from_model(adapter, _model), do: adapter
+
+  defp authoritative_origin(claimed_origin, source_contract) when is_map(source_contract) do
+    if manifest_source_contract?(source_contract), do: :manifest, else: claimed_origin
+  end
+
+  defp authoritative_origin(claimed_origin, _source_contract), do: claimed_origin
+
+  defp manifest_source_contract?(source_contract) do
+    source_contract_value(source_contract, :schema, "schema") in @manifest_schemas
+  end
+
+  defp source_contract_value(source_contract, atom_key, string_key) do
+    cond do
+      Map.has_key?(source_contract, atom_key) -> Map.get(source_contract, atom_key)
+      Map.has_key?(source_contract, string_key) -> Map.get(source_contract, string_key)
+      true -> nil
+    end
+  end
 
   defp scoped_environment(inherited_env, provider_env_names, run_dir, adapter) do
     operational = Map.take(inherited_env, @operational_env_names)
@@ -264,6 +323,10 @@ defmodule Rondo.Agent.ChildLaunchPolicy do
 
   defp launch_decision(run_mode, origin, isolation_baseline, unsafe_bypass) do
     cond do
+      unsafe_bypass and origin == :manifest ->
+        bypass = %{requested: true, applied: false, reason: :manifest_forbidden}
+        {:block, :manifest_child_credential_bypass_forbidden, bypass}
+
       sufficient_isolation?(isolation_baseline) ->
         {:allow, :isolation_satisfied, %{requested: unsafe_bypass, applied: false, reason: :not_needed}}
 
@@ -280,7 +343,10 @@ defmodule Rondo.Agent.ChildLaunchPolicy do
     Map.fetch!(@isolation_ranks, baseline) >= Map.fetch!(@isolation_ranks, @required_isolation_baseline)
   end
 
-  defp resolution(%ChildLaunchEnvelope{decision: :block} = envelope), do: {:block, envelope}
+  defp resolution(%ChildLaunchEnvelope{decision: :block} = envelope) do
+    {:block, %{envelope | environment: %{}, home_path: nil}}
+  end
+
   defp resolution(%ChildLaunchEnvelope{} = envelope), do: {:ok, envelope}
 
   defp invalid_envelope(opts, run_mode, origin, adapter, model, isolation_baseline, run_dir, reason) do
@@ -304,8 +370,13 @@ defmodule Rondo.Agent.ChildLaunchPolicy do
       home_path: invalid_home_path(run_dir, adapter),
       environment: %{},
       effective_actions: denied_actions,
-      bypass: %{requested: Keyword.get(opts, :unsafe_bypass, false), applied: false, reason: :invalid_request}
+      bypass: %{requested: Keyword.get(opts, :unsafe_bypass, false) === true, applied: false, reason: :invalid_request}
     )
+  end
+
+  defp invalid_resolution(reason) do
+    envelope = invalid_envelope([], nil, :invalid, nil, nil, :invalid, nil, reason)
+    {:block, envelope}
   end
 
   defp invalid_home_path(run_dir, adapter)
