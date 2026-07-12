@@ -102,6 +102,7 @@ defmodule Rondo.Core.EventFeed do
     with {:ok, ctx} <- context(request),
          {:ok, offset} <- parse_cursor(ctx.event_cursor),
          {:ok, run_dir, manifest} <- load(ctx, opts),
+         {:ok, ctx} <- durable_context(ctx, manifest),
          {:ok, all} <- project(manifest, run_dir, ctx) do
       if offset <= length(all) do
         events = page_events(all, offset, ctx)
@@ -126,16 +127,19 @@ defmodule Rondo.Core.EventFeed do
   def run_status(request, opts \\ []) do
     with {:ok, ctx} <- context(request),
          {:ok, run_dir, manifest} <- load(ctx, opts),
+         {:ok, ctx} <- durable_context(ctx, manifest),
          {:ok, all} <- project(manifest, run_dir, ctx) do
-      response = %{
-        "surface" => @surface,
-        "repo_id" => ctx.repo_id,
-        "run_id" => ctx.run_id,
-        "status" => external_status(Map.get(manifest, "status")),
-        "last_event" => bounded_event(List.last(all), @status_max_last_event_bytes),
-        "evidence_pointers" => bounded_evidence_pointers(all, ctx.run_id),
-        "event_cursor" => initial_cursor()
-      }
+      response =
+        %{
+          "surface" => @surface,
+          "repo_id" => ctx.repo_id,
+          "run_id" => ctx.run_id,
+          "status" => external_status(Map.get(manifest, "status")),
+          "last_event" => bounded_event(List.last(all), @status_max_last_event_bytes),
+          "evidence_pointers" => bounded_evidence_pointers(all, ctx.run_id),
+          "event_cursor" => initial_cursor()
+        }
+        |> maybe_put_plot_id(ctx.plot_id)
 
       {:ok, bound_projected_value(response)}
     end
@@ -174,6 +178,14 @@ defmodule Rondo.Core.EventFeed do
     end
   end
 
+  defp durable_context(ctx, manifest) do
+    plot_id = get_in(manifest, ["admission", "plot_id"])
+
+    with :ok <- validate_optional_external_identifier(plot_id, :plot_id) do
+      {:ok, Map.put(ctx, :plot_id, plot_id)}
+    end
+  end
+
   defp project(manifest, run_dir, ctx) do
     with {:ok, descriptors} <- CoreEventIndex.project(manifest, run_dir) do
       events =
@@ -207,14 +219,16 @@ defmodule Rondo.Core.EventFeed do
   end
 
   defp events_response(ctx, events, next_cursor, has_more) do
-    bound_projected_value(%{
+    %{
       "surface" => @surface,
       "repo_id" => ctx.repo_id,
       "run_id" => ctx.run_id,
       "events" => events,
       "next_event_cursor" => next_cursor,
       "has_more" => has_more
-    })
+    }
+    |> maybe_put_plot_id(ctx.plot_id)
+    |> bound_projected_value()
   end
 
   defp bounded_event(nil, _max_bytes), do: nil
@@ -236,7 +250,7 @@ defmodule Rondo.Core.EventFeed do
   defp bounded_namespace(namespace) when is_map(namespace) do
     bounded =
       namespace
-      |> Map.take(["repo_id", "run_id", "service_id"])
+      |> Map.take(["repo_id", "run_id", "service_id", "plot_id"])
       |> Enum.filter(fn {_key, value} ->
         is_binary(value) and byte_size(value) <= @diagnostic_namespace_max_value_bytes
       end)
@@ -276,6 +290,7 @@ defmodule Rondo.Core.EventFeed do
     |> Map.put("type", @run_status_changed)
     |> Map.put("repo_id", ctx.repo_id)
     |> Map.put("run_id", ctx.run_id)
+    |> maybe_put_plot_id(ctx.plot_id)
   end
 
   defp render_descriptor_type(%{"type" => "evidence"} = descriptor, ctx) do
@@ -283,13 +298,16 @@ defmodule Rondo.Core.EventFeed do
     |> Map.put("type", @run_evidence_recorded)
     |> Map.put("repo_id", ctx.repo_id)
     |> Map.put("run_id", ctx.run_id)
+    |> maybe_put_plot_id(ctx.plot_id)
   end
 
   defp descriptor_namespace(%{"type" => "service_status"}, ctx),
     do: %{"service_id" => ctx.service_id}
 
   defp descriptor_namespace(_descriptor, ctx),
-    do: %{"repo_id" => ctx.repo_id, "run_id" => ctx.run_id}
+    do:
+      %{"repo_id" => ctx.repo_id, "run_id" => ctx.run_id}
+      |> maybe_put_plot_id(ctx.plot_id)
 
   defp bounded_evidence_pointers(events, run_id) do
     events
@@ -351,12 +369,22 @@ defmodule Rondo.Core.EventFeed do
   defp validate_external_identifier(_value, field),
     do: {:error, invalid_identifier_error(field)}
 
+  defp validate_optional_external_identifier(nil, _field), do: :ok
+
+  defp validate_optional_external_identifier(value, field),
+    do: validate_external_identifier(value, field)
+
   defp missing_identifier_error(:service_id), do: :missing_service_id
   defp missing_identifier_error(:repo_id), do: :missing_repo_id
   defp missing_identifier_error(:run_id), do: :missing_run_id
+  defp missing_identifier_error(:plot_id), do: :missing_plot_id
   defp invalid_identifier_error(:service_id), do: :invalid_service_id
   defp invalid_identifier_error(:repo_id), do: :invalid_repo_id
   defp invalid_identifier_error(:run_id), do: :invalid_run_id
+  defp invalid_identifier_error(:plot_id), do: :invalid_plot_id
+
+  defp maybe_put_plot_id(map, nil), do: map
+  defp maybe_put_plot_id(map, plot_id), do: Map.put(map, "plot_id", plot_id)
 
   defp external_status(status)
        when status in ~w(running paused completed failed terminated handed_off aborted),
