@@ -1024,6 +1024,7 @@ defmodule Rondo.AgentAdapterTest do
                  agent_adapter: PiAdapter,
                  process_provider: FakeProcessProvider,
                  run_ledger: ledger,
+                 child_isolation_baseline: :os_credential_isolated,
                  gates: [],
                  issue_state_fetcher: issue_state_fetcher
                )

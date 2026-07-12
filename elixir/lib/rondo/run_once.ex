@@ -32,7 +32,7 @@ defmodule Rondo.RunOnce do
   @spec run(String.t(), keyword()) :: run_result()
   def run(issue_id, opts) when is_binary(issue_id) do
     deps = Keyword.get(opts, :deps, runtime_deps())
-    agent_opts = Keyword.get(opts, :agent_opts, [])
+    agent_opts = opts |> Keyword.get(:agent_opts, []) |> Keyword.put_new(:dispatch_origin, :run_once)
 
     with :ok <- validate_issue_id(issue_id),
          :ok <- Config.validate!(),
@@ -51,7 +51,7 @@ defmodule Rondo.RunOnce do
   def run_manifest(path, opts \\ []) do
     if is_binary(path) do
       deps = Keyword.get(opts, :deps, runtime_deps())
-      agent_opts = Keyword.get(opts, :agent_opts, [])
+      agent_opts = opts |> Keyword.get(:agent_opts, []) |> Keyword.put(:dispatch_origin, :manifest)
 
       with :ok <- Config.validate!(),
            {:ok, %{issue: issue, source_contract: source_contract}} <- ExecutionRequest.load(path),
@@ -65,7 +65,9 @@ defmodule Rondo.RunOnce do
   end
 
   defp manifest_agent_opts(agent_opts) do
-    Keyword.put_new(agent_opts, :issue_state_fetcher, &AgentRunner.no_tracker_issue_state_fetcher/1)
+    agent_opts
+    |> Keyword.put(:dispatch_origin, :manifest)
+    |> Keyword.put_new(:issue_state_fetcher, &AgentRunner.no_tracker_issue_state_fetcher/1)
   end
 
   # Threads the per-run frozen policy file (copied into the run dir at ledger
@@ -287,7 +289,9 @@ defmodule Rondo.RunOnce do
   end
 
   defp maybe_put_source_contract_agent_opt(agent_opts, nil), do: agent_opts
-  defp maybe_put_source_contract_agent_opt(agent_opts, source_contract) when is_map(source_contract), do: Keyword.put_new(agent_opts, :source_contract, source_contract)
+
+  defp maybe_put_source_contract_agent_opt(agent_opts, source_contract) when is_map(source_contract),
+    do: Keyword.put(agent_opts, :source_contract, source_contract)
 
   defp do_run_agent_with_ledger(issue, deps, agent_opts, ledger) do
     agent_opts =

@@ -4,6 +4,7 @@ defmodule Rondo.Claude.CLI do
   """
 
   require Logger
+  alias Rondo.Agent.ChildHome
   alias Rondo.Claude.StreamParser
   alias Rondo.{Config, PathSafety, RemoteShell}
 
@@ -55,19 +56,17 @@ defmodule Rondo.Claude.CLI do
       # via `kill -- -$PID`, preventing orphan Claude processes when Rondo exits
       # or the agent is terminated.
       with {:ok, spawn_target, spawn_args} <- spawn_invocation(command, args, workspace, opts) do
-        port =
-          Port.open(
-            {:spawn_executable, spawn_target},
-            [
-              :binary,
-              :exit_status,
-              :stderr_to_stdout,
-              {:line, @port_line_bytes},
-              {:cd, Path.expand(workspace)},
-              {:args, spawn_args},
-              {:env, [{~c"CLAUDECODE", false}]}
-            ]
-          )
+        port_options = [
+          :binary,
+          :exit_status,
+          :stderr_to_stdout,
+          {:line, @port_line_bytes},
+          {:cd, Path.expand(workspace)},
+          {:args, spawn_args},
+          {:env, child_environment(opts, [{~c"CLAUDECODE", false}])}
+        ]
+
+        port = Port.open({:spawn_executable, spawn_target}, port_options)
 
         now = System.monotonic_time(:millisecond)
         deadline = now + turn_timeout_ms
@@ -136,6 +135,13 @@ defmodule Rondo.Claude.CLI do
               {:error, :stall_timeout}
             end
         end
+    end
+  end
+
+  defp child_environment(opts, fallback) do
+    case Keyword.get(opts, :child_launch_envelope) do
+      nil -> fallback
+      envelope -> ChildHome.port_environment(envelope)
     end
   end
 

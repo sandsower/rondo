@@ -223,6 +223,52 @@ defmodule Rondo.OrchestratorExecutionRequestTest do
     send(plot_b_pid, :complete)
   end
 
+  test "trackerless Core admits an approved request without tracker configuration" do
+    parent = self()
+    workspace_root = tmp_dir("core-trackerless-admission")
+    export = approved_export(workspace_root, "slice-trackerless-admission")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_repo: nil,
+      workspace_root: workspace_root,
+      max_concurrent_agents: 1,
+      poll_interval_ms: 60_000
+    )
+
+    {:ok, core_pid} =
+      Orchestrator.start_link(
+        name: unique_name(:TrackerlessAdmission),
+        service_mode: :trackerless_core,
+        tracker_polling: false,
+        execution_request_runner: blocking_runner(parent)
+      )
+
+    {:ok, daemon_pid} =
+      Orchestrator.start_link(
+        name: unique_name(:TrackerDaemonAdmission),
+        tracker_polling: false,
+        execution_request_runner: blocking_runner(parent)
+      )
+
+    on_exit(fn ->
+      stop_orchestrator(core_pid)
+      stop_orchestrator(daemon_pid)
+      File.rm_rf(workspace_root)
+    end)
+
+    core_request = request(export, "repo-trackerless-admission")
+    assert {:ok, submitted} = Orchestrator.submit_execution_request(core_pid, core_request)
+    assert submitted.status == "running"
+    assert_receive {:execution_runner_started, runner_pid, _issue, _opts}, 1_000
+
+    assert {:error, {:configuration_invalid, {:invalid_workflow_config, _, errors}}} =
+             Orchestrator.submit_execution_request(daemon_pid, core_request)
+
+    assert Enum.any?(errors, &(&1.path == "tracker.repo"))
+    send(runner_pid, :complete)
+  end
+
   test "archives a failed execution request without tracker retry and deduplicates the terminal run" do
     parent = self()
     workspace_root = tmp_dir("core-failure")
@@ -530,7 +576,10 @@ defmodule Rondo.OrchestratorExecutionRequestTest do
     {:ok, pid} =
       Orchestrator.start_link(
         name: unique_name(:CorePause),
-        execution_request_runner: blocking_runner(parent)
+        execution_request_runner: blocking_runner(parent),
+        service_mode: :trackerless_core,
+        tracker_polling: false,
+        core_maintenance_interval_ms: 60_000
       )
 
     request = request(export, "repo-pause", "OLI-52")
@@ -566,7 +615,22 @@ defmodule Rondo.OrchestratorExecutionRequestTest do
     assert {:ok, paused_manifest} = RunLedger.load_manifest(paused.run_dir)
     assert paused_manifest["status"] == "paused"
 
-    send(pid, :run_poll_cycle)
+    tracker_run_dir = Path.join([workspace_root, ".rondo_runs", "tracker-pause", "attempt-1"])
+    tracker_manifest_path = Path.join(tracker_run_dir, "manifest.json")
+
+    tracker_manifest =
+      paused_manifest
+      |> Map.put("source", "tracker")
+      |> Map.put("run_id", "tracker-pause-run")
+      |> Map.put("run_dir", tracker_run_dir)
+      |> Map.put("issue", Map.merge(paused_manifest["issue"], %{"id" => "tracker-pause", "identifier" => "TRACKER-PAUSE"}))
+      |> Map.update("repo", %{}, &Map.delete(&1, "repo_id"))
+      |> Map.delete("source_contract")
+
+    File.mkdir_p!(tracker_run_dir)
+    File.write!(tracker_manifest_path, Jason.encode!(tracker_manifest))
+
+    send(pid, :core_maintenance)
 
     assert eventually(fn ->
              Enum.any?(Orchestrator.snapshot(pid, 1_000).paused, &(&1.run_id == submitted.run_id))
@@ -574,7 +638,13 @@ defmodule Rondo.OrchestratorExecutionRequestTest do
 
     stop_orchestrator(pid)
 
-    {:ok, restarted_pid} = Orchestrator.start_link(name: unique_name(:CorePauseRestart))
+    {:ok, restarted_pid} =
+      Orchestrator.start_link(
+        name: unique_name(:CorePauseRestart),
+        service_mode: :trackerless_core,
+        tracker_polling: false,
+        core_maintenance_interval_ms: 60_000
+      )
 
     on_exit(fn ->
       stop_orchestrator(restarted_pid)
@@ -592,6 +662,7 @@ defmodule Rondo.OrchestratorExecutionRequestTest do
     assert restarted_paused.plot_id == "OLI-52"
     assert restarted_paused.manifest_sha256 == export.digest
     assert restarted_paused.tracker_visibility == "not_applicable"
+    refute Enum.any?(Orchestrator.snapshot(restarted_pid, 1_000).paused, &(&1.issue_id == "tracker-pause"))
 
     assert {:ok, duplicate} = Orchestrator.submit_execution_request(restarted_pid, request)
     assert duplicate.run_id == submitted.run_id
@@ -615,7 +686,10 @@ defmodule Rondo.OrchestratorExecutionRequestTest do
     {:ok, pid} =
       Orchestrator.start_link(
         name: unique_name(:CoreStalled),
-        execution_request_runner: blocking_runner(parent)
+        execution_request_runner: blocking_runner(parent),
+        service_mode: :trackerless_core,
+        tracker_polling: false,
+        core_maintenance_interval_ms: 60_000
       )
 
     on_exit(fn ->
@@ -628,7 +702,7 @@ defmodule Rondo.OrchestratorExecutionRequestTest do
 
     assert_receive {:execution_runner_started, _runner_pid, _issue, _opts}, 1_000
     Process.sleep(10)
-    send(pid, :run_poll_cycle)
+    send(pid, :core_maintenance)
 
     archived =
       eventually(fn ->

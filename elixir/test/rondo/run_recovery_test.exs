@@ -259,6 +259,7 @@ defmodule Rondo.RunRecoveryTest do
     assert is_pid(replacement_orchestrator)
     assert is_pid(replacement_task_supervisor)
     refute replacement_task_supervisor == original_task_supervisor
+    _initialized_state = :sys.get_state(replacement_orchestrator)
 
     assert {:ok, located} =
              RunLocator.locate(
@@ -354,6 +355,7 @@ defmodule Rondo.RunRecoveryTest do
     assert is_pid(replacement_orchestrator)
     assert is_pid(replacement_task_supervisor)
     refute replacement_task_supervisor == original_task_supervisor
+    _initialized_state = :sys.get_state(replacement_orchestrator)
 
     assert {:ok, located} =
              RunLocator.locate(
@@ -456,6 +458,7 @@ defmodule Rondo.RunRecoveryTest do
       end)
 
     assert is_pid(replacement_orchestrator)
+    _initialized_state = :sys.get_state(replacement_orchestrator)
 
     assert {:ok, located} =
              RunLocator.locate(

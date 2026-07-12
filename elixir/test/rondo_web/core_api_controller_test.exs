@@ -28,6 +28,20 @@ defmodule RondoWeb.CoreApiControllerTest do
     end
   end
 
+  defmodule IdentityStub do
+    @spec snapshot(GenServer.server()) :: map()
+    def snapshot(orchestrator) do
+      send(self_config().test_pid, {:health_snapshot, orchestrator})
+
+      case self_config().health_result do
+        {:raise, message} -> raise message
+        result -> result
+      end
+    end
+
+    defp self_config, do: Application.fetch_env!(:rondo, :core_api_controller_test)
+  end
+
   setup do
     previous_endpoint_config = Application.get_env(:rondo, RondoWeb.Endpoint, [])
     previous_test_config = Application.get_env(:rondo, :core_api_controller_test)
@@ -36,6 +50,7 @@ defmodule RondoWeb.CoreApiControllerTest do
       previous_endpoint_config
       |> Keyword.put(:core_orchestrator, CoreOrchestratorStub)
       |> Keyword.put(:core_event_feed, EventFeedStub)
+      |> Keyword.put(:core_identity, IdentityStub)
       |> Keyword.put(:core_service_id, "service-test")
       |> Keyword.put(:orchestrator, :orchestrator_test)
 
@@ -74,7 +89,16 @@ defmodule RondoWeb.CoreApiControllerTest do
          "next_event_cursor" => "rondo.core/v1:0",
          "has_more" => false,
          "run_dir" => "/must/not/leak"
-       }}
+       }},
+      %{
+        "surface" => "rondo.core/v1",
+        "runtime_version" => "0.1.0",
+        "instance_id" => "019b8941-4a0c-7ad5-b7ef-cb3c45e4a819",
+        "service_mode" => "trackerless_core",
+        "ready" => true,
+        "active_run_count" => 0,
+        "internal_path" => "/must/not/leak"
+      }
     )
 
     on_exit(fn ->
@@ -88,6 +112,34 @@ defmodule RondoWeb.CoreApiControllerTest do
     end)
 
     :ok
+  end
+
+  test "GET health returns the exact loopback Core identity without internal state" do
+    conn = request(:get, "/api/v1/health")
+
+    assert decoded_response(conn, 200) == %{
+             "active_run_count" => 0,
+             "instance_id" => "019b8941-4a0c-7ad5-b7ef-cb3c45e4a819",
+             "ready" => true,
+             "runtime_version" => "0.1.0",
+             "service_mode" => "trackerless_core",
+             "surface" => "rondo.core/v1"
+           }
+
+    assert_receive {:health_snapshot, :orchestrator_test}
+    refute conn.resp_body =~ "internal_path"
+    refute conn.resp_body =~ "/must/not/leak"
+  end
+
+  test "GET health maps identity failures to the stable unavailable envelope" do
+    for failure <- [{:raise, "identity unavailable"}, nil, []] do
+      set_health_result(failure)
+
+      conn = request(:get, "/api/v1/health")
+
+      assert %{"error" => %{"code" => "core_unavailable"}} = decoded_response(conn, 503)
+      refute conn.resp_body =~ "identity unavailable"
+    end
   end
 
   test "POST execution-requests submits a validated request and returns 202 for a new run" do
@@ -646,6 +698,7 @@ defmodule RondoWeb.CoreApiControllerTest do
         "TOP-SECRET\r\n--rondo-boundary--\r\n"
 
     cases = [
+      {:get, "/api/v1/health", "", "application/json"},
       {:post, "/api/v1/execution-requests", ~s({"manifest_path":), "application/json"},
       {:get, "/api/v1/runs/run-test?repo_id=repo-test", ~s({"invalid":), "application/json"},
       {:get, "/api/v1/runs/run-test/events?repo_id=repo-test", multipart_body, "multipart/form-data; boundary=rondo-boundary"}
@@ -717,6 +770,7 @@ defmodule RondoWeb.CoreApiControllerTest do
     refute_received {:submit_execution_request, _, _}
 
     for path <- [
+          "/api/v1/health",
           "/api/v1/runs/run-test?repo_id=repo-test",
           "/api/v1/runs/run-test/events?repo_id=repo-test"
         ] do
@@ -729,6 +783,9 @@ defmodule RondoWeb.CoreApiControllerTest do
   end
 
   test "Core endpoints accept IPv4 127/8 and IPv6 loopback callers" do
+    health_conn = request(:get, "/api/v1/health", nil, remote_ip: {127, 42, 5, 9})
+    assert %{"ready" => true} = decoded_response(health_conn, 200)
+
     status_conn =
       request(:get, "/api/v1/runs/run-test?repo_id=repo-test", nil, remote_ip: {127, 42, 5, 9})
 
@@ -750,12 +807,13 @@ defmodule RondoWeb.CoreApiControllerTest do
     }
   end
 
-  defp set_stub_results(submit_result, status_result, events_result) do
+  defp set_stub_results(submit_result, status_result, events_result, health_result) do
     Application.put_env(:rondo, :core_api_controller_test, %{
       test_pid: self(),
       submit_result: submit_result,
       status_result: status_result,
-      events_result: events_result
+      events_result: events_result,
+      health_result: health_result
     })
   end
 
@@ -769,6 +827,10 @@ defmodule RondoWeb.CoreApiControllerTest do
 
   defp set_events_result(result) do
     update_stub_result(:events_result, result)
+  end
+
+  defp set_health_result(result) do
+    update_stub_result(:health_result, result)
   end
 
   defp update_stub_result(key, result) do

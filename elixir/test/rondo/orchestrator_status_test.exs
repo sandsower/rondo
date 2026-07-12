@@ -3864,6 +3864,10 @@ defmodule Rondo.OrchestratorStatusTest do
       ledger: nil
     }
 
+    # A real paused run always has an existing workspace. Materialize the
+    # synthetic fixture so resume cannot race a missing-directory setup path.
+    File.mkdir_p!(paused_entry.workspace)
+
     :sys.replace_state(pid, fn state ->
       %{state | paused_interrupts: %{issue.id => paused_entry}, claimed: MapSet.new([issue.id])}
     end)
@@ -3873,13 +3877,23 @@ defmodule Rondo.OrchestratorStatusTest do
     assert {:ok, %{status: :resumed}} =
              Orchestrator.submit_guidance(orchestrator_name, issue.id, "Please reuse the existing fix and add the missing regression test.")
 
-    trace =
+    trace_or_failure =
       wait_until(fn ->
-        "#{trace_file}.*"
-        |> Path.wildcard()
-        |> Enum.map(&File.read!/1)
-        |> Enum.find(&String.contains?(&1, "--resume\npaused-session"))
+        trace =
+          "#{trace_file}.*"
+          |> Path.wildcard()
+          |> Enum.map(&File.read!/1)
+          |> Enum.find(&String.contains?(&1, "--resume\npaused-session"))
+
+        trace ||
+          case GenServer.call(pid, :snapshot).archived do
+            [entry | _] -> {:archived, entry}
+            [] -> nil
+          end
       end)
+
+    assert is_binary(trace_or_failure), "resume failed before invocation: #{inspect(trace_or_failure)}"
+    trace = trace_or_failure
 
     assert trace =~ "--resume\npaused-session"
     assert trace =~ "Operator guidance for paused run"

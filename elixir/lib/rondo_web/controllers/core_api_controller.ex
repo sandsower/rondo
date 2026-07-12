@@ -13,6 +13,12 @@ defmodule RondoWeb.CoreApiController do
   @max_identifier_bytes 512
   @control_character_pattern ~r/[\x00-\x1F\x7F-\x9F]/u
   @sha256_pattern ~r/\A[0-9a-f]{64}\z/
+  @instance_id_pattern ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
+
+  @spec health(Conn.t(), map()) :: Conn.t()
+  def health(conn, _params) do
+    loopback_only(conn, fn -> do_health(conn) end)
+  end
 
   @spec submit_execution_request(Conn.t(), map()) :: Conn.t()
   def submit_execution_request(conn, params) do
@@ -34,6 +40,42 @@ defmodule RondoWeb.CoreApiController do
       {:ok, request} -> submit_request(conn, request)
       {:error, :invalid_request} -> submit_error(conn, :invalid_request)
     end
+  end
+
+  defp do_health(conn) do
+    with {:ok, identity} <- core_identity_snapshot(),
+         true <- exact_required_echo?(identity, :surface, @surface),
+         {:ok, runtime_version} <- nonempty_response_string(identity, :runtime_version),
+         {:ok, instance_id} <- nonempty_response_string(identity, :instance_id),
+         true <- Regex.match?(@instance_id_pattern, instance_id),
+         {:ok, service_mode} <- nonempty_response_string(identity, :service_mode),
+         true <- service_mode in ["trackerless_core", "tracker_daemon"],
+         {:ok, ready} <- fetch_value(identity, :ready),
+         true <- is_boolean(ready),
+         {:ok, active_run_count} <- fetch_value(identity, :active_run_count),
+         true <- is_integer(active_run_count) and active_run_count >= 0 do
+      json(conn, %{
+        "surface" => @surface,
+        "runtime_version" => runtime_version,
+        "instance_id" => instance_id,
+        "service_mode" => service_mode,
+        "ready" => ready,
+        "active_run_count" => active_run_count
+      })
+    else
+      _invalid -> feed_error(conn, :unavailable)
+    end
+  end
+
+  defp core_identity_snapshot do
+    case core_identity().snapshot(orchestrator()) do
+      identity when is_map(identity) -> {:ok, identity}
+      _other -> :unavailable
+    end
+  rescue
+    _error -> :unavailable
+  catch
+    _kind, _reason -> :unavailable
   end
 
   defp do_run_status(conn, run_id, params) do
@@ -398,6 +440,7 @@ defmodule RondoWeb.CoreApiController do
 
   defp core_orchestrator, do: Endpoint.config(:core_orchestrator) || Rondo.Orchestrator
   defp core_event_feed, do: Endpoint.config(:core_event_feed) || Rondo.Core.EventFeed
+  defp core_identity, do: Endpoint.config(:core_identity) || Rondo.Core.Identity
   defp orchestrator, do: Endpoint.config(:orchestrator) || Rondo.Orchestrator
   defp service_id, do: Endpoint.config(:core_service_id) || "rondo-core"
 end
